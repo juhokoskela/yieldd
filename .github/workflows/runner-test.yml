@@ -1,0 +1,20 @@
+name: Runner test
+
+on:
+  workflow_dispatch:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'yieldd-runner-test'
+    runs-on: yieldd
+    timeout-minutes: 10
+    steps:
+      - name: Check Docker daemon
+        run: docker info
+      - name: Run a Docker container
+        run: docker run --rm hello-world

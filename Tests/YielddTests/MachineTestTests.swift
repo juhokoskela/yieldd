@@ -188,7 +188,18 @@ private final class RecordingRunnerBackend: RunnerBackend {
         }
     }
 
-    func exec(_ arguments: [String], on id: RunnerID) throws -> ProcessResult {
+    func exec(
+        _ arguments: [String],
+        standardInput: Data?,
+        timeout: TimeInterval?,
+        on id: RunnerID
+    ) throws -> ProcessResult {
+        #expect(standardInput == nil)
+        if arguments == ["docker", "info"] {
+            #expect(timeout == DockerReadiness.probeTimeout)
+        } else {
+            #expect(timeout == nil)
+        }
         calls.append(.exec(id, arguments))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall

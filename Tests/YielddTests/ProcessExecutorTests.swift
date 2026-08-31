@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import Yieldd
@@ -141,4 +142,229 @@ func preservesArgumentsWithoutShellInterpretation() throws {
     let result = try ProcessExecutor().execute(request)
 
     #expect(result.stdoutText == argument)
+}
+
+@Test
+func writesStandardInputWithoutAddingItToArguments() throws {
+    let standardInput = Data("secret value\nwith another line".utf8)
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/cat"),
+        arguments: [],
+        standardInput: standardInput
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationStatus == 0)
+    #expect(result.stdout == standardInput)
+    #expect(request.arguments.isEmpty)
+}
+
+@Test
+func childCanExitSuccessfullyWithoutReadingLargeInput() throws {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "exec 0<&-; sleep 0.05"],
+        standardInput: Data(repeating: 0, count: 1_000_000)
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationReason == .exit)
+    #expect(result.terminationStatus == 0)
+}
+
+@Test
+func childFailureOutranksBrokenPipeError() throws {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "exec 0<&-; echo 'machine not found' >&2; exit 7"],
+        standardInput: Data(repeating: 0, count: 1_000_000)
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationStatus == 7)
+    #expect(result.stderrText.contains("machine not found"))
+    #expect(throws: ProcessExecutionError.self) {
+        try result.requireSuccess(for: request)
+    }
+}
+
+@Test
+func terminatesProcessAfterTimeout() {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "while :; do :; done"],
+        timeout: 0.1
+    )
+
+    do {
+        _ = try ProcessExecutor().execute(request)
+        Issue.record("Expected the process to time out")
+    } catch let ProcessExecutionError.timedOut(actualRequest, result) {
+        #expect(actualRequest == request)
+        #expect(result.terminationReason == .uncaughtSignal)
+        #expect(result.terminationStatus == SIGTERM)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test
+func killsProcessThatIgnoresTerminationAfterTimeoutGracePeriod() {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "trap '' TERM; while :; do :; done"],
+        timeout: 0.1
+    )
+
+    do {
+        _ = try ProcessExecutor(terminationGracePeriod: 0.05).execute(request)
+        Issue.record("Expected the process to time out")
+    } catch let ProcessExecutionError.timedOut(actualRequest, result) {
+        #expect(actualRequest == request)
+        #expect(result.terminationReason == .uncaughtSignal)
+        #expect(result.terminationStatus == SIGKILL)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test
+func timeoutClosesDescriptorsHeldByDescendantAfterTerminatingParent() throws {
+    let execution = try executeWithDescendantHoldingOutput(parentAction: .wait)
+
+    try expectTimeout(
+        execution,
+        terminationReason: .uncaughtSignal,
+        terminationStatus: SIGKILL
+    )
+}
+
+@Test
+func timeoutRemainsActiveWhileDrainingPipesAfterParentExits() throws {
+    let execution = try executeWithDescendantHoldingOutput(parentAction: .exit)
+
+    try expectTimeout(
+        execution,
+        terminationReason: .exit,
+        terminationStatus: 0
+    )
+}
+
+private func executeWithDescendantHoldingOutput(
+    parentAction: RetainedDescriptorParentAction
+) throws -> RetainedDescriptorExecution {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yieldd-process-tree-\(UUID().uuidString)", isDirectory: true)
+    let childPIDURL = directory.appendingPathComponent("child.pid")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer {
+        terminateProcessRecorded(at: childPIDURL)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    let script = """
+        /bin/sh -c 'trap "" HUP TERM; exec /bin/sleep 30' &
+        echo $! > "$1"
+        echo 'waiting forever' >&2
+        if [ "$2" = exit ]; then
+            exit 0
+        fi
+        trap '' TERM
+        while :; do :; done
+        """
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: [
+            "-c", script,
+            "yieldd-timeout-test", childPIDURL.path, parentAction.rawValue,
+        ],
+        timeout: 0.2
+    )
+    let outcome = ProcessExecutionOutcome()
+    let completion = DispatchSemaphore(value: 0)
+
+    DispatchQueue.global().async {
+        outcome.store(Result {
+            try ProcessExecutor(terminationGracePeriod: 0.05).execute(request)
+        })
+        completion.signal()
+    }
+
+    let completedWithoutClosingDescendant = completion.wait(timeout: .now() + 2)
+    if completedWithoutClosingDescendant == .timedOut {
+        terminateProcessRecorded(at: childPIDURL)
+        _ = completion.wait(timeout: .now() + 2)
+    }
+
+    guard let result = outcome.result() else {
+        throw RetainedDescriptorTestError.didNotComplete
+    }
+
+    return RetainedDescriptorExecution(
+        request: request,
+        completedWithoutClosingDescendant: completedWithoutClosingDescendant,
+        result: result
+    )
+}
+
+private func expectTimeout(
+    _ execution: RetainedDescriptorExecution,
+    terminationReason: ProcessTerminationReason,
+    terminationStatus: Int32
+) throws {
+    #expect(execution.completedWithoutClosingDescendant == .success)
+    do {
+        _ = try execution.result.get()
+        Issue.record("Expected the process to time out")
+    } catch let ProcessExecutionError.timedOut(actualRequest, result) {
+        #expect(actualRequest == execution.request)
+        #expect(result.terminationReason == terminationReason)
+        #expect(result.terminationStatus == terminationStatus)
+        #expect(result.stderrText.contains("waiting forever"))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+private struct RetainedDescriptorExecution {
+    let request: ProcessRequest
+    let completedWithoutClosingDescendant: DispatchTimeoutResult
+    let result: Result<ProcessResult, any Error>
+}
+
+private enum RetainedDescriptorTestError: Error {
+    case didNotComplete
+}
+
+private enum RetainedDescriptorParentAction: String {
+    case wait
+    case exit
+}
+
+private func terminateProcessRecorded(at url: URL) {
+    guard let contents = try? String(contentsOf: url, encoding: .utf8),
+          let processIdentifier = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        return
+    }
+    Darwin.kill(processIdentifier, SIGKILL)
+}
+
+private final class ProcessExecutionOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResult: Result<ProcessResult, any Error>?
+
+    func store(_ result: Result<ProcessResult, any Error>) {
+        lock.lock()
+        storedResult = result
+        lock.unlock()
+    }
+
+    func result() -> Result<ProcessResult, any Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedResult
+    }
 }

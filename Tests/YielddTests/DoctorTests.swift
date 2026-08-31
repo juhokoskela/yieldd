@@ -4,9 +4,10 @@ import Testing
 
 @Test
 func doctorReportsSuccessfulChecks() throws {
-    let fixture = try ExecutableFixture(name: "container")
+    let fixture = try ExecutableFixture(names: ["container", "gh"])
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
         .success(processResult()),
         .success(processResult()),
     ])
@@ -20,13 +21,16 @@ func doctorReportsSuccessfulChecks() throws {
     #expect(report.succeeded)
     #expect(report.checks.map(\.status) == [
         .passed("supported"),
-        .passed(fixture.executable.path),
+        .passed(fixture.executable(named: "container").path),
         .passed("reachable"),
         .passed("available"),
+        .passed(fixture.executable(named: "gh").path),
+        .passed("authenticated"),
     ])
     #expect(executor.requests.map(\.arguments) == [
         ["system", "status", "--format", "json"],
         ["machine", "list", "--quiet"],
+        ["auth", "status", "--active", "--hostname", "github.com"],
     ])
     try report.requireSuccess()
 }
@@ -43,9 +47,14 @@ func doctorSkipsDependentChecksWhenContainerIsMissing() {
     ).run()
 
     #expect(!report.succeeded)
-    #expect(report.checks.count == 4)
+    #expect(report.checks.count == 6)
     #expect(report.checks[2].status == .skipped("container executable is unavailable"))
     #expect(report.checks[3].status == .skipped("container executable is unavailable"))
+    guard case .failed = report.checks[4].status else {
+        Issue.record("Expected the gh executable check to fail")
+        return
+    }
+    #expect(report.checks[5].status == .skipped("gh executable is unavailable"))
     #expect(executor.requests.isEmpty)
     #expect(throws: DoctorReportError.checksFailed) {
         try report.requireSuccess()
@@ -54,7 +63,7 @@ func doctorSkipsDependentChecksWhenContainerIsMissing() {
 
 @Test
 func doctorAggregatesHostAndSystemFailures() throws {
-    let fixture = try ExecutableFixture(name: "container")
+    let fixture = try ExecutableFixture(names: ["container"])
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult(stderr: "not running", status: 1)),
@@ -77,22 +86,54 @@ func doctorAggregatesHostAndSystemFailures() throws {
     ])
 }
 
+@Test
+func doctorChecksGitHubEvenWhenContainerIsMissing() throws {
+    let fixture = try ExecutableFixture(names: ["gh"])
+    defer { fixture.remove() }
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+
+    let report = Doctor(
+        executor: executor,
+        executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
+        supportsAppleSilicon: { true }
+    ).run()
+
+    #expect(!report.succeeded)
+    #expect(report.checks[4].status == .passed(fixture.executable(named: "gh").path))
+    #expect(report.checks[5].status == .passed("authenticated"))
+    #expect(executor.requests.map(\.arguments) == [
+        ["auth", "status", "--active", "--hostname", "github.com"],
+    ])
+}
+
 private struct ExecutableFixture {
     let directory: URL
-    let executable: URL
+    private let executables: [String: URL]
 
-    init(name: String) throws {
+    init(names: [String]) throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("yieldd-doctor-\(UUID().uuidString)", isDirectory: true)
-        executable = directory.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard FileManager.default.createFile(atPath: executable.path, contents: Data()) else {
-            throw TestFailure.unexpectedProcessRequest
+        var created: [String: URL] = [:]
+        for name in names {
+            let executable = directory.appendingPathComponent(name)
+            guard FileManager.default.createFile(atPath: executable.path, contents: Data()) else {
+                throw TestFailure.unexpectedProcessRequest
+            }
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: executable.path
+            )
+            created[name] = executable
         }
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: executable.path
-        )
+        executables = created
+    }
+
+    func executable(named name: String) -> URL {
+        guard let executable = executables[name] else {
+            preconditionFailure("Fixture has no executable named \(name)")
+        }
+        return executable
     }
 
     func remove() {

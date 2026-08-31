@@ -56,6 +56,57 @@ func rejectsEmptyGuestCommand() {
 }
 
 @Test
+func passesStandardInputWithoutPuttingItInArguments() throws {
+    let standardInput = Data("registration-token".utf8)
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    _ = try backend.exec(
+        ["yieldd-configure-runner", "owner/repository", runnerID.value],
+        standardInput: standardInput,
+        on: runnerID
+    )
+
+    #expect(executor.requests == [ProcessRequest(
+        executableURL: containerURL,
+        arguments: [
+            "machine", "run",
+            "--name", runnerID.value,
+            "--user", "runner",
+            "--interactive",
+            "--",
+            "yieldd-configure-runner", "owner/repository", runnerID.value,
+        ],
+        standardInput: standardInput
+    )])
+    #expect(!executor.requests[0].arguments.contains("registration-token"))
+}
+
+@Test
+func passesTimeoutWithoutPuttingItInArguments() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    _ = try backend.exec(
+        ["/opt/actions-runner/run.sh"],
+        timeout: 90,
+        on: runnerID
+    )
+
+    #expect(executor.requests == [ProcessRequest(
+        executableURL: containerURL,
+        arguments: [
+            "machine", "run",
+            "--name", runnerID.value,
+            "--user", "runner",
+            "--",
+            "/opt/actions-runner/run.sh",
+        ],
+        timeout: 90
+    )])
+}
+
+@Test
 func destroyReturnsWhenMachineIsAbsent() throws {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult(stdout: "another-machine\n")),

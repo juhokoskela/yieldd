@@ -8,6 +8,7 @@ struct Yieldd: ParsableCommand {
         subcommands: [
             DoctorCommand.self,
             MachineTestCommand.self,
+            RunnerTestCommand.self,
         ]
     )
 }
