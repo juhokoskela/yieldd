@@ -27,7 +27,7 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
     #expect(events.values == [
         .createRegistrationToken(runnerTestRepository),
         .create(runnerTestID, RunnerTestRunner.image),
-        .exec(runnerTestID, ["docker", "info"], nil, nil),
+        .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout),
         .exec(
             runnerTestID,
             ["yieldd-configure-runner", runnerTestRepository.fullName, runnerTestID.value],
@@ -85,7 +85,7 @@ func interruptionDuringDockerReadinessStopsRetriesAndCleansUp() {
     #expect(events.values == [
         .createRegistrationToken(runnerTestRepository),
         .create(runnerTestID, RunnerTestRunner.image),
-        .exec(runnerTestID, ["docker", "info"], nil, nil),
+        .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
     ])

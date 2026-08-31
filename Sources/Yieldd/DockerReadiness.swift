@@ -1,6 +1,8 @@
 import Foundation
 
 struct DockerReadiness {
+    static let probeTimeout: TimeInterval = 5
+
     let backend: any RunnerBackend
     private let attempts: Int
     private let retryDelay: TimeInterval
@@ -28,7 +30,11 @@ struct DockerReadiness {
         for attempt in 1...attempts {
             try checkCancellation()
             do {
-                return try backend.exec(["docker", "info"], on: id)
+                return try backend.exec(
+                    ["docker", "info"],
+                    timeout: Self.probeTimeout,
+                    on: id
+                )
             } catch let error as ProcessExecutionError {
                 if case .launchFailed = error {
                     throw error
