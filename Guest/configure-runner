@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ "$#" -ne 2 ]]; then
+    echo "usage: yieldd-configure-runner OWNER/REPOSITORY RUNNER_NAME" >&2
+    exit 2
+fi
+
+repository="$1"
+runner_name="$2"
+IFS= read -r registration_token
+
+if [[ -z "$registration_token" ]]; then
+    echo "runner registration token is empty" >&2
+    exit 2
+fi
+
+cd /opt/actions-runner
+exec ./config.sh \
+    --unattended \
+    --ephemeral \
+    --url "https://github.com/${repository}" \
+    --token "$registration_token" \
+    --name "$runner_name" \
+    --labels yieldd \
+    --work _work
