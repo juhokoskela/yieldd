@@ -230,3 +230,83 @@ func killsProcessThatIgnoresTerminationAfterTimeoutGracePeriod() {
         Issue.record("Unexpected error: \(error)")
     }
 }
+
+@Test
+func timeoutIsNotHeldOpenByDescendantOutputDescriptors() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yieldd-process-tree-\(UUID().uuidString)", isDirectory: true)
+    let childPIDURL = directory.appendingPathComponent("child.pid")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer {
+        terminateProcessRecorded(at: childPIDURL)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    let script = """
+        /bin/sh -c 'trap "" HUP TERM; exec /bin/sleep 30' &
+        echo $! > "$1"
+        echo 'waiting forever' >&2
+        trap '' TERM
+        while :; do :; done
+        """
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", script, "yieldd-timeout-test", childPIDURL.path],
+        timeout: 0.2
+    )
+    let outcome = ProcessExecutionOutcome()
+    let completion = DispatchSemaphore(value: 0)
+
+    DispatchQueue.global().async {
+        outcome.store(Result {
+            try ProcessExecutor(terminationGracePeriod: 0.05).execute(request)
+        })
+        completion.signal()
+    }
+
+    let completedWithoutClosingDescendant = completion.wait(timeout: .now() + 2)
+    if completedWithoutClosingDescendant == .timedOut {
+        terminateProcessRecorded(at: childPIDURL)
+        _ = completion.wait(timeout: .now() + 2)
+    }
+
+    #expect(completedWithoutClosingDescendant == .success)
+    guard let result = outcome.result() else {
+        Issue.record("Process execution did not complete")
+        return
+    }
+    do {
+        _ = try result.get()
+        Issue.record("Expected the process to time out")
+    } catch let ProcessExecutionError.timedOut(actualRequest, result) {
+        #expect(actualRequest == request)
+        #expect(result.stderrText.contains("waiting forever"))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+private func terminateProcessRecorded(at url: URL) {
+    guard let contents = try? String(contentsOf: url, encoding: .utf8),
+          let processIdentifier = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        return
+    }
+    Darwin.kill(processIdentifier, SIGKILL)
+}
+
+private final class ProcessExecutionOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResult: Result<ProcessResult, any Error>?
+
+    func store(_ result: Result<ProcessResult, any Error>) {
+        lock.lock()
+        storedResult = result
+        lock.unlock()
+    }
+
+    func result() -> Result<ProcessResult, any Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedResult
+    }
+}

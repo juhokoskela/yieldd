@@ -190,6 +190,14 @@ struct ProcessExecutor: ProcessExecuting {
             timeout: request.timeout,
             termination: termination
         )
+        if timedOut {
+            // Descendants can keep inherited descriptors open after the launched process exits.
+            // Close our endpoints before waiting for the I/O tasks so the timeout stays bounded.
+            for (_, reader) in readers {
+                reader.cancel()
+            }
+            inputWriter?.cancel()
+        }
         group.wait()
 
         var output: [CapturedStream: Data] = [:]
@@ -310,6 +318,10 @@ private final class PipeReader: @unchecked Sendable {
         }
         return storedResult
     }
+
+    func cancel() {
+        try? fileHandle.close()
+    }
 }
 
 // Access to the result is serialized, and the file handle is written by one task.
@@ -348,5 +360,9 @@ private final class PipeWriter: @unchecked Sendable {
             preconditionFailure("Pipe result read before the writer completed")
         }
         return storedResult
+    }
+
+    func cancel() {
+        try? fileHandle.close()
     }
 }
