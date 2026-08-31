@@ -45,7 +45,12 @@ struct MachineTestRunner {
         let operation: Result<MachineTestResult, any Error>
         do {
             try backend.create(id: id, image: Self.image)
-            let dockerInfo = try waitForDocker(on: id)
+            let dockerInfo = try DockerReadiness(
+                backend: backend,
+                attempts: dockerInfoAttempts,
+                retryDelay: retryDelay,
+                sleep: sleep
+            ).wait(on: id)
             let helloWorld = try backend.exec(
                 ["docker", "run", "--rm", "hello-world"],
                 on: id
@@ -81,31 +86,6 @@ struct MachineTestRunner {
         }
     }
 
-    private func waitForDocker(on id: RunnerID) throws -> ProcessResult {
-        var lastError: (any Error)?
-
-        for attempt in 1...dockerInfoAttempts {
-            do {
-                return try backend.exec(["docker", "info"], on: id)
-            } catch let error as ProcessExecutionError {
-                if case .launchFailed = error {
-                    throw error
-                }
-                lastError = error
-            } catch {
-                lastError = error
-            }
-
-            if attempt < dockerInfoAttempts {
-                sleep(retryDelay)
-            }
-        }
-
-        guard let lastError else {
-            preconditionFailure("Docker readiness loop ran without an attempt")
-        }
-        throw lastError
-    }
 }
 
 struct MachineTestResult: Equatable {
