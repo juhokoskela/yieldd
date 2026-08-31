@@ -40,6 +40,13 @@ struct Doctor {
                 : .failed("this host does not report Apple Silicon support")
         )]
 
+        checks.append(contentsOf: containerChecks())
+        checks.append(contentsOf: githubChecks())
+        return DoctorReport(checks: checks)
+    }
+
+    private func containerChecks() -> [DoctorCheck] {
+        var checks: [DoctorCheck] = []
         let containerURL: URL
         do {
             containerURL = try executableLocator.locate("container")
@@ -60,7 +67,7 @@ struct Doctor {
                 name: "container machine",
                 status: .skipped("container executable is unavailable")
             ))
-            return DoctorReport(checks: checks)
+            return checks
         }
 
         let systemRequest = ProcessRequest(
@@ -76,7 +83,7 @@ struct Doctor {
                 name: "container machine",
                 status: .skipped("container system is unreachable")
             ))
-            return DoctorReport(checks: checks)
+            return checks
         }
 
         let machineRequest = ProcessRequest(
@@ -90,7 +97,35 @@ struct Doctor {
             checks.append(DoctorCheck(name: "container machine", status: .failed(describe(error))))
         }
 
-        return DoctorReport(checks: checks)
+        return checks
+    }
+
+    private func githubChecks() -> [DoctorCheck] {
+        let ghURL: URL
+        do {
+            ghURL = try executableLocator.locate("gh")
+        } catch {
+            return [
+                DoctorCheck(name: "gh executable", status: .failed(describe(error))),
+                DoctorCheck(
+                    name: "GitHub authentication",
+                    status: .skipped("gh executable is unavailable")
+                ),
+            ]
+        }
+
+        var checks = [DoctorCheck(name: "gh executable", status: .passed(ghURL.path))]
+        let request = ProcessRequest(
+            executableURL: ghURL,
+            arguments: ["auth", "status", "--active", "--hostname", "github.com"]
+        )
+        do {
+            try executor.execute(request).requireSuccess(for: request)
+            checks.append(DoctorCheck(name: "GitHub authentication", status: .passed("authenticated")))
+        } catch {
+            checks.append(DoctorCheck(name: "GitHub authentication", status: .failed(describe(error))))
+        }
+        return checks
     }
 
     private func describe(_ error: any Error) -> String {
