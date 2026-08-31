@@ -13,16 +13,31 @@ struct AppleContainerBackend: RunnerBackend {
         ])
     }
 
-    func exec(_ arguments: [String], on id: RunnerID) throws -> ProcessResult {
+    func exec(
+        _ arguments: [String],
+        standardInput: Data?,
+        timeout: TimeInterval?,
+        on id: RunnerID
+    ) throws -> ProcessResult {
         guard !arguments.isEmpty else {
             throw RunnerBackendError.emptyCommand
         }
-        return try run([
+        var containerArguments = [
             "machine", "run",
             "--name", id.value,
             "--user", "runner",
-            "--",
-        ] + arguments)
+        ]
+        if standardInput != nil {
+            containerArguments.append("--interactive")
+        }
+        containerArguments.append("--")
+        containerArguments.append(contentsOf: arguments)
+
+        return try run(
+            containerArguments,
+            standardInput: standardInput,
+            timeout: timeout
+        )
     }
 
     func destroy(_ id: RunnerID) throws {
@@ -34,8 +49,17 @@ struct AppleContainerBackend: RunnerBackend {
         _ = try run(["machine", "delete", id.value])
     }
 
-    private func run(_ arguments: [String]) throws -> ProcessResult {
-        let request = ProcessRequest(executableURL: containerURL, arguments: arguments)
+    private func run(
+        _ arguments: [String],
+        standardInput: Data? = nil,
+        timeout: TimeInterval? = nil
+    ) throws -> ProcessResult {
+        let request = ProcessRequest(
+            executableURL: containerURL,
+            arguments: arguments,
+            standardInput: standardInput,
+            timeout: timeout
+        )
         return try executor.execute(request).requireSuccess(for: request)
     }
 }
