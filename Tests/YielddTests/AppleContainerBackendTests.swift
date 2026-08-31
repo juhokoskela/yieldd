@@ -18,6 +18,8 @@ func constructsCreateCommand() throws {
             "machine", "create",
             "--name", runnerID.value,
             "--home-mount", "none",
+            "--cpus", "4",
+            "--memory", "12G",
             "local/yieldd-guest:dev",
         ]
     )])
@@ -118,6 +120,8 @@ func destroyReturnsWhenMachineIsAbsent() throws {
     #expect(executor.requests.map(\.arguments) == [
         ["machine", "list", "--quiet"],
     ])
+    #expect(executor.requests.allSatisfy { !$0.cancellable })
+    #expect(executor.requests.allSatisfy { $0.timeout == 90 })
 }
 
 @Test
@@ -134,6 +138,8 @@ func destroyDeletesOnlyAnExactMachineID() throws {
         ["machine", "list", "--quiet"],
         ["machine", "delete", runnerID.value],
     ])
+    #expect(executor.requests.allSatisfy { !$0.cancellable })
+    #expect(executor.requests.allSatisfy { $0.timeout == 90 })
 }
 
 @Test

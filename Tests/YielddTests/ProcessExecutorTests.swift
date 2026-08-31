@@ -192,6 +192,57 @@ func childFailureOutranksBrokenPipeError() throws {
 }
 
 @Test
+func cancellationTerminatesProcessAndPreservesOutput() {
+    var checks = 0
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "echo 'started' >&2; while :; do :; done"]
+    )
+    let executor = ProcessExecutor(
+        terminationGracePeriod: 0.05,
+        cancellationPollInterval: 0.01,
+        checkCancellation: {
+            checks += 1
+            if checks == 3 {
+                throw TestFailure.cancelled
+            }
+        }
+    )
+
+    do {
+        _ = try executor.execute(request)
+        Issue.record("Expected the process to be cancelled")
+    } catch let ProcessExecutionError.cancelled(actualRequest, result, underlying) {
+        #expect(actualRequest == request)
+        #expect(result.terminationReason == .uncaughtSignal)
+        #expect(result.terminationStatus == SIGTERM)
+        #expect(result.stderrText.contains("started"))
+        #expect(underlying as? TestFailure == .cancelled)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test
+func noncancellableRequestIgnoresCancellationChecker() throws {
+    var checked = false
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+        arguments: [],
+        cancellable: false
+    )
+    let executor = ProcessExecutor(checkCancellation: {
+        checked = true
+        throw TestFailure.cancelled
+    })
+
+    let result = try executor.execute(request)
+
+    #expect(result.terminationStatus == 0)
+    #expect(!checked)
+}
+
+@Test
 func terminatesProcessAfterTimeout() {
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/bin/sh"),

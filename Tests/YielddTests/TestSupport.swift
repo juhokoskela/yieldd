@@ -37,10 +37,12 @@ enum TestFailure: Error, Equatable {
     case dockerInfo
     case helloWorld
     case runnerJob
+    case runnerConfiguration
     case registrationToken
     case cleanup
     case githubCleanup
     case machineCleanup
+    case cancelled
     case unexpectedProcessRequest
     case unexpectedBackendCall
 }

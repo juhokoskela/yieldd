@@ -1,6 +1,11 @@
 import Foundation
 
 struct AppleContainerBackend: RunnerBackend {
+    // Machine deletion has its own 60-second budget after the machine stops.
+    static let cleanupTimeout: TimeInterval = 90
+    static let virtualCPUs = 4
+    static let memory = "12G"
+
     let containerURL: URL
     let executor: any ProcessExecuting
 
@@ -9,6 +14,8 @@ struct AppleContainerBackend: RunnerBackend {
             "machine", "create",
             "--name", id.value,
             "--home-mount", "none",
+            "--cpus", String(Self.virtualCPUs),
+            "--memory", Self.memory,
             image,
         ])
     }
@@ -41,24 +48,34 @@ struct AppleContainerBackend: RunnerBackend {
     }
 
     func destroy(_ id: RunnerID) throws {
-        let list = try run(["machine", "list", "--quiet"])
+        let list = try run(
+            ["machine", "list", "--quiet"],
+            timeout: Self.cleanupTimeout,
+            cancellable: false
+        )
         let machineIDs = list.stdoutText.split(whereSeparator: \Character.isNewline)
         guard machineIDs.contains(Substring(id.value)) else {
             return
         }
-        _ = try run(["machine", "delete", id.value])
+        _ = try run(
+            ["machine", "delete", id.value],
+            timeout: Self.cleanupTimeout,
+            cancellable: false
+        )
     }
 
     private func run(
         _ arguments: [String],
         standardInput: Data? = nil,
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        cancellable: Bool = true
     ) throws -> ProcessResult {
         let request = ProcessRequest(
             executableURL: containerURL,
             arguments: arguments,
             standardInput: standardInput,
-            timeout: timeout
+            timeout: timeout,
+            cancellable: cancellable
         )
         return try executor.execute(request).requireSuccess(for: request)
     }
