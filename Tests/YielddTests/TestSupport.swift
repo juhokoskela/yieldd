@@ -36,7 +36,11 @@ enum TestFailure: Error, Equatable {
     case create
     case dockerInfo
     case helloWorld
+    case runnerJob
+    case registrationToken
     case cleanup
+    case githubCleanup
+    case machineCleanup
     case unexpectedProcessRequest
     case unexpectedBackendCall
 }
