@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import Yieldd
@@ -141,4 +142,91 @@ func preservesArgumentsWithoutShellInterpretation() throws {
     let result = try ProcessExecutor().execute(request)
 
     #expect(result.stdoutText == argument)
+}
+
+@Test
+func writesStandardInputWithoutAddingItToArguments() throws {
+    let standardInput = Data("secret value\nwith another line".utf8)
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/cat"),
+        arguments: [],
+        standardInput: standardInput
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationStatus == 0)
+    #expect(result.stdout == standardInput)
+    #expect(request.arguments.isEmpty)
+}
+
+@Test
+func childCanExitSuccessfullyWithoutReadingLargeInput() throws {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "exec 0<&-; sleep 0.05"],
+        standardInput: Data(repeating: 0, count: 1_000_000)
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationReason == .exit)
+    #expect(result.terminationStatus == 0)
+}
+
+@Test
+func childFailureOutranksBrokenPipeError() throws {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "exec 0<&-; echo 'machine not found' >&2; exit 7"],
+        standardInput: Data(repeating: 0, count: 1_000_000)
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationStatus == 7)
+    #expect(result.stderrText.contains("machine not found"))
+    #expect(throws: ProcessExecutionError.self) {
+        try result.requireSuccess(for: request)
+    }
+}
+
+@Test
+func terminatesProcessAfterTimeout() {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "while :; do :; done"],
+        timeout: 0.1
+    )
+
+    do {
+        _ = try ProcessExecutor().execute(request)
+        Issue.record("Expected the process to time out")
+    } catch let ProcessExecutionError.timedOut(actualRequest, result) {
+        #expect(actualRequest == request)
+        #expect(result.terminationReason == .uncaughtSignal)
+        #expect(result.terminationStatus == SIGTERM)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test
+func killsProcessThatIgnoresTerminationAfterTimeoutGracePeriod() {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "trap '' TERM; while :; do :; done"],
+        timeout: 0.1
+    )
+
+    do {
+        _ = try ProcessExecutor(terminationGracePeriod: 0.05).execute(request)
+        Issue.record("Expected the process to time out")
+    } catch let ProcessExecutionError.timedOut(actualRequest, result) {
+        #expect(actualRequest == request)
+        #expect(result.terminationReason == .uncaughtSignal)
+        #expect(result.terminationStatus == SIGKILL)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
 }
