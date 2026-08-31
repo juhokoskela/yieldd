@@ -232,7 +232,30 @@ func killsProcessThatIgnoresTerminationAfterTimeoutGracePeriod() {
 }
 
 @Test
-func timeoutIsNotHeldOpenByDescendantOutputDescriptors() throws {
+func timeoutClosesDescriptorsHeldByDescendantAfterTerminatingParent() throws {
+    let execution = try executeWithDescendantHoldingOutput(parentAction: .wait)
+
+    try expectTimeout(
+        execution,
+        terminationReason: .uncaughtSignal,
+        terminationStatus: SIGKILL
+    )
+}
+
+@Test
+func timeoutRemainsActiveWhileDrainingPipesAfterParentExits() throws {
+    let execution = try executeWithDescendantHoldingOutput(parentAction: .exit)
+
+    try expectTimeout(
+        execution,
+        terminationReason: .exit,
+        terminationStatus: 0
+    )
+}
+
+private func executeWithDescendantHoldingOutput(
+    parentAction: RetainedDescriptorParentAction
+) throws -> RetainedDescriptorExecution {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("yieldd-process-tree-\(UUID().uuidString)", isDirectory: true)
     let childPIDURL = directory.appendingPathComponent("child.pid")
@@ -246,12 +269,18 @@ func timeoutIsNotHeldOpenByDescendantOutputDescriptors() throws {
         /bin/sh -c 'trap "" HUP TERM; exec /bin/sleep 30' &
         echo $! > "$1"
         echo 'waiting forever' >&2
+        if [ "$2" = exit ]; then
+            exit 0
+        fi
         trap '' TERM
         while :; do :; done
         """
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/bin/sh"),
-        arguments: ["-c", script, "yieldd-timeout-test", childPIDURL.path],
+        arguments: [
+            "-c", script,
+            "yieldd-timeout-test", childPIDURL.path, parentAction.rawValue,
+        ],
         timeout: 0.2
     )
     let outcome = ProcessExecutionOutcome()
@@ -270,20 +299,49 @@ func timeoutIsNotHeldOpenByDescendantOutputDescriptors() throws {
         _ = completion.wait(timeout: .now() + 2)
     }
 
-    #expect(completedWithoutClosingDescendant == .success)
     guard let result = outcome.result() else {
-        Issue.record("Process execution did not complete")
-        return
+        throw RetainedDescriptorTestError.didNotComplete
     }
+
+    return RetainedDescriptorExecution(
+        request: request,
+        completedWithoutClosingDescendant: completedWithoutClosingDescendant,
+        result: result
+    )
+}
+
+private func expectTimeout(
+    _ execution: RetainedDescriptorExecution,
+    terminationReason: ProcessTerminationReason,
+    terminationStatus: Int32
+) throws {
+    #expect(execution.completedWithoutClosingDescendant == .success)
     do {
-        _ = try result.get()
+        _ = try execution.result.get()
         Issue.record("Expected the process to time out")
     } catch let ProcessExecutionError.timedOut(actualRequest, result) {
-        #expect(actualRequest == request)
+        #expect(actualRequest == execution.request)
+        #expect(result.terminationReason == terminationReason)
+        #expect(result.terminationStatus == terminationStatus)
         #expect(result.stderrText.contains("waiting forever"))
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
+}
+
+private struct RetainedDescriptorExecution {
+    let request: ProcessRequest
+    let completedWithoutClosingDescendant: DispatchTimeoutResult
+    let result: Result<ProcessResult, any Error>
+}
+
+private enum RetainedDescriptorTestError: Error {
+    case didNotComplete
+}
+
+private enum RetainedDescriptorParentAction: String {
+    case wait
+    case exit
 }
 
 private func terminateProcessRecorded(at url: URL) {

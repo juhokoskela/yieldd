@@ -154,6 +154,9 @@ struct ProcessExecutor: ProcessExecuting {
         } catch {
             throw ProcessExecutionError.launchFailed(request: request, underlying: error)
         }
+        let timeoutDeadline = request.timeout.map {
+            DispatchTime.now() + dispatchInterval($0)
+        }
 
         let stdoutReader = PipeReader(fileHandle: stdoutPipe.fileHandleForReading)
         let stderrReader = PipeReader(fileHandle: stderrPipe.fileHandleForReading)
@@ -185,20 +188,28 @@ struct ProcessExecutor: ProcessExecuting {
             }
         }
 
-        let timedOut = waitForExit(
+        let processTimedOut = waitForExit(
             process,
-            timeout: request.timeout,
+            deadline: timeoutDeadline,
             termination: termination
         )
-        if timedOut {
+        let ioTimedOut: Bool
+        if let timeoutDeadline {
+            ioTimedOut = group.wait(timeout: timeoutDeadline) == .timedOut
+        } else {
+            group.wait()
+            ioTimedOut = false
+        }
+        if ioTimedOut {
             // Descendants can keep inherited descriptors open after the launched process exits.
             // Close our endpoints before waiting for the I/O tasks so the timeout stays bounded.
             for (_, reader) in readers {
                 reader.cancel()
             }
             inputWriter?.cancel()
+            group.wait()
         }
-        group.wait()
+        let timedOut = processTimedOut || ioTimedOut
 
         var output: [CapturedStream: Data] = [:]
         for (stream, reader) in readers {
@@ -247,15 +258,15 @@ struct ProcessExecutor: ProcessExecuting {
 
     private func waitForExit(
         _ process: Process,
-        timeout: TimeInterval?,
+        deadline: DispatchTime?,
         termination: DispatchSemaphore
     ) -> Bool {
-        guard let timeout else {
+        guard let deadline else {
             process.waitUntilExit()
             return false
         }
 
-        guard termination.wait(timeout: .now() + dispatchInterval(timeout)) == .timedOut else {
+        guard termination.wait(timeout: deadline) == .timedOut else {
             process.waitUntilExit()
             return false
         }
