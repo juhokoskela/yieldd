@@ -70,6 +70,8 @@ func removesOnlyExactRunnerNameMatches() throws {
             "repos/owner/repository/actions/runners/42",
         ],
     ])
+    #expect(executor.requests.allSatisfy { !$0.cancellable })
+    #expect(executor.requests.allSatisfy { $0.timeout == GitHubRunnerClient.cleanupTimeout })
 }
 
 @Test
@@ -82,6 +84,8 @@ func missingRunnerNeedsNoDeleteRequest() throws {
     try client.removeRunners(named: "yieldd-test-1", from: repository)
 
     #expect(executor.requests.count == 1)
+    #expect(executor.requests.allSatisfy { !$0.cancellable })
+    #expect(executor.requests.allSatisfy { $0.timeout == GitHubRunnerClient.cleanupTimeout })
 }
 
 @Test
@@ -106,6 +110,8 @@ func acceptsDeleteFailureWhenRunnerDisappearedConcurrently() throws {
             "repos/owner/repository/actions/runners",
         ],
     ])
+    #expect(executor.requests.allSatisfy { !$0.cancellable })
+    #expect(executor.requests.allSatisfy { $0.timeout == GitHubRunnerClient.cleanupTimeout })
 }
 
 @Test
@@ -130,6 +136,8 @@ func preservesDeleteFailureWhenRunnerStillExists() {
     }
 
     #expect(executor.requests.count == 3)
+    #expect(executor.requests.allSatisfy { !$0.cancellable })
+    #expect(executor.requests.allSatisfy { $0.timeout == GitHubRunnerClient.cleanupTimeout })
 }
 
 @Test

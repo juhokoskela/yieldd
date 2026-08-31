@@ -57,6 +57,8 @@ protocol GitHubRunnerManaging {
 }
 
 struct GitHubRunnerClient: GitHubRunnerManaging {
+    static let cleanupTimeout: TimeInterval = 30
+
     let ghURL: URL
     let executor: any ProcessExecuting
 
@@ -87,7 +89,9 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
             do {
                 _ = try run(
                     method: "DELETE",
-                    endpoint: "\(repository.apiPath)/actions/runners/\(runner.id)"
+                    endpoint: "\(repository.apiPath)/actions/runners/\(runner.id)",
+                    timeout: Self.cleanupTimeout,
+                    cancellable: false
                 )
             } catch {
                 let deletionError = error
@@ -108,7 +112,9 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
     private func runners(in repository: GitHubRepository) throws -> [GitHubRunner] {
         let result = try run(
             endpoint: "\(repository.apiPath)/actions/runners",
-            extraArguments: ["--paginate", "--slurp"]
+            extraArguments: ["--paginate", "--slurp"],
+            timeout: Self.cleanupTimeout,
+            cancellable: false
         )
 
         do {
@@ -125,7 +131,9 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
     private func run(
         method: String = "GET",
         endpoint: String,
-        extraArguments: [String] = []
+        extraArguments: [String] = [],
+        timeout: TimeInterval? = nil,
+        cancellable: Bool = true
     ) throws -> ProcessResult {
         var arguments = ["api", "--method", method]
         arguments.append(contentsOf: extraArguments)
@@ -135,7 +143,12 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
             endpoint,
         ])
 
-        let request = ProcessRequest(executableURL: ghURL, arguments: arguments)
+        let request = ProcessRequest(
+            executableURL: ghURL,
+            arguments: arguments,
+            timeout: timeout,
+            cancellable: cancellable
+        )
         return try executor.execute(request).requireSuccess(for: request)
     }
 }
