@@ -40,7 +40,7 @@ Build the Ubuntu 24.04 guest image from the repository root:
 container build -t local/yieldd-guest:dev Guest
 ```
 
-The image boots systemd as PID 1 and runs Docker from Ubuntu's `docker.io` package. It also contains the pinned Linux ARM64 GitHub Actions runner. Guest commands run as the unprivileged `runner` user, which belongs to the `docker` group.
+The image boots systemd as PID 1 and runs Docker from Ubuntu's `docker.io` package. It also contains the pinned Linux ARM64 GitHub Actions runner. Guest commands run as the unprivileged `runner` user, which belongs to the `docker` group. Machines currently receive 4 virtual CPUs and 12 GB of memory.
 
 ## Machine integration test
 
