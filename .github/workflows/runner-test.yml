@@ -11,7 +11,7 @@ permissions:
 jobs:
   docker:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'yieldd-runner-test'
-    runs-on: [self-hosted, yieldd]
+    runs-on: yieldd
     timeout-minutes: 10
     steps:
       - name: Check Docker daemon

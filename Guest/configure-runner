@@ -22,5 +22,6 @@ exec ./config.sh \
     --url "https://github.com/${repository}" \
     --token "$registration_token" \
     --name "$runner_name" \
+    --no-default-labels \
     --labels yieldd \
     --work _work

@@ -35,7 +35,7 @@ struct RunnerTestCommand: ParsableCommand {
         let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
 
         print("Starting ephemeral runner \(id.value) for \(repository.fullName).")
-        print("Waiting for one job labeled 'self-hosted' and 'yieldd'.")
+        print("Waiting for one job labeled 'yieldd'.")
 
         let interruptMonitor = try RunnerTestInterruptMonitor()
         try RunnerTestRunner(
