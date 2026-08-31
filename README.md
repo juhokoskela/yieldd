@@ -1,6 +1,6 @@
 # yieldd
 
-`yieldd` turns spare Mac resources into ephemeral GitHub Actions runners. The current package provides host diagnostics, Apple container machine management, a Docker-in-machine integration test, and a manual one-job runner test.
+`yieldd` turns spare Mac resources into ephemeral GitHub Actions runners. The current package provides host diagnostics, Apple container machine management, integration tests, and a foreground worker that serves one repository with one ephemeral runner at a time.
 
 ## Requirements
 
@@ -64,4 +64,16 @@ Then start one ephemeral runner for that repository:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner-test OWNER/REPOSITORY
 ```
 
-The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or is interrupted with Ctrl+C.
+The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
+
+## Foreground runner service
+
+To keep serving jobs until the process is stopped, run:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd serve OWNER/REPOSITORY
+```
+
+`serve` creates and registers one ephemeral runner, waits for one job, cleans up both the GitHub registration and machine, and then starts the next runner. It never runs two sessions concurrently. Setup and runner failures use exponential backoff capped at 30 seconds; a successful session resets the delay. A cleanup failure stops the service rather than risking another runner alongside a machine whose removal could not be confirmed.
+
+This is a foreground command, not a daemon. Ctrl+C and SIGTERM interrupt the active command and run cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.

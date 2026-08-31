@@ -9,6 +9,7 @@ struct Yieldd: ParsableCommand {
             DoctorCommand.self,
             MachineTestCommand.self,
             RunnerTestCommand.self,
+            RunnerServiceCommand.self,
         ]
     )
 }
