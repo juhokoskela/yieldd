@@ -41,6 +41,7 @@ enum TestFailure: Error, Equatable {
     case cleanup
     case githubCleanup
     case machineCleanup
+    case cancelled
     case unexpectedProcessRequest
     case unexpectedBackendCall
 }
