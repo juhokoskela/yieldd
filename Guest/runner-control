@@ -1,0 +1,49 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+    echo "usage: yieldd-runner-control cpu constrained|full" >&2
+    echo "       yieldd-runner-control memory constrained|full" >&2
+    echo "       yieldd-runner-control run" >&2
+    exit 2
+}
+
+if [[ "$#" -eq 1 && "$1" == "run" ]]; then
+    exec systemd-run \
+        --quiet \
+        --wait \
+        --pipe \
+        --collect \
+        --service-type=exec \
+        --unit=yieldd-runner \
+        --slice=yieldd.slice \
+        --uid=runner \
+        --working-directory=/opt/actions-runner \
+        /opt/actions-runner/run.sh
+fi
+
+if [[ "$#" -ne 2 ]]; then
+    usage
+fi
+
+case "$1:$2" in
+    cpu:constrained)
+        exec systemctl set-property --runtime yieldd.slice \
+            AllowedCPUs=0-3 \
+            CPUQuota=400%
+        ;;
+    cpu:full)
+        exec systemctl set-property --runtime yieldd.slice \
+            AllowedCPUs=0-7 \
+            CPUQuota=800%
+        ;;
+    memory:constrained)
+        exec systemctl set-property --runtime yieldd.slice MemoryHigh=8G
+        ;;
+    memory:full)
+        exec systemctl set-property --runtime yieldd.slice MemoryHigh=infinity
+        ;;
+    *)
+        usage
+        ;;
+esac

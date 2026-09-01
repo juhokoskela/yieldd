@@ -192,9 +192,11 @@ private final class RecordingRunnerBackend: RunnerBackend {
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
         #expect(standardInput == nil)
+        #expect(user == .runner)
         if arguments == ["docker", "info"] {
             #expect(timeout == DockerReadiness.probeTimeout)
         } else {

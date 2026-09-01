@@ -12,6 +12,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
     let github: any GitHubRunnerManaging
     private let jobTimeout: TimeInterval?
     private let dockerReadiness: DockerReadiness
+    private let readMemoryPressure: () -> HostMemoryPressure
     private let checkCancellation: () throws -> Void
     private let stateChanged: (RunnerSessionState) -> Void
 
@@ -22,6 +23,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         dockerInfoAttempts: Int = 30,
         retryDelay: TimeInterval = 1,
         sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:),
+        readMemoryPressure: @escaping () -> HostMemoryPressure = HostMemoryPressure.current,
         checkCancellation: @escaping () throws -> Void = {},
         stateChanged: @escaping (RunnerSessionState) -> Void = { _ in }
     ) {
@@ -31,6 +33,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         self.backend = backend
         self.github = github
         self.jobTimeout = jobTimeout
+        self.readMemoryPressure = readMemoryPressure
         self.checkCancellation = checkCancellation
         self.stateChanged = stateChanged
         dockerReadiness = DockerReadiness(
@@ -54,6 +57,12 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             try checkCancellation()
             _ = try dockerReadiness.wait(on: id)
             try checkCancellation()
+            _ = try backend.setCPUAllocation(.constrained, on: id)
+            try checkCancellation()
+            let memoryAllocation: RunnerMemoryAllocation = readMemoryPressure()
+                .permitsFullRunnerMemory ? .full : .constrained
+            _ = try backend.setMemoryAllocation(memoryAllocation, on: id)
+            try checkCancellation()
             runnerRegistrationMayExist = true
             _ = try backend.exec(
                 ["yieldd-configure-runner", repository.fullName, id.value],
@@ -64,9 +73,10 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             try checkCancellation()
             stateChanged(.waitingForJob(id))
             _ = try backend.exec(
-                ["/opt/actions-runner/run.sh"],
+                ["yieldd-runner-control", "run"],
                 standardInput: nil,
                 timeout: jobTimeout,
+                as: .root,
                 on: id
             )
             operation = .success(())

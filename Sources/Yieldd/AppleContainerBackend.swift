@@ -3,7 +3,7 @@ import Foundation
 struct AppleContainerBackend: RunnerBackend {
     // Machine deletion has its own 60-second budget after the machine stops.
     static let cleanupTimeout: TimeInterval = 90
-    static let virtualCPUs = 4
+    static let virtualCPUs = 8
     static let memory = "12G"
 
     let containerURL: URL
@@ -24,6 +24,7 @@ struct AppleContainerBackend: RunnerBackend {
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
         guard !arguments.isEmpty else {
@@ -32,7 +33,7 @@ struct AppleContainerBackend: RunnerBackend {
         var containerArguments = [
             "machine", "run",
             "--name", id.value,
-            "--user", "runner",
+            "--user", user.rawValue,
         ]
         if standardInput != nil {
             containerArguments.append("--interactive")

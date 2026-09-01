@@ -40,7 +40,11 @@ Build the Ubuntu 24.04 guest image from the repository root:
 container build -t local/yieldd-guest:dev Guest
 ```
 
-The image boots systemd as PID 1 and runs Docker from Ubuntu's `docker.io` package. It also contains the pinned Linux ARM64 GitHub Actions runner. Guest commands run as the unprivileged `runner` user, which belongs to the `docker` group. Machines currently receive 4 virtual CPUs and 12 GB of memory.
+The image boots systemd as PID 1 and runs Docker from Ubuntu's `docker.io` package. It also contains the pinned Linux ARM64 GitHub Actions runner. Guest commands run as the unprivileged `runner` user, which belongs to the `docker` group.
+
+Machines receive 8 virtual CPUs and a 12 GB memory ceiling. Runner processes and Docker-created workflow containers share a systemd slice that starts with 4 virtual CPUs and an 8 GB soft memory threshold. Before each runner is configured, `yieldd` reads macOS's current memory-pressure level. Normal pressure removes the soft threshold, allowing the workload to use the VM's available memory; warning, critical, or unknown pressure keeps the 8 GB threshold. The threshold is not a hard memory limit, and the decision is reevaluated for every ephemeral runner.
+
+The guest also has an 8-vCPU full profile ready for the future host activity governor. Current commands always select the 4-vCPU constrained profile.
 
 ## Machine integration test
 

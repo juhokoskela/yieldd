@@ -28,6 +28,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY configure-runner /usr/local/bin/yieldd-configure-runner
+COPY runner-control /usr/local/bin/yieldd-runner-control
+COPY yieldd.slice /etc/systemd/system/yieldd.slice
+COPY docker-daemon.json /etc/docker/daemon.json
 
 RUN mkdir -p /var/lib/dbus \
     && : > /etc/machine-id \
@@ -43,7 +46,14 @@ RUN mkdir -p /var/lib/dbus \
     && useradd --create-home --shell /bin/bash runner \
     && usermod --append --groups docker runner \
     && chown -R runner:runner /opt/actions-runner \
-    && chmod 0755 /usr/local/bin/yieldd-configure-runner \
+    && chmod 0755 \
+        /usr/local/bin/yieldd-configure-runner \
+        /usr/local/bin/yieldd-runner-control \
+    && bash -n \
+        /usr/local/bin/yieldd-configure-runner \
+        /usr/local/bin/yieldd-runner-control \
+    && jq --exit-status . /etc/docker/daemon.json >/dev/null \
+    && systemd-analyze verify /etc/systemd/system/yieldd.slice \
     && test "$(readlink -f /sbin/init)" = "$(readlink -f /lib/systemd/systemd)"
 
 STOPSIGNAL SIGRTMIN+3

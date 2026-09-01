@@ -1,0 +1,7 @@
+[Unit]
+Description=yieldd runner workload
+
+[Slice]
+AllowedCPUs=0-3
+CPUQuota=400%
+MemoryHigh=8G
