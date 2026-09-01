@@ -39,6 +39,7 @@ enum TestFailure: Error, Equatable {
     case dockerInfo
     case helloWorld
     case runnerJob
+    case runnerStop
     case runnerConfiguration
     case registrationToken
     case cleanup

@@ -4,22 +4,39 @@ set -euo pipefail
 usage() {
     echo "usage: yieldd-runner-control cpu constrained|full" >&2
     echo "       yieldd-runner-control memory constrained|full" >&2
-    echo "       yieldd-runner-control run" >&2
+    echo "       yieldd-runner-control run|stop" >&2
     exit 2
 }
 
-if [[ "$#" -eq 1 && "$1" == "run" ]]; then
-    exec systemd-run \
-        --quiet \
-        --wait \
-        --pipe \
-        --collect \
-        --service-type=exec \
-        --unit=yieldd-runner \
-        --slice=yieldd.slice \
-        --uid=runner \
-        --working-directory=/opt/actions-runner \
-        /opt/actions-runner/run.sh
+if [[ "$#" -eq 1 ]]; then
+    case "$1" in
+        run)
+            exec systemd-run \
+                --quiet \
+                --wait \
+                --pipe \
+                --collect \
+                --service-type=exec \
+                --unit=yieldd-runner \
+                --slice=yieldd.slice \
+                --uid=runner \
+                --working-directory=/opt/actions-runner \
+                /opt/actions-runner/run.sh
+            ;;
+        stop)
+            if [[ "$(systemctl show yieldd-runner.service --property=LoadState --value)" == "not-found" ]]; then
+                exit 0
+            fi
+            if systemctl stop yieldd-runner.service; then
+                exit 0
+            fi
+            [[ "$(systemctl show yieldd-runner.service --property=LoadState --value)" == "not-found" ]]
+            exit
+            ;;
+        *)
+            usage
+            ;;
+    esac
 fi
 
 if [[ "$#" -ne 2 ]]; then

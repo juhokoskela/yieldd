@@ -47,6 +47,7 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
             .runner
         ),
         .exec(runnerTestID, ["yieldd-runner-control", "run"], nil, 90, .root),
+        .stopRunner(runnerTestID),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
     ])
@@ -150,8 +151,9 @@ func runnerTimeoutStillRemovesRegistrationAndMachine() {
         Issue.record("Unexpected error: \(error)")
     }
 
-    #expect(events.values.suffix(3) == [
+    #expect(events.values.suffix(4) == [
         .exec(runnerTestID, ["yieldd-runner-control", "run"], nil, 0.1, .root),
+        .stopRunner(runnerTestID),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
     ])
@@ -199,8 +201,9 @@ func cancelledRunnerCommandStillRemovesRegistrationAndMachine() {
         Issue.record("Unexpected error: \(error)")
     }
 
-    #expect(events.values.suffix(3) == [
+    #expect(events.values.suffix(4) == [
         .exec(runnerTestID, ["yieldd-runner-control", "run"], nil, nil, .root),
+        .stopRunner(runnerTestID),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
     ])
@@ -232,12 +235,90 @@ func runnerFailureStillRemovesRegistrationAndMachine() {
         )
     }
 
-    #expect(events.values.suffix(2) == [
+    #expect(events.values.suffix(3) == [
+        .stopRunner(runnerTestID),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
     ])
     #expect(events.values.contains(
         .exec(runnerTestID, ["yieldd-runner-control", "run"], nil, nil, .root)
+    ))
+}
+
+@Test
+func failedRunnerStopDestroysMachineBeforeRemovingRegistration() {
+    let events = RunnerTestEventRecorder()
+    let backend = RunnerTestBackend(
+        events: events,
+        execOutcomes: [
+            .success(processResult()),
+            .success(processResult()),
+            .success(processResult()),
+            .success(processResult()),
+            .failure(TestFailure.runnerJob),
+        ],
+        stopError: TestFailure.runnerStop
+    )
+    let github = RunnerTestGitHub(events: events)
+
+    #expect(throws: TestFailure.runnerJob) {
+        try EphemeralRunnerSession(
+            backend: backend,
+            github: github,
+            readMemoryPressure: { .normal }
+        ).run(id: runnerTestID, repository: runnerTestRepository)
+    }
+
+    #expect(events.values.suffix(3) == [
+        .stopRunner(runnerTestID),
+        .destroy(runnerTestID),
+        .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
+    ])
+}
+
+@Test
+func failedRunnerStopAndMachineDestroySkipGitHubCleanup() {
+    let events = RunnerTestEventRecorder()
+    let backend = RunnerTestBackend(
+        events: events,
+        execOutcomes: [
+            .success(processResult()),
+            .success(processResult()),
+            .success(processResult()),
+            .success(processResult()),
+            .failure(TestFailure.runnerJob),
+        ],
+        stopError: TestFailure.runnerStop,
+        destroyError: TestFailure.machineCleanup
+    )
+    let github = RunnerTestGitHub(events: events)
+
+    do {
+        try EphemeralRunnerSession(
+            backend: backend,
+            github: github,
+            readMemoryPressure: { .normal }
+        ).run(id: runnerTestID, repository: runnerTestRepository)
+        Issue.record("Expected runner session cleanup to fail")
+    } catch let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) {
+        #expect(operation as? TestFailure == .runnerJob)
+        #expect(cleanup.count == 2)
+        if cleanup.count == 2 {
+            #expect(cleanup[0].step == .runnerProcess)
+            #expect(cleanup[0].error as? TestFailure == .runnerStop)
+            #expect(cleanup[1].step == .machine)
+            #expect(cleanup[1].error as? TestFailure == .machineCleanup)
+        }
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    #expect(events.values.suffix(2) == [
+        .stopRunner(runnerTestID),
+        .destroy(runnerTestID),
+    ])
+    #expect(!events.values.contains(
+        .removeGitHubRunner(runnerTestID.value, runnerTestRepository)
     ))
 }
 
@@ -431,17 +512,20 @@ private final class RunnerTestBackend: RunnerBackend {
     private let events: RunnerTestEventRecorder
     private let createError: (any Error)?
     private var execOutcomes: [Result<ProcessResult, any Error>]
+    private let stopError: (any Error)?
     private let destroyError: (any Error)?
 
     init(
         events: RunnerTestEventRecorder,
         createError: (any Error)? = nil,
         execOutcomes: [Result<ProcessResult, any Error>] = [],
+        stopError: (any Error)? = nil,
         destroyError: (any Error)? = nil
     ) {
         self.events = events
         self.createError = createError
         self.execOutcomes = execOutcomes
+        self.stopError = stopError
         self.destroyError = destroyError
     }
 
@@ -470,6 +554,13 @@ private final class RunnerTestBackend: RunnerBackend {
         events.values.append(.destroy(id))
         if let destroyError {
             throw destroyError
+        }
+    }
+
+    func stopRunner(on id: RunnerID) throws {
+        events.values.append(.stopRunner(id))
+        if let stopError {
+            throw stopError
         }
     }
 }
@@ -513,5 +604,6 @@ private enum RunnerTestEvent: Equatable {
     case create(RunnerID, String)
     case exec(RunnerID, [String], Data?, TimeInterval?, RunnerGuestUser)
     case removeGitHubRunner(String, GitHubRepository)
+    case stopRunner(RunnerID)
     case destroy(RunnerID)
 }

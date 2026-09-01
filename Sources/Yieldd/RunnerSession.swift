@@ -51,6 +51,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         try checkCancellation()
 
         var runnerRegistrationMayExist = false
+        var runnerMayBeRunning = false
         let operation: Result<Void, any Error>
         do {
             try backend.create(id: id, image: Self.image)
@@ -72,6 +73,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             )
             try checkCancellation()
             stateChanged(.waitingForJob(id))
+            runnerMayBeRunning = true
             _ = try backend.exec(
                 ["yieldd-runner-control", "run"],
                 standardInput: nil,
@@ -86,7 +88,21 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
 
         stateChanged(.cleaningUp(id))
         var cleanupFailures: [RunnerSessionCleanupFailure] = []
-        if runnerRegistrationMayExist {
+        var runnerStopped = !runnerMayBeRunning
+        var runnerStopFailure: RunnerSessionCleanupFailure?
+        if runnerMayBeRunning {
+            do {
+                try backend.stopRunner(on: id)
+                runnerStopped = true
+            } catch {
+                runnerStopFailure = RunnerSessionCleanupFailure(step: .runnerProcess, error: error)
+            }
+        }
+
+        func removeGitHubRunner() {
+            guard runnerRegistrationMayExist else {
+                return
+            }
             do {
                 try github.removeRunners(named: id.value, from: repository)
             } catch {
@@ -94,10 +110,26 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             }
         }
 
+        if runnerStopped {
+            removeGitHubRunner()
+        }
+
+        var machineDestroyed = false
+        var machineFailure: RunnerSessionCleanupFailure?
         do {
             try backend.destroy(id)
+            machineDestroyed = true
         } catch {
-            cleanupFailures.append(RunnerSessionCleanupFailure(step: .machine, error: error))
+            machineFailure = RunnerSessionCleanupFailure(step: .machine, error: error)
+        }
+
+        if !runnerStopped, machineDestroyed {
+            removeGitHubRunner()
+        } else if !runnerStopped, let runnerStopFailure {
+            cleanupFailures.append(runnerStopFailure)
+        }
+        if let machineFailure {
+            cleanupFailures.append(machineFailure)
         }
 
         switch operation {
@@ -130,6 +162,7 @@ struct RunnerSessionCleanupFailure {
 enum RunnerSessionCleanupStep: String, Equatable {
     case githubRunner = "GitHub runner"
     case machine
+    case runnerProcess = "runner process"
 }
 
 enum RunnerSessionError: Error {

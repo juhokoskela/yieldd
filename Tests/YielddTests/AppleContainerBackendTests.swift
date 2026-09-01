@@ -85,6 +85,27 @@ func constructsRootCommandForMemoryAllocation() throws {
 }
 
 @Test
+func stopRunnerUsesBoundedNoncancellableRootCommand() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    try backend.stopRunner(on: runnerID)
+
+    #expect(executor.requests == [ProcessRequest(
+        executableURL: containerURL,
+        arguments: [
+            "machine", "run",
+            "--name", runnerID.value,
+            "--user", "root",
+            "--",
+            "yieldd-runner-control", "stop",
+        ],
+        timeout: AppleContainerBackend.runnerStopTimeout,
+        cancellable: false
+    )])
+}
+
+@Test
 func rejectsEmptyGuestCommand() {
     let executor = RecordingProcessExecutor(outcomes: [])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
