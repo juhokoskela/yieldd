@@ -192,9 +192,11 @@ private final class RecordingRunnerBackend: RunnerBackend {
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
         #expect(standardInput == nil)
+        #expect(user == .runner)
         if arguments == ["docker", "info"] {
             #expect(timeout == DockerReadiness.probeTimeout)
         } else {
@@ -212,6 +214,10 @@ private final class RecordingRunnerBackend: RunnerBackend {
         if let destroyError {
             throw destroyError
         }
+    }
+
+    func stopRunner(on id: RunnerID) throws {
+        Issue.record("Machine tests must not stop a runner")
     }
 }
 

@@ -18,7 +18,7 @@ func constructsCreateCommand() throws {
             "machine", "create",
             "--name", runnerID.value,
             "--home-mount", "none",
-            "--cpus", "4",
+            "--cpus", "8",
             "--memory", "12G",
             "local/yieldd-guest:dev",
         ]
@@ -43,6 +43,65 @@ func constructsExecCommandWithoutInterpretingArguments() throws {
             "--user", "runner",
             "--",
         ] + arguments
+    )])
+}
+
+@Test
+func constructsRootCommandForCPUAllocation() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    _ = try backend.setCPUAllocation(.full, on: runnerID)
+
+    #expect(executor.requests == [ProcessRequest(
+        executableURL: containerURL,
+        arguments: [
+            "machine", "run",
+            "--name", runnerID.value,
+            "--user", "root",
+            "--",
+            "yieldd-runner-control", "cpu", "full",
+        ]
+    )])
+}
+
+@Test
+func constructsRootCommandForMemoryAllocation() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    _ = try backend.setMemoryAllocation(.constrained, on: runnerID)
+
+    #expect(executor.requests == [ProcessRequest(
+        executableURL: containerURL,
+        arguments: [
+            "machine", "run",
+            "--name", runnerID.value,
+            "--user", "root",
+            "--",
+            "yieldd-runner-control", "memory", "constrained",
+        ]
+    )])
+}
+
+@Test
+func stopRunnerUsesBoundedNoncancellableRootCommand() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    try backend.stopRunner(on: runnerID)
+
+    #expect(executor.requests == [ProcessRequest(
+        executableURL: containerURL,
+        arguments: [
+            "machine", "run",
+            "--name", runnerID.value,
+            "--user", "root",
+            "--",
+            "yieldd-runner-control", "stop",
+        ],
+        timeout: AppleContainerBackend.runnerStopTimeout,
+        cancellable: false
     )])
 }
 

@@ -3,7 +3,8 @@ import Foundation
 struct AppleContainerBackend: RunnerBackend {
     // Machine deletion has its own 60-second budget after the machine stops.
     static let cleanupTimeout: TimeInterval = 90
-    static let virtualCPUs = 4
+    static let runnerStopTimeout: TimeInterval = 30
+    static let virtualCPUs = 8
     static let memory = "12G"
 
     let containerURL: URL
@@ -24,6 +25,7 @@ struct AppleContainerBackend: RunnerBackend {
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
         guard !arguments.isEmpty else {
@@ -32,7 +34,7 @@ struct AppleContainerBackend: RunnerBackend {
         var containerArguments = [
             "machine", "run",
             "--name", id.value,
-            "--user", "runner",
+            "--user", user.rawValue,
         ]
         if standardInput != nil {
             containerArguments.append("--interactive")
@@ -60,6 +62,20 @@ struct AppleContainerBackend: RunnerBackend {
         _ = try run(
             ["machine", "delete", id.value],
             timeout: Self.cleanupTimeout,
+            cancellable: false
+        )
+    }
+
+    func stopRunner(on id: RunnerID) throws {
+        _ = try run(
+            [
+                "machine", "run",
+                "--name", id.value,
+                "--user", RunnerGuestUser.root.rawValue,
+                "--",
+                "yieldd-runner-control", "stop",
+            ],
+            timeout: Self.runnerStopTimeout,
             cancellable: false
         )
     }

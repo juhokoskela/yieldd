@@ -1,0 +1,4 @@
+{
+  "cgroup-parent": "yieldd.slice",
+  "exec-opts": ["native.cgroupdriver=systemd"]
+}

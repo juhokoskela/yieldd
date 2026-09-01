@@ -34,9 +34,12 @@ func processResult(
 
 enum TestFailure: Error, Equatable {
     case create
+    case cpuAllocation
+    case memoryAllocation
     case dockerInfo
     case helloWorld
     case runnerJob
+    case runnerStop
     case runnerConfiguration
     case registrationToken
     case cleanup
