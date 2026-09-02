@@ -48,13 +48,11 @@ struct RunnerService {
             } catch {
                 if let id = (error as? RunnerSessionError)?.deferredRunnerIDAfterInterruption {
                     stateChanged(.cleanupDeferred(id))
-                    stateChanged(.stopping)
                     return
                 }
 
                 sessionFailed(error)
                 if error.hasRunnerSessionCleanupFailure {
-                    stateChanged(.stopping)
                     throw error
                 }
 
@@ -80,7 +78,6 @@ struct RunnerService {
             guard isCancellation(error) else {
                 throw error
             }
-            stateChanged(.stopping)
             return true
         }
     }
@@ -110,5 +107,4 @@ private extension Error {
 enum RunnerServiceState: Equatable {
     case backingOff(failures: Int, delay: TimeInterval)
     case cleanupDeferred(RunnerID)
-    case stopping
 }

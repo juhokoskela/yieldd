@@ -96,8 +96,6 @@ struct RunnerServiceCommand: ParsableCommand {
                         print("Runner slot for \(repository.fullName) failed \(failures) time(s); retrying in \(Int(delay)) \(unit).")
                     case let .cleanupDeferred(id):
                         print("GitHub cleanup for \(id.value) is deferred until GitHub releases its active job.")
-                    case .stopping:
-                        break
                     }
                 },
                 sessionFailed: { error in

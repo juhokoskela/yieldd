@@ -24,9 +24,8 @@ struct RunnerPool: Sendable {
                 do {
                     try runSlot(repository, stop)
                 } catch {
-                    if failure.record(error) {
-                        stop.request()
-                    }
+                    failure.record(error)
+                    stop.request()
                 }
             }
         }
@@ -42,26 +41,23 @@ final class RunnerPoolStop: @unchecked Sendable {
     private static let checkInterval: TimeInterval = 0.1
 
     private let condition = NSCondition()
-    private let checkExternal: () throws -> Void
+    private let checkExternal: @Sendable () throws -> Void
     private var requested = false
 
-    // The external checker must support concurrent calls. Internal state is protected by condition.
-    init(checkExternal: @escaping () throws -> Void = {}) {
+    init(checkExternal: @escaping @Sendable () throws -> Void = {}) {
         self.checkExternal = checkExternal
     }
 
     func request() {
-        condition.lock()
-        requested = true
-        condition.broadcast()
-        condition.unlock()
+        condition.withLock {
+            requested = true
+            condition.broadcast()
+        }
     }
 
     func check() throws {
         try checkExternal()
-        condition.lock()
-        let shouldStop = requested
-        condition.unlock()
+        let shouldStop = condition.withLock { requested }
         if shouldStop {
             throw CancellationError()
         }
@@ -78,14 +74,14 @@ final class RunnerPoolStop: @unchecked Sendable {
                 return
             }
 
-            condition.lock()
-            if !requested {
-                _ = condition.wait(
-                    until: Date(timeIntervalSinceNow: min(remaining, Self.checkInterval))
-                )
+            let shouldStop = condition.withLock {
+                if !requested {
+                    _ = condition.wait(
+                        until: Date(timeIntervalSinceNow: min(remaining, Self.checkInterval))
+                    )
+                }
+                return requested
             }
-            let shouldStop = requested
-            condition.unlock()
             if shouldStop {
                 throw CancellationError()
             }
@@ -101,13 +97,12 @@ private final class RunnerPoolFailure: @unchecked Sendable {
         lock.withLock { error }
     }
 
-    func record(_ error: any Error) -> Bool {
+    func record(_ error: any Error) {
         lock.withLock {
             guard self.error == nil else {
-                return false
+                return
             }
             self.error = error
-            return true
         }
     }
 }
