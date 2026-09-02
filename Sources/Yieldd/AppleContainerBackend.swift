@@ -4,7 +4,7 @@ struct AppleContainerBackend: RunnerBackend {
     // Machine deletion has its own 60-second budget after the machine stops.
     static let cleanupTimeout: TimeInterval = 90
     static let runnerStopTimeout: TimeInterval = 30
-    static let virtualCPUs = 8
+    static let virtualCPUs = 4
     static let memory = "12G"
 
     let containerURL: URL

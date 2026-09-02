@@ -18,7 +18,7 @@ func constructsCreateCommand() throws {
             "machine", "create",
             "--name", runnerID.value,
             "--home-mount", "none",
-            "--cpus", "8",
+            "--cpus", "4",
             "--memory", "12G",
             "local/yieldd-guest:dev",
         ]
