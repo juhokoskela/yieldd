@@ -136,8 +136,6 @@ protocol ProcessExecuting {
 }
 
 struct ProcessExecutor: ProcessExecuting {
-    private static let spawnLock = NSLock()
-
     private let terminationGracePeriod: TimeInterval
     private let cancellationPollInterval: TimeInterval
     private let checkCancellation: (() throws -> Void)?
@@ -155,51 +153,37 @@ struct ProcessExecutor: ProcessExecuting {
     }
 
     func execute(_ request: ProcessRequest) throws -> ProcessResult {
-        let (stdinPipe, stdoutPipe, stderrPipe, process) = try Self.spawnLock.withLock {
-            let stdinPipe = request.standardInput.map { _ in Pipe() }
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
+        let stdinPipe = request.standardInput.map { _ in Pipe() }
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
 
-            do {
-                let descriptors = [
-                    stdinPipe?.fileHandleForReading.fileDescriptor,
-                    stdinPipe?.fileHandleForWriting.fileDescriptor,
-                    stdoutPipe.fileHandleForReading.fileDescriptor,
-                    stdoutPipe.fileHandleForWriting.fileDescriptor,
-                    stderrPipe.fileHandleForReading.fileDescriptor,
-                    stderrPipe.fileHandleForWriting.fileDescriptor,
-                ].compactMap { $0 }
-                for descriptor in descriptors {
-                    try setCloseOnExec(descriptor)
+        let process: SpawnedProcess
+        do {
+            if let stdinPipe {
+                let descriptor = stdinPipe.fileHandleForWriting.fileDescriptor
+                guard fcntl(descriptor, F_SETNOSIGPIPE, 1) != -1 else {
+                    throw ProcessExecutionError.inputWriteFailed(
+                        request: request,
+                        underlying: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    )
                 }
-
-                if let stdinPipe {
-                    let descriptor = stdinPipe.fileHandleForWriting.fileDescriptor
-                    guard fcntl(descriptor, F_SETNOSIGPIPE, 1) != -1 else {
-                        throw ProcessExecutionError.inputWriteFailed(
-                            request: request,
-                            underlying: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                        )
-                    }
-                }
-
-                let process = try spawn(
-                    request,
-                    stdin: stdinPipe,
-                    stdout: stdoutPipe,
-                    stderr: stderrPipe
-                )
-                try? stdinPipe?.fileHandleForReading.close()
-                try? stdoutPipe.fileHandleForWriting.close()
-                try? stderrPipe.fileHandleForWriting.close()
-                return (stdinPipe, stdoutPipe, stderrPipe, process)
-            } catch {
-                closePipes(stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
-                if let executionError = error as? ProcessExecutionError {
-                    throw executionError
-                }
-                throw ProcessExecutionError.launchFailed(request: request, underlying: error)
             }
+
+            process = try spawn(
+                request,
+                stdin: stdinPipe,
+                stdout: stdoutPipe,
+                stderr: stderrPipe
+            )
+            try? stdinPipe?.fileHandleForReading.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+        } catch {
+            closePipes(stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
+            if let executionError = error as? ProcessExecutionError {
+                throw executionError
+            }
+            throw ProcessExecutionError.launchFailed(request: request, underlying: error)
         }
 
         let timeoutDeadline = request.timeout.map(deadline(after:))
@@ -363,7 +347,7 @@ struct ProcessExecutor: ProcessExecuting {
             stderr.fileHandleForReading.fileDescriptor,
             stderr.fileHandleForWriting.fileDescriptor,
         ].compactMap { $0 }
-        for descriptor in Set(descriptors) {
+        for descriptor in Set(descriptors) where descriptor > STDERR_FILENO {
             try requirePOSIXSuccess(posix_spawn_file_actions_addclose(&fileActions, descriptor))
         }
 
@@ -517,14 +501,6 @@ struct ProcessExecutor: ProcessExecuting {
     private func requirePOSIXSuccess(_ status: Int32) throws {
         guard status == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: status) ?? .EIO)
-        }
-    }
-
-    private func setCloseOnExec(_ descriptor: Int32) throws {
-        let flags = fcntl(descriptor, F_GETFD)
-        guard flags != -1,
-              fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) != -1 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 

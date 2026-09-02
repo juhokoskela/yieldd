@@ -210,8 +210,8 @@ func writesStandardInputWithoutAddingItToArguments() throws {
 @Test
 func childWithoutStandardInputReceivesEndOfFile() throws {
     let request = ProcessRequest(
-        executableURL: URL(fileURLWithPath: "/bin/sh"),
-        arguments: ["-c", "if read -r value; then exit 1; fi"],
+        executableURL: URL(fileURLWithPath: "/bin/cat"),
+        arguments: [],
         timeout: 1
     )
 
@@ -219,6 +219,7 @@ func childWithoutStandardInputReceivesEndOfFile() throws {
 
     #expect(result.terminationReason == .exit)
     #expect(result.terminationStatus == 0)
+    #expect(result.stdout.isEmpty)
 }
 
 @Test
