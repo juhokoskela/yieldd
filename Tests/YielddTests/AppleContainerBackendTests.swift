@@ -21,7 +21,8 @@ func constructsCreateCommand() throws {
             "--cpus", "4",
             "--memory", "12G",
             "local/yieldd-guest:dev",
-        ]
+        ],
+        timeout: AppleContainerBackend.creationTimeout
     )])
 }
 
@@ -51,7 +52,11 @@ func constructsRootCommandForMemoryAllocation() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.setMemoryAllocation(.constrained, on: runnerID)
+    _ = try backend.setMemoryAllocation(
+        .constrained,
+        timeout: EphemeralRunnerSession.memoryConfigurationTimeout,
+        on: runnerID
+    )
 
     #expect(executor.requests == [ProcessRequest(
         executableURL: containerURL,
@@ -61,7 +66,8 @@ func constructsRootCommandForMemoryAllocation() throws {
             "--user", "root",
             "--",
             "yieldd-runner-control", "memory", "constrained",
-        ]
+        ],
+        timeout: EphemeralRunnerSession.memoryConfigurationTimeout
     )])
 }
 
@@ -149,6 +155,32 @@ func passesTimeoutWithoutPuttingItInArguments() throws {
 }
 
 @Test
+func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    _ = try backend.exec(
+        ["yieldd-runner-control", "run"],
+        timeout: nil,
+        outputCapture: .tail(maxBytes: 1_024),
+        as: .root,
+        on: runnerID
+    )
+
+    #expect(executor.requests == [ProcessRequest(
+        executableURL: containerURL,
+        arguments: [
+            "machine", "run",
+            "--name", runnerID.value,
+            "--user", "root",
+            "--",
+            "yieldd-runner-control", "run",
+        ],
+        outputCapture: .tail(maxBytes: 1_024)
+    )])
+}
+
+@Test
 func destroyReturnsWhenMachineIsAbsent() throws {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult(stdout: "another-machine\n")),
@@ -180,6 +212,54 @@ func destroyDeletesOnlyAnExactMachineID() throws {
     ])
     #expect(executor.requests.allSatisfy { !$0.cancellable })
     #expect(executor.requests.allSatisfy { $0.timeout == 90 })
+}
+
+@Test
+func destroyAcceptsDeleteFailureWhenMachineIsConfirmedAbsent() throws {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: "\(runnerID.value)\n")),
+        .failure(TestFailure.machineCleanup),
+        .success(processResult(stdout: "another-machine\n")),
+    ])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    try backend.destroy(runnerID)
+
+    #expect(executor.requests.map(\.arguments) == [
+        ["machine", "list", "--quiet"],
+        ["machine", "delete", runnerID.value],
+        ["machine", "list", "--quiet"],
+    ])
+}
+
+@Test
+func destroyPreservesDeleteFailureWhenMachineStillExists() {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: "\(runnerID.value)\n")),
+        .failure(TestFailure.machineCleanup),
+        .success(processResult(stdout: "\(runnerID.value)\n")),
+    ])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    #expect(throws: TestFailure.machineCleanup) {
+        try backend.destroy(runnerID)
+    }
+    #expect(executor.requests.count == 3)
+}
+
+@Test
+func destroyPreservesDeleteFailureWhenReconciliationFails() {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: "\(runnerID.value)\n")),
+        .failure(TestFailure.machineCleanup),
+        .failure(TestFailure.unexpectedProcessRequest),
+    ])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+
+    #expect(throws: TestFailure.machineCleanup) {
+        try backend.destroy(runnerID)
+    }
+    #expect(executor.requests.count == 3)
 }
 
 @Test
