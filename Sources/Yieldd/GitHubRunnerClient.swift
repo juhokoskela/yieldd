@@ -88,6 +88,9 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
 
     func removeRunners(named name: String, from repository: GitHubRepository) throws {
         for runner in try runners(named: name, in: repository) where runner.name == name {
+            guard !runner.busy else {
+                throw GitHubRunnerClientError.runnerBusy(name: name)
+            }
             do {
                 _ = try run(
                     method: "DELETE",
@@ -97,10 +100,16 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
                 )
             } catch {
                 let deletionError = error
-                guard let remainingRunners = try? runners(named: name, in: repository),
-                      !remainingRunners.contains(where: { $0.id == runner.id }) else {
+                guard let remainingRunners = try? runners(named: name, in: repository) else {
                     throw deletionError
                 }
+                guard let remainingRunner = remainingRunners.first(where: { $0.id == runner.id }) else {
+                    continue
+                }
+                if remainingRunner.busy {
+                    throw GitHubRunnerClientError.runnerBusy(name: name)
+                }
+                throw deletionError
             }
         }
     }
@@ -152,6 +161,7 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
 enum GitHubRunnerClientError: Error {
     case missingRegistrationToken
     case invalidResponse(operation: String, underlying: any Error)
+    case runnerBusy(name: String)
 }
 
 extension GitHubRunnerClientError: LocalizedError {
@@ -161,6 +171,8 @@ extension GitHubRunnerClientError: LocalizedError {
             "GitHub returned an empty runner registration token."
         case let .invalidResponse(operation, underlying):
             "Could not \(operation): \(underlying.localizedDescription)"
+        case let .runnerBusy(name):
+            "GitHub still considers runner \(name) busy."
         }
     }
 }
@@ -176,4 +188,5 @@ private struct RunnerPage: Decodable {
 private struct GitHubRunner: Decodable {
     let id: Int64
     let name: String
+    let busy: Bool
 }
