@@ -96,21 +96,19 @@ private final class SignalMonitorState: @unchecked Sendable {
     private var interruption: SignalInterruption?
 
     func record(signal: Int32) {
-        lock.lock()
-        if interruption == nil {
-            interruption = SignalInterruption(signal: signal)
+        lock.withLock {
+            if interruption == nil {
+                interruption = SignalInterruption(signal: signal)
+            }
         }
-        lock.unlock()
         received.signal()
     }
 
     func check() throws {
-        lock.lock()
-        let interruption = interruption
-        lock.unlock()
+        let recordedInterruption = lock.withLock { self.interruption }
 
-        if let interruption {
-            throw interruption
+        if let recordedInterruption {
+            throw recordedInterruption
         }
     }
 
@@ -124,20 +122,19 @@ private final class SignalMonitorInstallation: @unchecked Sendable {
     private var installed = false
 
     func acquire() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard !installed else {
-            return false
+        lock.withLock {
+            guard !installed else {
+                return false
+            }
+            installed = true
+            return true
         }
-        installed = true
-        return true
     }
 
     func release() {
-        lock.lock()
-        installed = false
-        lock.unlock()
+        lock.withLock {
+            installed = false
+        }
     }
 }
 
