@@ -59,7 +59,7 @@ struct RunnerServiceCommand: ParsableCommand {
             },
             sessionFailed: { error in
                 if !isCancellation(error) {
-                    writeToStandardError("Runner session failed: \(describe(error))\n")
+                    writeToStandardError("Runner session failed: \(describeError(error))\n")
                 }
             }
         ).run(repository: repository)
@@ -74,14 +74,6 @@ private func isCancellation(_ error: any Error) -> Bool {
         return true
     }
     return false
-}
-
-private func describe(_ error: any Error) -> String {
-    if let localizedError = error as? any LocalizedError,
-       let description = localizedError.errorDescription {
-        return description
-    }
-    return String(describing: error)
 }
 
 private func writeToStandardError(_ text: String) {

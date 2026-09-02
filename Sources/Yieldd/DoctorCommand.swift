@@ -57,7 +57,7 @@ struct Doctor {
         } catch {
             checks.append(DoctorCheck(
                 name: "container executable",
-                status: .failed(describe(error))
+                status: .failed(describeError(error))
             ))
             checks.append(DoctorCheck(
                 name: "container system",
@@ -78,7 +78,7 @@ struct Doctor {
             try executor.execute(systemRequest).requireSuccess(for: systemRequest)
             checks.append(DoctorCheck(name: "container system", status: .passed("reachable")))
         } catch {
-            checks.append(DoctorCheck(name: "container system", status: .failed(describe(error))))
+            checks.append(DoctorCheck(name: "container system", status: .failed(describeError(error))))
             checks.append(DoctorCheck(
                 name: "container machine",
                 status: .skipped("container system is unreachable")
@@ -94,7 +94,7 @@ struct Doctor {
             try executor.execute(machineRequest).requireSuccess(for: machineRequest)
             checks.append(DoctorCheck(name: "container machine", status: .passed("available")))
         } catch {
-            checks.append(DoctorCheck(name: "container machine", status: .failed(describe(error))))
+            checks.append(DoctorCheck(name: "container machine", status: .failed(describeError(error))))
         }
 
         return checks
@@ -106,7 +106,7 @@ struct Doctor {
             ghURL = try executableLocator.locate("gh")
         } catch {
             return [
-                DoctorCheck(name: "gh executable", status: .failed(describe(error))),
+                DoctorCheck(name: "gh executable", status: .failed(describeError(error))),
                 DoctorCheck(
                     name: "GitHub authentication",
                     status: .skipped("gh executable is unavailable")
@@ -123,17 +123,9 @@ struct Doctor {
             try executor.execute(request).requireSuccess(for: request)
             checks.append(DoctorCheck(name: "GitHub authentication", status: .passed("authenticated")))
         } catch {
-            checks.append(DoctorCheck(name: "GitHub authentication", status: .failed(describe(error))))
+            checks.append(DoctorCheck(name: "GitHub authentication", status: .failed(describeError(error))))
         }
         return checks
-    }
-
-    private func describe(_ error: any Error) -> String {
-        if let localizedError = error as? any LocalizedError,
-           let description = localizedError.errorDescription {
-            return description
-        }
-        return String(describing: error)
     }
 }
 
