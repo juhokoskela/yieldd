@@ -21,11 +21,18 @@ struct RunnerLeaseStore {
     }
 
     func load() throws -> RunnerLease? {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        let descriptor = fileURL.path.withCString { path in
+            Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard descriptor >= 0 else {
+            let errorNumber = errno
+            guard errorNumber == ENOENT else {
+                throw POSIXError(POSIXErrorCode(rawValue: errorNumber) ?? .EIO)
+            }
             return nil
         }
 
-        let handle = try FileHandle(forReadingFrom: fileURL)
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
         let data = try handle.read(upToCount: Self.maximumBytes + 1) ?? Data()
         guard data.count <= Self.maximumBytes else {
@@ -56,10 +63,13 @@ struct RunnerLeaseStore {
     }
 
     func clear() throws {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        guard fileURL.path.withCString(Darwin.unlink) == 0 else {
+            let errorNumber = errno
+            guard errorNumber == ENOENT else {
+                throw POSIXError(POSIXErrorCode(rawValue: errorNumber) ?? .EIO)
+            }
             return
         }
-        try FileManager.default.removeItem(at: fileURL)
     }
 
     private static func isValidRunnerID(_ value: String) -> Bool {
