@@ -9,6 +9,13 @@ private let apiHeaders = [
     "--header", "X-GitHub-Api-Version: 2026-03-10",
 ]
 
+private func runnerListArguments(name: String) -> [String] {
+    [
+        "api", "--method", "GET", "--paginate", "--slurp",
+        "--raw-field", "name=\(name)",
+    ] + apiHeaders + ["repos/owner/repository/actions/runners"]
+}
+
 @Test
 func parsesRepositoryFullName() throws {
     let repository = try GitHubRepository("juhokoskela/yieldd")
@@ -48,7 +55,8 @@ func createsRegistrationTokenWithAuthenticatedGitHubCLI() throws {
         executableURL: ghURL,
         arguments: ["api", "--method", "POST"] + apiHeaders + [
             "repos/owner/repository/actions/runners/registration-token",
-        ]
+        ],
+        timeout: GitHubRunnerClient.registrationTimeout
     )])
 }
 
@@ -63,9 +71,7 @@ func removesOnlyExactRunnerNameMatches() throws {
     try client.removeRunners(named: "yieldd-test-1", from: repository)
 
     #expect(executor.requests.map(\.arguments) == [
-        ["api", "--method", "GET", "--paginate", "--slurp"] + apiHeaders + [
-            "repos/owner/repository/actions/runners",
-        ],
+        runnerListArguments(name: "yieldd-test-1"),
         ["api", "--method", "DELETE"] + apiHeaders + [
             "repos/owner/repository/actions/runners/42",
         ],
@@ -100,15 +106,11 @@ func acceptsDeleteFailureWhenRunnerDisappearedConcurrently() throws {
     try client.removeRunners(named: "yieldd-test-1", from: repository)
 
     #expect(executor.requests.map(\.arguments) == [
-        ["api", "--method", "GET", "--paginate", "--slurp"] + apiHeaders + [
-            "repos/owner/repository/actions/runners",
-        ],
+        runnerListArguments(name: "yieldd-test-1"),
         ["api", "--method", "DELETE"] + apiHeaders + [
             "repos/owner/repository/actions/runners/42",
         ],
-        ["api", "--method", "GET", "--paginate", "--slurp"] + apiHeaders + [
-            "repos/owner/repository/actions/runners",
-        ],
+        runnerListArguments(name: "yieldd-test-1"),
     ])
     #expect(executor.requests.allSatisfy { !$0.cancellable })
     #expect(executor.requests.allSatisfy { $0.timeout == GitHubRunnerClient.cleanupTimeout })
