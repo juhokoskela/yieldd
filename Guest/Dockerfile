@@ -16,7 +16,8 @@ RUN apt-get update \
         systemd \
         systemd-sysv \
         libatomic1 \
-        make \
+        build-essential \
+        docker-compose-v2 \
     && mkdir -p /opt/actions-runner \
     && curl --fail --location --retry 3 \
         --output /tmp/actions-runner.tar.gz \
