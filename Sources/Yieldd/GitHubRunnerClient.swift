@@ -106,10 +106,9 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
                 guard let remainingRunner = remainingRunners.first(where: { $0.id == runner.id }) else {
                     continue
                 }
-                if remainingRunner.busy {
-                    throw GitHubRunnerClientError.runnerBusy(name: name)
-                }
-                throw deletionError
+                throw remainingRunner.busy
+                    ? GitHubRunnerClientError.runnerBusy(name: name)
+                    : deletionError
             }
         }
     }
