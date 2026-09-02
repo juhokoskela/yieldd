@@ -22,7 +22,7 @@ func processResult(
     stdout: String = "",
     stderr: String = "",
     status: Int32 = 0,
-    reason: ProcessTerminationReason = .exit
+    reason: Process.TerminationReason = .exit
 ) -> ProcessResult {
     ProcessResult(
         stdout: Data(stdout.utf8),
