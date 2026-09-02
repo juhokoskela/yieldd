@@ -8,7 +8,7 @@ struct RunnerLease: Equatable, Sendable {
 
 // The lock serializes every read-modify-write operation on the shared lease file.
 final class RunnerLeaseStore: @unchecked Sendable {
-    static let maximumBytes = 4 * 1_024
+    static let maximumBytes = 8 * 1_024
 
     let fileURL: URL
     private let lock = NSLock()

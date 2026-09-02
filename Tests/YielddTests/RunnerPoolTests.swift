@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 import Testing
 @testable import Yieldd
@@ -66,6 +67,33 @@ func serviceCommandPreservesRepeatedRepositories() throws {
         firstPoolRepository.fullName,
         firstPoolRepository.fullName,
     ])
+}
+
+@Test
+func serviceCommandRejectsTooManyRunnerSlots() {
+    let arguments = Array(
+        repeating: firstPoolRepository.fullName,
+        count: RunnerServiceCommand.maximumSlots + 1
+    )
+
+    do {
+        _ = try RunnerServiceCommand.parse(arguments)
+        Issue.record("Expected excessive runner slots to be rejected")
+    } catch {
+        #expect(String(describing: error).contains(
+            "at most \(RunnerServiceCommand.maximumSlots) runner slots"
+        ))
+    }
+}
+
+@Test
+func serviceCommandAcceptsMaximumRunnerSlots() throws {
+    let arguments = Array(
+        repeating: firstPoolRepository.fullName,
+        count: RunnerServiceCommand.maximumSlots
+    )
+
+    _ = try RunnerServiceCommand.parse(arguments)
 }
 
 private final class ConcurrentSlotGate: @unchecked Sendable {

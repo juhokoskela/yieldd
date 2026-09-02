@@ -2,6 +2,8 @@ import ArgumentParser
 import Foundation
 
 struct RunnerServiceCommand: ParsableCommand {
+    static let maximumSlots = 16
+
     static let configuration = CommandConfiguration(
         commandName: "serve",
         abstract: "Continuously run ephemeral GitHub Actions runners."
@@ -9,6 +11,12 @@ struct RunnerServiceCommand: ParsableCommand {
 
     @Argument(help: "Repositories in owner/name form. Repeat a repository to give it another runner slot.")
     var repositories: [String]
+
+    mutating func validate() throws {
+        guard repositories.count <= Self.maximumSlots else {
+            throw ValidationError("serve supports at most \(Self.maximumSlots) runner slots.")
+        }
+    }
 
     mutating func run() throws {
         let repositories = try repositories.map(GitHubRepository.init)

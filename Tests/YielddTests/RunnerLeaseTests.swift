@@ -68,6 +68,26 @@ func leaseStorePreservesConcurrentUpdates() async throws {
 }
 
 @Test
+func leaseStoreSupportsMaximumRunnerSlots() throws {
+    let directory = makeStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    let repository = try GitHubRepository(
+        "\(String(repeating: "o", count: 39))/\(String(repeating: "r", count: 100))"
+    )
+
+    for index in 0..<RunnerServiceCommand.maximumSlots {
+        let suffix = String(index)
+        let runnerID = RunnerID(value:
+            "yieldd-\(String(repeating: "a", count: 121 - suffix.count))\(suffix)"
+        )
+        try store.save(RunnerLease(runnerID: runnerID, repository: repository))
+    }
+
+    #expect(try store.load().count == RunnerServiceCommand.maximumSlots)
+}
+
+@Test
 func leaseStoreRejectsOversizedState() throws {
     let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
