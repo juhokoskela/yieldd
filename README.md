@@ -10,6 +10,8 @@
 - A running container system
 - GitHub CLI authenticated to `github.com` with administration access to the test repository
 
+For safety, `yieldd` rejects empty `PATH` components instead of interpreting them as the working directory.
+
 Start the container system outside `yieldd` if needed:
 
 ```sh
@@ -52,7 +54,7 @@ After building the guest image, run:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd machine-test
 ```
 
-The command creates a uniquely named machine with no host home mount, runs `docker info`, runs `docker run --rm hello-world`, and destroys the machine. It attempts cleanup after every creation attempt, including failed ones.
+The command creates a uniquely named machine with no host home mount, runs `docker info`, runs `docker run --rm hello-world`, and destroys the machine. It attempts cleanup after every creation attempt, including failed ones and commands interrupted with Ctrl+C or SIGTERM.
 
 ## Ephemeral runner test
 
@@ -66,7 +68,7 @@ Then start one ephemeral runner for that repository:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner-test OWNER/REPOSITORY
 ```
 
-The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
+The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
 
 ## Foreground runner service
 
