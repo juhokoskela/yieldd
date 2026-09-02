@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import Yieldd
@@ -13,10 +14,8 @@ func machineTestRunsChecksAndCleanupInOrder() throws {
         ]
     )
 
-    let result = try MachineTestRunner(backend: backend).run(id: machineTestID)
+    try MachineTestRunner(backend: backend).run(id: machineTestID)
 
-    #expect(result.dockerInfo.stdoutText == "docker info")
-    #expect(result.helloWorld.stdoutText == "hello world")
     #expect(backend.calls == [
         .create(machineTestID, MachineTestRunner.image),
         .exec(machineTestID, ["docker", "info"]),
@@ -59,7 +58,7 @@ func retriesDockerInfoWhileTheMachineBoots() throws {
         sleep: { delays.append($0) }
     )
 
-    _ = try runner.run(id: machineTestID)
+    try runner.run(id: machineTestID)
 
     #expect(delays == [0.25])
     #expect(backend.calls == [
@@ -91,7 +90,7 @@ func launchFailureDoesNotRetryDockerInfo() {
     )
 
     do {
-        _ = try runner.run(id: machineTestID)
+        try runner.run(id: machineTestID)
         Issue.record("Expected process launch to fail")
     } catch let ProcessExecutionError.launchFailed(actualRequest, _) {
         #expect(actualRequest == request)
@@ -154,7 +153,7 @@ func operationAndCleanupFailuresAreBothRetained() {
     )
 
     do {
-        _ = try MachineTestRunner(backend: backend).run(id: machineTestID)
+        try MachineTestRunner(backend: backend).run(id: machineTestID)
         Issue.record("Expected operation and cleanup to fail")
     } catch let MachineTestError.operationAndCleanupFailed(operation, cleanup) {
         #expect(operation as? TestFailure == .create)
@@ -163,6 +162,29 @@ func operationAndCleanupFailuresAreBothRetained() {
         Issue.record("Unexpected error: \(error)")
     }
     #expect(backend.calls.filter { $0 == .destroy(machineTestID) }.count == 1)
+}
+
+@Test
+func interruptionAfterCreateCleansUpWithoutRunningChecks() {
+    let backend = RecordingRunnerBackend()
+    var checks = 0
+    let runner = MachineTestRunner(
+        backend: backend,
+        checkCancellation: {
+            checks += 1
+            if checks == 2 {
+                throw SignalInterruption(signal: SIGTERM)
+            }
+        }
+    )
+
+    #expect(throws: SignalInterruption(signal: SIGTERM)) {
+        try runner.run(id: machineTestID)
+    }
+    #expect(backend.calls == [
+        .create(machineTestID, MachineTestRunner.image),
+        .destroy(machineTestID),
+    ])
 }
 
 private final class RecordingRunnerBackend: RunnerBackend {
@@ -192,15 +214,17 @@ private final class RecordingRunnerBackend: RunnerBackend {
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
         #expect(standardInput == nil)
+        #expect(outputCapture == .all)
         #expect(user == .runner)
         if arguments == ["docker", "info"] {
             #expect(timeout == DockerReadiness.probeTimeout)
         } else {
-            #expect(timeout == nil)
+            #expect(timeout == MachineTestRunner.helloWorldTimeout)
         }
         calls.append(.exec(id, arguments))
         guard !execOutcomes.isEmpty else {

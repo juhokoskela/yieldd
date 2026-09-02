@@ -132,6 +132,53 @@ func drainsOutputLargerThanAPipeBuffer() throws {
 }
 
 @Test
+func retainsOnlyConfiguredOutputTails() throws {
+    let stdout = String(repeating: "stdout-", count: 1_000) + "stdout tail"
+    let stderr = String(repeating: "stderr-", count: 1_000) + "stderr tail"
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "printf '%s' \"$1\"; printf '%s' \"$2\" >&2", "yieldd-tail", stdout, stderr],
+        outputCapture: .tail(maxBytes: 128)
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.stdout.count == 128)
+    #expect(result.stderr.count == 128)
+    #expect(stdout.hasSuffix(result.stdoutText))
+    #expect(stderr.hasSuffix(result.stderrText))
+    #expect(result.stdoutText.hasSuffix("stdout tail"))
+    #expect(result.stderrText.hasSuffix("stderr tail"))
+}
+
+@Test
+func retainsOutputTailAcrossMultipleReadChunks() throws {
+    let expected = (1...200_000).map(String.init).joined(separator: "\n") + "\n"
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/usr/bin/seq"),
+        arguments: ["1", "200000"],
+        outputCapture: .tail(maxBytes: 1_024)
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.stdout == Data(expected.utf8.suffix(1_024)))
+}
+
+@Test
+func hugeTimeoutDoesNotTrapDeadlineConversion() throws {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+        arguments: [],
+        timeout: .greatestFiniteMagnitude
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationStatus == 0)
+}
+
+@Test
 func preservesArgumentsWithoutShellInterpretation() throws {
     let argument = "value with spaces; $(whoami) && `uname`"
     let request = ProcessRequest(
@@ -224,6 +271,52 @@ func cancellationTerminatesProcessAndPreservesOutput() {
 }
 
 @Test
+func cancellationTerminatesTheOwnedProcessGroup() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yieldd-cancel-tree-\(UUID().uuidString)", isDirectory: true)
+    let processGroupURL = directory.appendingPathComponent("group.pid")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer {
+        terminateProcessGroupRecorded(at: processGroupURL)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    let script = """
+        /bin/sh -c 'trap "" HUP TERM; while :; do :; done' &
+        echo $$ > "$1"
+        trap '' TERM
+        while :; do :; done
+        """
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", script, "yieldd-cancel-test", processGroupURL.path]
+    )
+    let executor = ProcessExecutor(
+        terminationGracePeriod: 0.05,
+        cancellationPollInterval: 0.01,
+        checkCancellation: {
+            if FileManager.default.fileExists(atPath: processGroupURL.path) {
+                throw TestFailure.cancelled
+            }
+        }
+    )
+
+    do {
+        _ = try executor.execute(request)
+        Issue.record("Expected the process to be cancelled")
+    } catch let ProcessExecutionError.cancelled(_, result, underlying) {
+        #expect(result.terminationReason == .uncaughtSignal)
+        #expect(result.terminationStatus == SIGKILL)
+        #expect(underlying as? TestFailure == .cancelled)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    let processGroup = try #require(processIdentifierRecorded(at: processGroupURL))
+    #expect(!processGroupExists(processGroup))
+}
+
+@Test
 func noncancellableRequestIgnoresCancellationChecker() throws {
     var checked = false
     let request = ProcessRequest(
@@ -309,6 +402,7 @@ private func executeWithDescendantHoldingOutput(
 ) throws -> RetainedDescriptorExecution {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("yieldd-process-tree-\(UUID().uuidString)", isDirectory: true)
+    let processGroupURL = directory.appendingPathComponent("group.pid")
     let childPIDURL = directory.appendingPathComponent("child.pid")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer {
@@ -318,9 +412,10 @@ private func executeWithDescendantHoldingOutput(
 
     let script = """
         /bin/sh -c 'trap "" HUP TERM; exec /bin/sleep 30' &
-        echo $! > "$1"
+        echo $$ > "$1"
+        echo $! > "$2"
         echo 'waiting forever' >&2
-        if [ "$2" = exit ]; then
+        if [ "$3" = exit ]; then
             exit 0
         fi
         trap '' TERM
@@ -329,8 +424,8 @@ private func executeWithDescendantHoldingOutput(
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/bin/sh"),
         arguments: [
-            "-c", script,
-            "yieldd-timeout-test", childPIDURL.path, parentAction.rawValue,
+            "-c", script, "yieldd-timeout-test",
+            processGroupURL.path, childPIDURL.path, parentAction.rawValue,
         ],
         timeout: 0.2
     )
@@ -357,16 +452,19 @@ private func executeWithDescendantHoldingOutput(
     return RetainedDescriptorExecution(
         request: request,
         completedWithoutClosingDescendant: completedWithoutClosingDescendant,
+        processGroupSurvived: processIdentifierRecorded(at: processGroupURL)
+            .map(processGroupExists) ?? false,
         result: result
     )
 }
 
 private func expectTimeout(
     _ execution: RetainedDescriptorExecution,
-    terminationReason: ProcessTerminationReason,
+    terminationReason: Process.TerminationReason,
     terminationStatus: Int32
 ) throws {
     #expect(execution.completedWithoutClosingDescendant == .success)
+    #expect(!execution.processGroupSurvived)
     do {
         _ = try execution.result.get()
         Issue.record("Expected the process to time out")
@@ -383,6 +481,7 @@ private func expectTimeout(
 private struct RetainedDescriptorExecution {
     let request: ProcessRequest
     let completedWithoutClosingDescendant: DispatchTimeoutResult
+    let processGroupSurvived: Bool
     let result: Result<ProcessResult, any Error>
 }
 
@@ -396,11 +495,31 @@ private enum RetainedDescriptorParentAction: String {
 }
 
 private func terminateProcessRecorded(at url: URL) {
-    guard let contents = try? String(contentsOf: url, encoding: .utf8),
-          let processIdentifier = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+    guard let processIdentifier = processIdentifierRecorded(at: url) else {
         return
     }
     Darwin.kill(processIdentifier, SIGKILL)
+}
+
+private func terminateProcessGroupRecorded(at url: URL) {
+    guard let processGroup = processIdentifierRecorded(at: url) else {
+        return
+    }
+    Darwin.kill(-processGroup, SIGKILL)
+}
+
+private func processIdentifierRecorded(at url: URL) -> Int32? {
+    guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+        return nil
+    }
+    return Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+private func processGroupExists(_ processGroup: Int32) -> Bool {
+    if Darwin.kill(-processGroup, 0) == 0 {
+        return true
+    }
+    return errno == EPERM
 }
 
 private final class ProcessExecutionOutcome: @unchecked Sendable {
@@ -408,14 +527,12 @@ private final class ProcessExecutionOutcome: @unchecked Sendable {
     private var storedResult: Result<ProcessResult, any Error>?
 
     func store(_ result: Result<ProcessResult, any Error>) {
-        lock.lock()
-        storedResult = result
-        lock.unlock()
+        lock.withLock {
+            storedResult = result
+        }
     }
 
     func result() -> Result<ProcessResult, any Error>? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedResult
+        lock.withLock { storedResult }
     }
 }

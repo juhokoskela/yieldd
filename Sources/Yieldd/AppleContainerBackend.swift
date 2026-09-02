@@ -1,10 +1,10 @@
 import Foundation
 
 struct AppleContainerBackend: RunnerBackend {
-    // Machine deletion has its own 60-second budget after the machine stops.
+    static let creationTimeout: TimeInterval = 5 * 60
     static let cleanupTimeout: TimeInterval = 90
     static let runnerStopTimeout: TimeInterval = 30
-    static let virtualCPUs = 8
+    static let virtualCPUs = 4
     static let memory = "12G"
 
     let containerURL: URL
@@ -18,13 +18,14 @@ struct AppleContainerBackend: RunnerBackend {
             "--cpus", String(Self.virtualCPUs),
             "--memory", Self.memory,
             image,
-        ])
+        ], timeout: Self.creationTimeout)
     }
 
     func exec(
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
@@ -45,25 +46,28 @@ struct AppleContainerBackend: RunnerBackend {
         return try run(
             containerArguments,
             standardInput: standardInput,
-            timeout: timeout
+            timeout: timeout,
+            outputCapture: outputCapture
         )
     }
 
     func destroy(_ id: RunnerID) throws {
-        let list = try run(
-            ["machine", "list", "--quiet"],
-            timeout: Self.cleanupTimeout,
-            cancellable: false
-        )
-        let machineIDs = list.stdoutText.split(whereSeparator: \Character.isNewline)
-        guard machineIDs.contains(Substring(id.value)) else {
+        guard try machineIDs().contains(id.value) else {
             return
         }
-        _ = try run(
-            ["machine", "delete", id.value],
-            timeout: Self.cleanupTimeout,
-            cancellable: false
-        )
+        do {
+            _ = try run(
+                ["machine", "delete", id.value],
+                timeout: Self.cleanupTimeout,
+                cancellable: false
+            )
+        } catch {
+            let deletionError = error
+            guard let remainingMachineIDs = try? machineIDs(),
+                  !remainingMachineIDs.contains(id.value) else {
+                throw deletionError
+            }
+        }
     }
 
     func stopRunner(on id: RunnerID) throws {
@@ -84,6 +88,7 @@ struct AppleContainerBackend: RunnerBackend {
         _ arguments: [String],
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
+        outputCapture: ProcessOutputCapture = .all,
         cancellable: Bool = true
     ) throws -> ProcessResult {
         let request = ProcessRequest(
@@ -91,8 +96,18 @@ struct AppleContainerBackend: RunnerBackend {
             arguments: arguments,
             standardInput: standardInput,
             timeout: timeout,
+            outputCapture: outputCapture,
             cancellable: cancellable
         )
         return try executor.execute(request).requireSuccess(for: request)
+    }
+
+    private func machineIDs() throws -> Set<String> {
+        let result = try run(
+            ["machine", "list", "--quiet"],
+            timeout: Self.cleanupTimeout,
+            cancellable: false
+        )
+        return Set(result.stdoutText.split(whereSeparator: \Character.isNewline).map(String.init))
     }
 }

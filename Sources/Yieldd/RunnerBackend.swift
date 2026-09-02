@@ -9,11 +9,6 @@ enum RunnerGuestUser: String, Equatable, Sendable {
     case runner
 }
 
-enum RunnerCPUAllocation: String, Equatable, Sendable {
-    case constrained
-    case full
-}
-
 enum RunnerMemoryAllocation: String, Equatable, Sendable {
     case constrained
     case full
@@ -25,6 +20,7 @@ protocol RunnerBackend {
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult
@@ -33,63 +29,35 @@ protocol RunnerBackend {
 }
 
 extension RunnerBackend {
-    func exec(_ arguments: [String], on id: RunnerID) throws -> ProcessResult {
-        try exec(arguments, standardInput: nil, timeout: nil, as: .runner, on: id)
+    func exec(
+        _ arguments: [String],
+        standardInput: Data? = nil,
+        timeout: TimeInterval? = nil,
+        on id: RunnerID
+    ) throws -> ProcessResult {
+        try exec(
+            arguments,
+            standardInput: standardInput,
+            timeout: timeout,
+            outputCapture: .all,
+            as: .runner,
+            on: id
+        )
     }
 
     func exec(
         _ arguments: [String],
-        standardInput: Data?,
         timeout: TimeInterval?,
-        on id: RunnerID
-    ) throws -> ProcessResult {
-        try exec(
-            arguments,
-            standardInput: standardInput,
-            timeout: timeout,
-            as: .runner,
-            on: id
-        )
-    }
-
-    func exec(
-        _ arguments: [String],
-        standardInput: Data?,
-        on id: RunnerID
-    ) throws -> ProcessResult {
-        try exec(
-            arguments,
-            standardInput: standardInput,
-            timeout: nil,
-            as: .runner,
-            on: id
-        )
-    }
-
-    func exec(
-        _ arguments: [String],
-        timeout: TimeInterval,
+        outputCapture: ProcessOutputCapture,
+        as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
         try exec(
             arguments,
             standardInput: nil,
             timeout: timeout,
-            as: .runner,
-            on: id
-        )
-    }
-
-    @discardableResult
-    func setCPUAllocation(
-        _ allocation: RunnerCPUAllocation,
-        on id: RunnerID
-    ) throws -> ProcessResult {
-        try exec(
-            ["yieldd-runner-control", "cpu", allocation.rawValue],
-            standardInput: nil,
-            timeout: nil,
-            as: .root,
+            outputCapture: outputCapture,
+            as: user,
             on: id
         )
     }
@@ -97,12 +65,14 @@ extension RunnerBackend {
     @discardableResult
     func setMemoryAllocation(
         _ allocation: RunnerMemoryAllocation,
+        timeout: TimeInterval,
         on id: RunnerID
     ) throws -> ProcessResult {
         try exec(
             ["yieldd-runner-control", "memory", allocation.rawValue],
             standardInput: nil,
-            timeout: nil,
+            timeout: timeout,
+            outputCapture: .all,
             as: .root,
             on: id
         )

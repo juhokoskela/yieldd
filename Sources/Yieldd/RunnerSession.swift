@@ -7,6 +7,8 @@ protocol RunnerSessionRunning {
 struct EphemeralRunnerSession: RunnerSessionRunning {
     static let image = MachineTestRunner.image
     static let configurationTimeout: TimeInterval = 5 * 60
+    static let memoryConfigurationTimeout: TimeInterval = 30
+    static let jobOutputTailBytes = 1_024 * 1_024
 
     let backend: any RunnerBackend
     let github: any GitHubRunnerManaging
@@ -50,21 +52,21 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         let registrationToken = try github.createRegistrationToken(for: repository)
         try checkCancellation()
 
-        var runnerRegistrationMayExist = false
-        var runnerMayBeRunning = false
-        let operation: Result<Void, any Error>
-        do {
+        var lifecycle = RunnerLifecycle.machineMayExist
+        let operation = Result<Void, any Error> {
             try backend.create(id: id, image: Self.image)
             try checkCancellation()
-            _ = try dockerReadiness.wait(on: id)
-            try checkCancellation()
-            _ = try backend.setCPUAllocation(.constrained, on: id)
+            try dockerReadiness.wait(on: id)
             try checkCancellation()
             let memoryAllocation: RunnerMemoryAllocation = readMemoryPressure()
                 .permitsFullRunnerMemory ? .full : .constrained
-            _ = try backend.setMemoryAllocation(memoryAllocation, on: id)
+            _ = try backend.setMemoryAllocation(
+                memoryAllocation,
+                timeout: Self.memoryConfigurationTimeout,
+                on: id
+            )
             try checkCancellation()
-            runnerRegistrationMayExist = true
+            lifecycle = .runnerRegistrationMayExist
             _ = try backend.exec(
                 ["yieldd-configure-runner", repository.fullName, id.value],
                 standardInput: Data("\(registrationToken)\n".utf8),
@@ -73,64 +75,23 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             )
             try checkCancellation()
             stateChanged(.waitingForJob(id))
-            runnerMayBeRunning = true
+            lifecycle = .runnerMayBeRunning
             _ = try backend.exec(
                 ["yieldd-runner-control", "run"],
-                standardInput: nil,
                 timeout: jobTimeout,
+                outputCapture: .tail(maxBytes: Self.jobOutputTailBytes),
                 as: .root,
                 on: id
             )
-            operation = .success(())
-        } catch {
-            operation = .failure(error)
+            lifecycle = .runnerStopped
         }
 
         stateChanged(.cleaningUp(id))
-        var cleanupFailures: [RunnerSessionCleanupFailure] = []
-        var runnerStopped = !runnerMayBeRunning
-        var runnerStopFailure: RunnerSessionCleanupFailure?
-        if runnerMayBeRunning {
-            do {
-                try backend.stopRunner(on: id)
-                runnerStopped = true
-            } catch {
-                runnerStopFailure = RunnerSessionCleanupFailure(step: .runnerProcess, error: error)
-            }
-        }
-
-        func removeGitHubRunner() {
-            guard runnerRegistrationMayExist else {
-                return
-            }
-            do {
-                try github.removeRunners(named: id.value, from: repository)
-            } catch {
-                cleanupFailures.append(RunnerSessionCleanupFailure(step: .githubRunner, error: error))
-            }
-        }
-
-        if runnerStopped {
-            removeGitHubRunner()
-        }
-
-        var machineDestroyed = false
-        var machineFailure: RunnerSessionCleanupFailure?
-        do {
-            try backend.destroy(id)
-            machineDestroyed = true
-        } catch {
-            machineFailure = RunnerSessionCleanupFailure(step: .machine, error: error)
-        }
-
-        if !runnerStopped, machineDestroyed {
-            removeGitHubRunner()
-        } else if !runnerStopped, let runnerStopFailure {
-            cleanupFailures.append(runnerStopFailure)
-        }
-        if let machineFailure {
-            cleanupFailures.append(machineFailure)
-        }
+        let cleanupFailures = cleanup(
+            lifecycle: lifecycle,
+            id: id,
+            repository: repository
+        )
 
         switch operation {
         case .success where cleanupFailures.isEmpty:
@@ -146,6 +107,59 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             )
         }
     }
+
+    private func cleanup(
+        lifecycle: RunnerLifecycle,
+        id: RunnerID,
+        repository: GitHubRepository
+    ) -> [RunnerSessionCleanupFailure] {
+        let removeRunner = {
+            cleanupFailure(step: .githubRunner) {
+                try github.removeRunners(named: id.value, from: repository)
+            }
+        }
+        let destroyMachine = {
+            cleanupFailure(step: .machine) {
+                try backend.destroy(id)
+            }
+        }
+
+        switch lifecycle {
+        case .machineMayExist:
+            return [destroyMachine()].compactMap { $0 }
+        case .runnerRegistrationMayExist, .runnerStopped:
+            return [removeRunner(), destroyMachine()].compactMap { $0 }
+        case .runnerMayBeRunning:
+            if let stopFailure = cleanupFailure(step: .runnerProcess, operation: {
+                try backend.stopRunner(on: id)
+            }) {
+                if let machineFailure = destroyMachine() {
+                    return [stopFailure, machineFailure]
+                }
+                return [removeRunner()].compactMap { $0 }
+            }
+            return [removeRunner(), destroyMachine()].compactMap { $0 }
+        }
+    }
+
+    private func cleanupFailure(
+        step: RunnerSessionCleanupStep,
+        operation: () throws -> Void
+    ) -> RunnerSessionCleanupFailure? {
+        switch Result<Void, any Error>(catching: { try operation() }) {
+        case .success:
+            return nil
+        case let .failure(error):
+            return RunnerSessionCleanupFailure(step: step, error: error)
+        }
+    }
+}
+
+private enum RunnerLifecycle {
+    case machineMayExist
+    case runnerRegistrationMayExist
+    case runnerMayBeRunning
+    case runnerStopped
 }
 
 enum RunnerSessionState: Equatable {
@@ -176,21 +190,13 @@ extension RunnerSessionError: LocalizedError {
         case let .cleanupFailed(cleanup):
             "Runner job completed, but cleanup failed: \(describe(cleanup))"
         case let .operationAndCleanupFailed(operation, cleanup):
-            "Runner session failed: \(describe(operation)). Cleanup also failed: \(describe(cleanup))"
+            "Runner session failed: \(describeError(operation)). Cleanup also failed: \(describe(cleanup))"
         }
     }
 
     private func describe(_ failures: [RunnerSessionCleanupFailure]) -> String {
         failures.map { failure in
-            "\(failure.step.rawValue): \(describe(failure.error))"
+            "\(failure.step.rawValue): \(describeError(failure.error))"
         }.joined(separator: "; ")
-    }
-
-    private func describe(_ error: any Error) -> String {
-        if let localizedError = error as? any LocalizedError,
-           let description = localizedError.errorDescription {
-            return description
-        }
-        return String(describing: error)
     }
 }

@@ -22,7 +22,7 @@ func processResult(
     stdout: String = "",
     stderr: String = "",
     status: Int32 = 0,
-    reason: ProcessTerminationReason = .exit
+    reason: Process.TerminationReason = .exit
 ) -> ProcessResult {
     ProcessResult(
         stdout: Data(stdout.utf8),
@@ -34,7 +34,6 @@ func processResult(
 
 enum TestFailure: Error, Equatable {
     case create
-    case cpuAllocation
     case memoryAllocation
     case dockerInfo
     case helloWorld

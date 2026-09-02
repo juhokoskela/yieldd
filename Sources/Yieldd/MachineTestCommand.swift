@@ -8,72 +8,74 @@ struct MachineTestCommand: ParsableCommand {
     )
 
     mutating func run() throws {
+        let signalMonitor = try SignalMonitor()
         let containerURL = try ExecutableLocator().locate("container")
         let backend = AppleContainerBackend(
             containerURL: containerURL,
-            executor: ProcessExecutor()
+            executor: ProcessExecutor(checkCancellation: signalMonitor.check)
         )
         let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
 
-        _ = try MachineTestRunner(backend: backend).run(id: id)
+        try MachineTestRunner(
+            backend: backend,
+            checkCancellation: signalMonitor.check
+        ).run(id: id)
         print("Machine test passed.")
     }
 }
 
 struct MachineTestRunner {
     static let image = "local/yieldd-guest:dev"
+    static let helloWorldTimeout: TimeInterval = 2 * 60
 
     let backend: any RunnerBackend
     private let dockerInfoAttempts: Int
     private let retryDelay: TimeInterval
     private let sleep: (TimeInterval) -> Void
+    private let checkCancellation: () throws -> Void
 
     init(
         backend: any RunnerBackend,
         dockerInfoAttempts: Int = 30,
         retryDelay: TimeInterval = 1,
-        sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:)
+        sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:),
+        checkCancellation: @escaping () throws -> Void = {}
     ) {
         precondition(dockerInfoAttempts > 0)
         self.backend = backend
         self.dockerInfoAttempts = dockerInfoAttempts
         self.retryDelay = retryDelay
         self.sleep = sleep
+        self.checkCancellation = checkCancellation
     }
 
-    func run(id: RunnerID) throws -> MachineTestResult {
-        let operation: Result<MachineTestResult, any Error>
-        do {
+    func run(id: RunnerID) throws {
+        let operation = Result<Void, any Error> {
+            try checkCancellation()
             try backend.create(id: id, image: Self.image)
-            let dockerInfo = try DockerReadiness(
+            try checkCancellation()
+            try DockerReadiness(
                 backend: backend,
                 attempts: dockerInfoAttempts,
                 retryDelay: retryDelay,
-                sleep: sleep
+                sleep: sleep,
+                checkCancellation: checkCancellation
             ).wait(on: id)
-            let helloWorld = try backend.exec(
+            try checkCancellation()
+            _ = try backend.exec(
                 ["docker", "run", "--rm", "hello-world"],
+                timeout: Self.helloWorldTimeout,
                 on: id
             )
-            operation = .success(MachineTestResult(
-                dockerInfo: dockerInfo,
-                helloWorld: helloWorld
-            ))
-        } catch {
-            operation = .failure(error)
         }
 
-        let cleanup: Result<Void, any Error>
-        do {
+        let cleanup = Result<Void, any Error> {
             try backend.destroy(id)
-            cleanup = .success(())
-        } catch {
-            cleanup = .failure(error)
         }
 
         switch (operation, cleanup) {
-        case let (.success(result), .success):
-            return result
+        case (.success, .success):
+            return
         case let (.failure(operationError), .success):
             throw operationError
         case let (.success, .failure(cleanupError)):
@@ -85,12 +87,6 @@ struct MachineTestRunner {
             )
         }
     }
-
-}
-
-struct MachineTestResult: Equatable {
-    let dockerInfo: ProcessResult
-    let helloWorld: ProcessResult
 }
 
 enum MachineTestError: Error {
@@ -101,15 +97,7 @@ extension MachineTestError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .operationAndCleanupFailed(operation, cleanup):
-            "Machine test failed: \(describe(operation)). Cleanup also failed: \(describe(cleanup))"
+            "Machine test failed: \(describeError(operation)). Cleanup also failed: \(describeError(cleanup))"
         }
-    }
-
-    private func describe(_ error: any Error) -> String {
-        if let localizedError = error as? any LocalizedError,
-           let description = localizedError.errorDescription {
-            return description
-        }
-        return String(describing: error)
     }
 }

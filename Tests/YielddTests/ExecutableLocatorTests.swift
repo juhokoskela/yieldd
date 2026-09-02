@@ -35,6 +35,18 @@ func reportsSearchedDirectoriesWhenExecutableIsMissing() {
     }
 }
 
+@Test(arguments: [
+    "",
+    ":/usr/bin",
+    "/usr/bin:",
+    "/usr/bin::/bin",
+])
+func rejectsEmptySearchPathComponents(_ searchPath: String) {
+    #expect(throws: ExecutableLocatorError.emptySearchPathComponent) {
+        try ExecutableLocator(searchPath: searchPath).locate("tool")
+    }
+}
+
 @Test
 func rejectsNamesContainingAPathSeparator() {
     #expect(throws: ExecutableLocatorError.invalidName("bin/tool")) {

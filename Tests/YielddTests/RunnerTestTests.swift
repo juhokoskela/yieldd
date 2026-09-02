@@ -1,3 +1,4 @@
+import ArgumentParser
 import Darwin
 import Foundation
 import Testing
@@ -5,6 +6,17 @@ import Testing
 
 private let runnerTestID = RunnerID(value: "yieldd-test-runner")
 private let runnerTestRepository = try! GitHubRepository("owner/repository")
+
+@Test(arguments: [0, -1, RunnerTestCommand.maximumTimeoutMinutes + 1])
+func rejectsInvalidRunnerTestTimeout(_ timeout: Int) {
+    var command = RunnerTestCommand()
+    command.repository = runnerTestRepository.fullName
+    command.timeout = timeout
+
+    #expect(throws: ValidationError.self) {
+        try command.validate()
+    }
+}
 
 @Test
 func runnerTestConfiguresOneJobAndCleansUp() throws {
@@ -14,7 +26,6 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
         events: events,
         execOutcomes: [
             .success(processResult(stdout: "docker info")),
-            .success(processResult(stdout: "cpu allocation set")),
             .success(processResult(stdout: "memory allocation set")),
             .success(processResult(stdout: "configured")),
             .success(processResult(stdout: "job complete")),
@@ -37,8 +48,13 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
         .createRegistrationToken(runnerTestRepository),
         .create(runnerTestID, EphemeralRunnerSession.image),
         .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout, .runner),
-        .exec(runnerTestID, ["yieldd-runner-control", "cpu", "constrained"], nil, nil, .root),
-        .exec(runnerTestID, ["yieldd-runner-control", "memory", "full"], nil, nil, .root),
+        .exec(
+            runnerTestID,
+            ["yieldd-runner-control", "memory", "full"],
+            nil,
+            EphemeralRunnerSession.memoryConfigurationTimeout,
+            .root
+        ),
         .exec(
             runnerTestID,
             ["yieldd-configure-runner", runnerTestRepository.fullName, runnerTestID.value],
@@ -47,9 +63,14 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
             .runner
         ),
         .exec(runnerTestID, ["yieldd-runner-control", "run"], nil, 90, .root),
-        .stopRunner(runnerTestID),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
+    ])
+    #expect(backend.outputCaptures == [
+        .all,
+        .all,
+        .all,
+        .tail(maxBytes: EphemeralRunnerSession.jobOutputTailBytes),
     ])
     #expect(states == [
         .preparing(runnerTestID),
@@ -124,7 +145,6 @@ func runnerTimeoutStillRemovesRegistrationAndMachine() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(ProcessExecutionError.timedOut(
                 request: timeoutRequest,
                 result: timeoutResult
@@ -173,7 +193,6 @@ func cancelledRunnerCommandStillRemovesRegistrationAndMachine() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(ProcessExecutionError.cancelled(
                 request: cancelledRequest,
                 result: cancelledResult,
@@ -218,7 +237,6 @@ func runnerFailureStillRemovesRegistrationAndMachine() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(TestFailure.runnerJob),
         ]
     )
@@ -254,7 +272,6 @@ func failedRunnerStopDestroysMachineBeforeRemovingRegistration() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(TestFailure.runnerJob),
         ],
         stopError: TestFailure.runnerStop
@@ -282,7 +299,6 @@ func failedRunnerStopAndMachineDestroySkipGitHubCleanup() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
@@ -345,34 +361,6 @@ func failureBeforeRunnerConfigurationSkipsGitHubCleanup() {
     ])
 }
 
-@Test
-func cpuAllocationFailureSkipsGitHubCleanupAndDestroysMachine() {
-    let events = RunnerTestEventRecorder()
-    let backend = RunnerTestBackend(
-        events: events,
-        execOutcomes: [
-            .success(processResult()),
-            .failure(TestFailure.cpuAllocation),
-        ]
-    )
-    let github = RunnerTestGitHub(events: events)
-
-    #expect(throws: TestFailure.cpuAllocation) {
-        try EphemeralRunnerSession(backend: backend, github: github).run(
-            id: runnerTestID,
-            repository: runnerTestRepository
-        )
-    }
-
-    #expect(events.values == [
-        .createRegistrationToken(runnerTestRepository),
-        .create(runnerTestID, EphemeralRunnerSession.image),
-        .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout, .runner),
-        .exec(runnerTestID, ["yieldd-runner-control", "cpu", "constrained"], nil, nil, .root),
-        .destroy(runnerTestID),
-    ])
-}
-
 @Test(arguments: [
     HostMemoryPressure.warning,
     HostMemoryPressure.critical,
@@ -384,7 +372,7 @@ func elevatedOrUnknownMemoryPressureKeepsConstrainedAllocation(
     let events = RunnerTestEventRecorder()
     let backend = RunnerTestBackend(
         events: events,
-        execOutcomes: Array(repeating: .success(processResult()), count: 5)
+        execOutcomes: Array(repeating: .success(processResult()), count: 4)
     )
     let github = RunnerTestGitHub(events: events)
 
@@ -399,7 +387,7 @@ func elevatedOrUnknownMemoryPressureKeepsConstrainedAllocation(
             runnerTestID,
             ["yieldd-runner-control", "memory", "constrained"],
             nil,
-            nil,
+            EphemeralRunnerSession.memoryConfigurationTimeout,
             .root
         )
     ))
@@ -411,7 +399,6 @@ func memoryAllocationFailureSkipsGitHubCleanupAndDestroysMachine() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
             .success(processResult()),
             .failure(TestFailure.memoryAllocation),
         ]
@@ -427,7 +414,13 @@ func memoryAllocationFailureSkipsGitHubCleanupAndDestroysMachine() {
     }
 
     #expect(events.values.suffix(2) == [
-        .exec(runnerTestID, ["yieldd-runner-control", "memory", "full"], nil, nil, .root),
+        .exec(
+            runnerTestID,
+            ["yieldd-runner-control", "memory", "full"],
+            nil,
+            EphemeralRunnerSession.memoryConfigurationTimeout,
+            .root
+        ),
         .destroy(runnerTestID),
     ])
 }
@@ -438,7 +431,6 @@ func runnerTestRetainsOperationAndBothCleanupFailures() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
             .success(processResult()),
             .success(processResult()),
             .failure(TestFailure.runnerConfiguration),
@@ -474,8 +466,13 @@ func runnerTestRetainsOperationAndBothCleanupFailures() {
         .createRegistrationToken(runnerTestRepository),
         .create(runnerTestID, EphemeralRunnerSession.image),
         .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout, .runner),
-        .exec(runnerTestID, ["yieldd-runner-control", "cpu", "constrained"], nil, nil, .root),
-        .exec(runnerTestID, ["yieldd-runner-control", "memory", "full"], nil, nil, .root),
+        .exec(
+            runnerTestID,
+            ["yieldd-runner-control", "memory", "full"],
+            nil,
+            EphemeralRunnerSession.memoryConfigurationTimeout,
+            .root
+        ),
         .exec(
             runnerTestID,
             ["yieldd-configure-runner", runnerTestRepository.fullName, runnerTestID.value],
@@ -509,6 +506,7 @@ private final class RunnerTestEventRecorder {
 }
 
 private final class RunnerTestBackend: RunnerBackend {
+    private(set) var outputCaptures: [ProcessOutputCapture] = []
     private let events: RunnerTestEventRecorder
     private let createError: (any Error)?
     private var execOutcomes: [Result<ProcessResult, any Error>]
@@ -540,9 +538,11 @@ private final class RunnerTestBackend: RunnerBackend {
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
+        outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
+        outputCaptures.append(outputCapture)
         events.values.append(.exec(id, arguments, standardInput, timeout, user))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall

@@ -10,6 +10,8 @@
 - A running container system
 - GitHub CLI authenticated to `github.com` with administration access to the test repository
 
+For safety, `yieldd` rejects empty `PATH` components instead of interpreting them as the working directory.
+
 Start the container system outside `yieldd` if needed:
 
 ```sh
@@ -42,9 +44,7 @@ container build -t local/yieldd-guest:dev Guest
 
 The image boots systemd as PID 1 and runs Docker from Ubuntu's `docker.io` package. It also contains the pinned Linux ARM64 GitHub Actions runner. Guest commands run as the unprivileged `runner` user, which belongs to the `docker` group.
 
-Machines receive 8 virtual CPUs and a 12 GB memory ceiling. Runner processes and Docker-created workflow containers share a systemd slice that starts with 4 virtual CPUs and an 8 GB soft memory threshold. Before each runner is configured, `yieldd` reads macOS's current memory-pressure level. Normal pressure removes the soft threshold, allowing the workload to use the VM's available memory; warning, critical, or unknown pressure keeps the 8 GB threshold. The threshold is not a hard memory limit, and the decision is reevaluated for every ephemeral runner.
-
-The guest also has an 8-vCPU full profile ready for the future host activity governor. Current commands always select the 4-vCPU constrained profile.
+Machines receive 4 virtual CPUs and a 12 GB memory ceiling. Runner processes and Docker-created workflow containers share a systemd slice with the same CPU allocation and an 8 GB soft memory threshold. Before each runner is configured, `yieldd` reads macOS's current memory-pressure level. Normal pressure removes the soft threshold, allowing the workload to use the VM's available memory; warning, critical, or unknown pressure keeps the 8 GB threshold. The threshold is not a hard memory limit, and the decision is reevaluated for every ephemeral runner.
 
 ## Machine integration test
 
@@ -54,7 +54,7 @@ After building the guest image, run:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd machine-test
 ```
 
-The command creates a uniquely named machine with no host home mount, runs `docker info`, runs `docker run --rm hello-world`, and destroys the machine. It attempts cleanup after every creation attempt, including failed ones.
+The command creates a uniquely named machine with no host home mount, runs `docker info`, runs `docker run --rm hello-world`, and destroys the machine. It attempts cleanup after every creation attempt, including failed ones and commands interrupted with Ctrl+C or SIGTERM.
 
 ## Ephemeral runner test
 
@@ -68,7 +68,7 @@ Then start one ephemeral runner for that repository:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner-test OWNER/REPOSITORY
 ```
 
-The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
+The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
 
 ## Foreground runner service
 

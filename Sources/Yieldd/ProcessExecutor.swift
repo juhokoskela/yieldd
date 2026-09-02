@@ -2,12 +2,18 @@ import Dispatch
 import Darwin
 import Foundation
 
+enum ProcessOutputCapture: Equatable, Sendable {
+    case all
+    case tail(maxBytes: Int)
+}
+
 struct ProcessRequest: Equatable, Sendable {
     let executableURL: URL
     let arguments: [String]
     // The executor writes this complete payload once. Keep it bounded; this is not a streaming API.
     let standardInput: Data?
     let timeout: TimeInterval?
+    let outputCapture: ProcessOutputCapture
     let cancellable: Bool
 
     init(
@@ -15,28 +21,28 @@ struct ProcessRequest: Equatable, Sendable {
         arguments: [String],
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
+        outputCapture: ProcessOutputCapture = .all,
         cancellable: Bool = true
     ) {
         if let timeout {
             precondition(timeout.isFinite && timeout > 0)
         }
+        if case let .tail(maxBytes) = outputCapture {
+            precondition(maxBytes > 0)
+        }
         self.executableURL = executableURL
         self.arguments = arguments
         self.standardInput = standardInput
         self.timeout = timeout
+        self.outputCapture = outputCapture
         self.cancellable = cancellable
     }
-}
-
-enum ProcessTerminationReason: Equatable, Sendable {
-    case exit
-    case uncaughtSignal
 }
 
 struct ProcessResult: Equatable, Sendable {
     let stdout: Data
     let stderr: Data
-    let terminationReason: ProcessTerminationReason
+    let terminationReason: Process.TerminationReason
     let terminationStatus: Int32
 
     var stdoutText: String {
@@ -56,6 +62,8 @@ struct ProcessResult: Equatable, Sendable {
             throw ProcessExecutionError.nonZeroExit(request: request, result: self)
         case .uncaughtSignal:
             throw ProcessExecutionError.terminatedBySignal(request: request, result: self)
+        @unknown default:
+            throw ProcessExecutionError.terminatedBySignal(request: request, result: self)
         }
     }
 }
@@ -69,6 +77,7 @@ enum ProcessExecutionError: Error {
     case launchFailed(request: ProcessRequest, underlying: any Error)
     case inputWriteFailed(request: ProcessRequest, underlying: any Error)
     case outputReadFailed(request: ProcessRequest, stream: CapturedStream, underlying: any Error)
+    case waitFailed(request: ProcessRequest, underlying: any Error)
     case cancelled(request: ProcessRequest, result: ProcessResult, underlying: any Error)
     case timedOut(request: ProcessRequest, result: ProcessResult)
     case nonZeroExit(request: ProcessRequest, result: ProcessResult)
@@ -84,6 +93,8 @@ extension ProcessExecutionError: LocalizedError {
             "Failed to write stdin to \(request.executableURL.path): \(underlying.localizedDescription)"
         case let .outputReadFailed(request, stream, underlying):
             "Failed to read \(stream.rawValue) from \(request.executableURL.path): \(underlying.localizedDescription)"
+        case let .waitFailed(request, underlying):
+            "Failed to wait for \(request.executableURL.path): \(underlying.localizedDescription)"
         case let .cancelled(request, result, underlying):
             processFailureDescription(
                 executableURL: request.executableURL,
@@ -142,24 +153,14 @@ struct ProcessExecutor: ProcessExecuting {
     }
 
     func execute(_ request: ProcessRequest) throws -> ProcessResult {
-        let process = Process()
         let stdinPipe = request.standardInput.map { _ in Pipe() }
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
 
-        process.executableURL = request.executableURL
-        process.arguments = request.arguments
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        let termination = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in
-            termination.signal()
-        }
-
         if let stdinPipe {
             let descriptor = stdinPipe.fileHandleForWriting.fileDescriptor
             guard fcntl(descriptor, F_SETNOSIGPIPE, 1) != -1 else {
+                closePipes(stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
                 let errorCode = POSIXErrorCode(rawValue: errno) ?? .EIO
                 throw ProcessExecutionError.inputWriteFailed(
                     request: request,
@@ -168,17 +169,32 @@ struct ProcessExecutor: ProcessExecuting {
             }
         }
 
+        let process: SpawnedProcess
         do {
-            try process.run()
+            process = try spawn(
+                request,
+                stdin: stdinPipe,
+                stdout: stdoutPipe,
+                stderr: stderrPipe
+            )
         } catch {
+            closePipes(stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
             throw ProcessExecutionError.launchFailed(request: request, underlying: error)
         }
-        let timeoutDeadline = request.timeout.map {
-            DispatchTime.now() + dispatchInterval($0)
-        }
 
-        let stdoutReader = PipeReader(fileHandle: stdoutPipe.fileHandleForReading)
-        let stderrReader = PipeReader(fileHandle: stderrPipe.fileHandleForReading)
+        try? stdinPipe?.fileHandleForReading.close()
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+
+        let timeoutDeadline = request.timeout.map(deadline(after:))
+        let stdoutReader = PipeReader(
+            fileHandle: stdoutPipe.fileHandleForReading,
+            capture: request.outputCapture
+        )
+        let stderrReader = PipeReader(
+            fileHandle: stderrPipe.fileHandleForReading,
+            capture: request.outputCapture
+        )
         let readers = [(CapturedStream.stdout, stdoutReader), (.stderr, stderrReader)]
         let inputWriter = request.standardInput.flatMap { standardInput in
             stdinPipe.map { pipe in
@@ -207,23 +223,23 @@ struct ProcessExecutor: ProcessExecuting {
             }
         }
 
-        var waitOutcome = waitForExit(
-            process,
+        var waitOutcome = waitForCompletion(
             deadline: timeoutDeadline,
             cancellable: request.cancellable,
-            termination: termination
+            wait: { process.wait(timeout: $0) },
+            waitIndefinitely: process.waitUntilExit
         )
         if case .exited = waitOutcome {
-            waitOutcome = waitForIO(
-                group,
+            waitOutcome = waitForCompletion(
                 deadline: timeoutDeadline,
-                cancellable: request.cancellable
+                cancellable: request.cancellable,
+                wait: { group.wait(timeout: $0) },
+                waitIndefinitely: group.wait
             )
         }
         switch waitOutcome {
         case .timedOut, .cancelled:
-            // Descendants can keep inherited descriptors open after the launched process exits.
-            // Close our endpoints before waiting for the I/O tasks so cancellation stays bounded.
+            terminate(process)
             for (_, reader) in readers {
                 reader.cancel()
             }
@@ -231,6 +247,13 @@ struct ProcessExecutor: ProcessExecuting {
             group.wait()
         case .exited:
             break
+        }
+
+        let exit: SpawnedProcessExit
+        do {
+            exit = try process.result().get()
+        } catch {
+            throw ProcessExecutionError.waitFailed(request: request, underlying: error)
         }
 
         var output: [CapturedStream: Data] = [:]
@@ -246,20 +269,11 @@ struct ProcessExecutor: ProcessExecuting {
             }
         }
 
-        let terminationReason: ProcessTerminationReason = switch process.terminationReason {
-        case .exit:
-            .exit
-        case .uncaughtSignal:
-            .uncaughtSignal
-        @unknown default:
-            .uncaughtSignal
-        }
-
         let result = ProcessResult(
             stdout: output[.stdout] ?? Data(),
             stderr: output[.stderr] ?? Data(),
-            terminationReason: terminationReason,
-            terminationStatus: process.terminationStatus
+            terminationReason: exit.reason,
+            terminationStatus: exit.status
         )
 
         switch waitOutcome {
@@ -287,67 +301,118 @@ struct ProcessExecutor: ProcessExecuting {
         return result
     }
 
-    private func waitForExit(
-        _ process: Process,
+    private func spawn(
+        _ request: ProcessRequest,
+        stdin: Pipe?,
+        stdout: Pipe,
+        stderr: Pipe
+    ) throws -> SpawnedProcess {
+        var fileActions: posix_spawn_file_actions_t?
+        try requirePOSIXSuccess(posix_spawn_file_actions_init(&fileActions))
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        if let stdin {
+            try requirePOSIXSuccess(posix_spawn_file_actions_adddup2(
+                &fileActions,
+                stdin.fileHandleForReading.fileDescriptor,
+                STDIN_FILENO
+            ))
+        }
+        try requirePOSIXSuccess(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            stdout.fileHandleForWriting.fileDescriptor,
+            STDOUT_FILENO
+        ))
+        try requirePOSIXSuccess(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            stderr.fileHandleForWriting.fileDescriptor,
+            STDERR_FILENO
+        ))
+
+        let descriptors = [
+            stdin?.fileHandleForReading.fileDescriptor,
+            stdin?.fileHandleForWriting.fileDescriptor,
+            stdout.fileHandleForReading.fileDescriptor,
+            stdout.fileHandleForWriting.fileDescriptor,
+            stderr.fileHandleForReading.fileDescriptor,
+            stderr.fileHandleForWriting.fileDescriptor,
+        ].compactMap { $0 }
+        for descriptor in Set(descriptors) {
+            try requirePOSIXSuccess(posix_spawn_file_actions_addclose(&fileActions, descriptor))
+        }
+
+        var attributes: posix_spawnattr_t?
+        try requirePOSIXSuccess(posix_spawnattr_init(&attributes))
+        defer { posix_spawnattr_destroy(&attributes) }
+
+        // Signal handling in the parent must not leak into commands, and the process group must
+        // exist before the executable starts so cancellation cannot race with setpgid.
+        var defaultSignals = sigset_t()
+        sigemptyset(&defaultSignals)
+        sigaddset(&defaultSignals, SIGINT)
+        sigaddset(&defaultSignals, SIGTERM)
+        try requirePOSIXSuccess(posix_spawnattr_setsigdefault(&attributes, &defaultSignals))
+        var signalMask = sigset_t()
+        sigemptyset(&signalMask)
+        try requirePOSIXSuccess(posix_spawnattr_setsigmask(&attributes, &signalMask))
+        try requirePOSIXSuccess(posix_spawnattr_setpgroup(&attributes, 0))
+        let flags = Int16(
+            POSIX_SPAWN_SETPGROUP
+                | POSIX_SPAWN_SETSIGDEF
+                | POSIX_SPAWN_SETSIGMASK
+        )
+        try requirePOSIXSuccess(posix_spawnattr_setflags(&attributes, flags))
+
+        var arguments: [UnsafeMutablePointer<CChar>?] = []
+        defer {
+            for case let argument? in arguments {
+                free(argument)
+            }
+        }
+        for argument in [request.executableURL.path] + request.arguments {
+            guard let copy = argument.withCString({ strdup($0) }) else {
+                throw POSIXError(.ENOMEM)
+            }
+            arguments.append(copy)
+        }
+        arguments.append(nil)
+
+        var processIdentifier: pid_t = 0
+        let status = request.executableURL.path.withCString { executablePath in
+            arguments.withUnsafeMutableBufferPointer { arguments in
+                posix_spawn(
+                    &processIdentifier,
+                    executablePath,
+                    &fileActions,
+                    &attributes,
+                    arguments.baseAddress,
+                    environ
+                )
+            }
+        }
+        try requirePOSIXSuccess(status)
+        return SpawnedProcess(processIdentifier: processIdentifier)
+    }
+
+    private func waitForCompletion(
         deadline: DispatchTime?,
         cancellable: Bool,
-        termination: DispatchSemaphore
+        wait: (DispatchTime) -> DispatchTimeoutResult,
+        waitIndefinitely: () -> Void
     ) -> ProcessWaitOutcome {
         guard cancellable, checkCancellation != nil else {
             guard let deadline else {
-                process.waitUntilExit()
+                waitIndefinitely()
                 return .exited
             }
-
-            guard termination.wait(timeout: deadline) == .timedOut else {
-                process.waitUntilExit()
-                return .exited
-            }
-
-            terminate(process, termination: termination)
-            return .timedOut
+            return wait(deadline) == .success ? .exited : .timedOut
         }
 
         while true {
-            do {
-                try checkCancellation?()
-            } catch {
-                terminate(process, termination: termination)
-                return .cancelled(error)
-            }
-
-            let waitDeadline = nextPollDeadline(timeoutDeadline: deadline)
-            if termination.wait(timeout: waitDeadline) == .success {
-                process.waitUntilExit()
-                do {
-                    try checkCancellation?()
-                    return .exited
-                } catch {
-                    return .cancelled(error)
-                }
-            }
-
-            if let deadline, DispatchTime.now().uptimeNanoseconds >= deadline.uptimeNanoseconds {
-                terminate(process, termination: termination)
-                return .timedOut
-            }
-        }
-    }
-
-    private func waitForIO(
-        _ group: DispatchGroup,
-        deadline: DispatchTime?,
-        cancellable: Bool
-    ) -> ProcessWaitOutcome {
-        guard cancellable, checkCancellation != nil else {
-            guard let deadline else {
-                group.wait()
+            if wait(.now()) == .success {
                 return .exited
             }
-            return group.wait(timeout: deadline) == .success ? .exited : .timedOut
-        }
 
-        while true {
             do {
                 try checkCancellation?()
             } catch {
@@ -355,13 +420,8 @@ struct ProcessExecutor: ProcessExecuting {
             }
 
             let waitDeadline = nextPollDeadline(timeoutDeadline: deadline)
-            if group.wait(timeout: waitDeadline) == .success {
-                do {
-                    try checkCancellation?()
-                    return .exited
-                } catch {
-                    return .cancelled(error)
-                }
+            if wait(waitDeadline) == .success {
+                return .exited
             }
 
             if let deadline, DispatchTime.now().uptimeNanoseconds >= deadline.uptimeNanoseconds {
@@ -370,26 +430,40 @@ struct ProcessExecutor: ProcessExecuting {
         }
     }
 
-    private func terminate(
-        _ process: Process,
-        termination: DispatchSemaphore
-    ) {
-        if termination.wait(timeout: .now()) == .success {
-            process.waitUntilExit()
-            return
+    private func terminate(_ process: SpawnedProcess) {
+        // Descendants inherit this group unless they deliberately move themselves elsewhere.
+        signalProcessGroup(process.processIdentifier, signal: SIGTERM)
+        let graceDeadline = deadline(after: terminationGracePeriod)
+        let pause = DispatchSemaphore(value: 0)
+
+        while processGroupExists(process.processIdentifier),
+              DispatchTime.now().uptimeNanoseconds < graceDeadline.uptimeNanoseconds {
+            let waitDeadline = nextPollDeadline(timeoutDeadline: graceDeadline)
+            if process.wait(timeout: waitDeadline) == .success,
+               processGroupExists(process.processIdentifier) {
+                _ = pause.wait(timeout: waitDeadline)
+            }
         }
 
-        process.terminate()
-        if termination.wait(
-            timeout: .now() + dispatchInterval(terminationGracePeriod)
-        ) == .timedOut {
-            Darwin.kill(process.processIdentifier, SIGKILL)
+        if processGroupExists(process.processIdentifier) {
+            signalProcessGroup(process.processIdentifier, signal: SIGKILL)
         }
         process.waitUntilExit()
     }
 
+    private func signalProcessGroup(_ processGroup: pid_t, signal: Int32) {
+        _ = Darwin.kill(-processGroup, signal)
+    }
+
+    private func processGroupExists(_ processGroup: pid_t) -> Bool {
+        if Darwin.kill(-processGroup, 0) == 0 {
+            return true
+        }
+        return errno == EPERM
+    }
+
     private func nextPollDeadline(timeoutDeadline: DispatchTime?) -> DispatchTime {
-        let pollDeadline = DispatchTime.now() + dispatchInterval(cancellationPollInterval)
+        let pollDeadline = deadline(after: cancellationPollInterval)
         guard let timeoutDeadline,
               timeoutDeadline.uptimeNanoseconds < pollDeadline.uptimeNanoseconds else {
             return pollDeadline
@@ -397,8 +471,35 @@ struct ProcessExecutor: ProcessExecuting {
         return timeoutDeadline
     }
 
-    private func dispatchInterval(_ interval: TimeInterval) -> DispatchTimeInterval {
-        .milliseconds(Int((interval * 1_000).rounded(.up)))
+    private func deadline(after interval: TimeInterval) -> DispatchTime {
+        let nanoseconds = (interval * 1_000_000_000).rounded(.up)
+        guard nanoseconds.isFinite,
+              nanoseconds >= 0,
+              nanoseconds < Double(UInt64.max) else {
+            return .distantFuture
+        }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        let delta = UInt64(nanoseconds)
+        guard delta <= UInt64.max - now else {
+            return .distantFuture
+        }
+        return DispatchTime(uptimeNanoseconds: now + delta)
+    }
+
+    private func requirePOSIXSuccess(_ status: Int32) throws {
+        guard status == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: status) ?? .EIO)
+        }
+    }
+
+    private func closePipes(stdin: Pipe?, stdout: Pipe, stderr: Pipe) {
+        try? stdin?.fileHandleForReading.close()
+        try? stdin?.fileHandleForWriting.close()
+        try? stdout.fileHandleForReading.close()
+        try? stdout.fileHandleForWriting.close()
+        try? stderr.fileHandleForReading.close()
+        try? stderr.fileHandleForWriting.close()
     }
 
     private func isBrokenPipe(_ error: any Error) -> Bool {
@@ -419,45 +520,157 @@ private enum ProcessWaitOutcome {
     case cancelled(any Error)
 }
 
-// Access to the result is serialized, and the file handle is read by one task.
+private struct SpawnedProcessExit: Sendable {
+    let reason: Process.TerminationReason
+    let status: Int32
+}
+
+private final class SpawnedProcess: @unchecked Sendable {
+    let processIdentifier: pid_t
+
+    private let completion = DispatchGroup()
+    private let lock = NSLock()
+    private var storedResult: Result<SpawnedProcessExit, any Error>?
+
+    init(processIdentifier: pid_t) {
+        self.processIdentifier = processIdentifier
+        completion.enter()
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let result = Result { try Self.wait(for: processIdentifier) }
+            lock.withLock {
+                storedResult = result
+            }
+            completion.leave()
+        }
+    }
+
+    func wait(timeout: DispatchTime) -> DispatchTimeoutResult {
+        completion.wait(timeout: timeout)
+    }
+
+    func waitUntilExit() {
+        completion.wait()
+    }
+
+    func result() -> Result<SpawnedProcessExit, any Error> {
+        lock.withLock {
+            guard let storedResult else {
+                preconditionFailure("Process result read before the process exited")
+            }
+            return storedResult
+        }
+    }
+
+    private static func wait(for processIdentifier: pid_t) throws -> SpawnedProcessExit {
+        var waitStatus: Int32 = 0
+        while true {
+            let result = waitpid(processIdentifier, &waitStatus, 0)
+            if result == processIdentifier {
+                break
+            }
+            if result == -1, errno == EINTR {
+                continue
+            }
+            let errorCode = POSIXErrorCode(rawValue: errno) ?? .EIO
+            throw POSIXError(errorCode)
+        }
+
+        // Darwin's WIFEXITED and related macros are not imported into Swift.
+        let status = waitStatus & 0o177
+        if status == 0 {
+            return SpawnedProcessExit(
+                reason: .exit,
+                status: (waitStatus >> 8) & 0xff
+            )
+        }
+        return SpawnedProcessExit(reason: .uncaughtSignal, status: status)
+    }
+}
+
+// Access to the result and cancellation state is serialized. One task owns the file handle reads.
 private final class PipeReader: @unchecked Sendable {
+    private static let chunkSize = 64 * 1_024
+
     private let fileHandle: FileHandle
+    private let capture: ProcessOutputCapture
     private let lock = NSLock()
     private var storedResult: Result<Data, any Error>?
+    private var isCancelled = false
 
-    init(fileHandle: FileHandle) {
+    init(fileHandle: FileHandle, capture: ProcessOutputCapture) {
         self.fileHandle = fileHandle
+        self.capture = capture
     }
 
     func readToEnd() {
+        var output = CapturedOutput(capture: capture)
         let result: Result<Data, any Error>
         do {
-            result = .success(try fileHandle.readToEnd() ?? Data())
+            while let chunk = try fileHandle.read(upToCount: Self.chunkSize), !chunk.isEmpty {
+                output.append(chunk)
+            }
+            result = .success(output.data)
         } catch {
-            result = .failure(error)
+            result = lock.withLock {
+                isCancelled ? .success(output.data) : .failure(error)
+            }
         }
+        try? fileHandle.close()
 
-        lock.lock()
-        storedResult = result
-        lock.unlock()
+        lock.withLock {
+            storedResult = result
+        }
     }
 
     func result() -> Result<Data, any Error> {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard let storedResult else {
-            preconditionFailure("Pipe result read before the reader completed")
+        lock.withLock {
+            guard let storedResult else {
+                preconditionFailure("Pipe result read before the reader completed")
+            }
+            return storedResult
         }
-        return storedResult
     }
 
     func cancel() {
+        lock.withLock {
+            isCancelled = true
+        }
         try? fileHandle.close()
     }
 }
 
-// Access to the result is serialized, and the file handle is written by one task.
+private struct CapturedOutput {
+    private let maximumBytes: Int?
+    private var storage = Data()
+
+    init(capture: ProcessOutputCapture) {
+        maximumBytes = switch capture {
+        case .all:
+            nil
+        case let .tail(maxBytes):
+            maxBytes
+        }
+    }
+
+    mutating func append(_ data: Data) {
+        storage.append(data)
+        guard let maximumBytes,
+              storage.count > maximumBytes,
+              storage.count - maximumBytes >= maximumBytes else {
+            return
+        }
+        storage = Data(storage.suffix(maximumBytes))
+    }
+
+    var data: Data {
+        guard let maximumBytes, storage.count > maximumBytes else {
+            return storage
+        }
+        return Data(storage.suffix(maximumBytes))
+    }
+}
+
+// Access to the result is serialized, and one task owns the file handle writes.
 private final class PipeWriter: @unchecked Sendable {
     private let fileHandle: FileHandle
     private let data: Data
@@ -470,29 +683,26 @@ private final class PipeWriter: @unchecked Sendable {
     }
 
     func write() {
-        let result: Result<Void, any Error>
-        do {
+        let result = Result<Void, any Error> {
             try fileHandle.write(contentsOf: data)
             try fileHandle.close()
-            result = .success(())
-        } catch {
+        }
+        if case .failure = result {
             try? fileHandle.close()
-            result = .failure(error)
         }
 
-        lock.lock()
-        storedResult = result
-        lock.unlock()
+        lock.withLock {
+            storedResult = result
+        }
     }
 
     func result() -> Result<Void, any Error> {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard let storedResult else {
-            preconditionFailure("Pipe result read before the writer completed")
+        lock.withLock {
+            guard let storedResult else {
+                preconditionFailure("Pipe result read before the writer completed")
+            }
+            return storedResult
         }
-        return storedResult
     }
 
     func cancel() {

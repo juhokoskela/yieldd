@@ -57,6 +57,7 @@ protocol GitHubRunnerManaging {
 }
 
 struct GitHubRunnerClient: GitHubRunnerManaging {
+    static let registrationTimeout: TimeInterval = 30
     static let cleanupTimeout: TimeInterval = 30
 
     let ghURL: URL
@@ -65,7 +66,8 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
     func createRegistrationToken(for repository: GitHubRepository) throws -> String {
         let data = try run(
             method: "POST",
-            endpoint: "\(repository.apiPath)/actions/runners/registration-token"
+            endpoint: "\(repository.apiPath)/actions/runners/registration-token",
+            timeout: Self.registrationTimeout
         ).stdout
 
         do {
@@ -85,7 +87,7 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
     }
 
     func removeRunners(named name: String, from repository: GitHubRepository) throws {
-        for runner in try runners(in: repository) where runner.name == name {
+        for runner in try runners(named: name, in: repository) where runner.name == name {
             do {
                 _ = try run(
                     method: "DELETE",
@@ -95,24 +97,18 @@ struct GitHubRunnerClient: GitHubRunnerManaging {
                 )
             } catch {
                 let deletionError = error
-                let remainingRunners: [GitHubRunner]
-                do {
-                    remainingRunners = try runners(in: repository)
-                } catch {
-                    throw deletionError
-                }
-
-                guard !remainingRunners.contains(where: { $0.id == runner.id }) else {
+                guard let remainingRunners = try? runners(named: name, in: repository),
+                      !remainingRunners.contains(where: { $0.id == runner.id }) else {
                     throw deletionError
                 }
             }
         }
     }
 
-    private func runners(in repository: GitHubRepository) throws -> [GitHubRunner] {
+    private func runners(named name: String, in repository: GitHubRepository) throws -> [GitHubRunner] {
         let result = try run(
             endpoint: "\(repository.apiPath)/actions/runners",
-            extraArguments: ["--paginate", "--slurp"],
+            extraArguments: ["--paginate", "--slurp", "--raw-field", "name=\(name)"],
             timeout: Self.cleanupTimeout,
             cancellable: false
         )

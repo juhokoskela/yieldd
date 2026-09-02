@@ -2,6 +2,8 @@ import ArgumentParser
 import Foundation
 
 struct RunnerTestCommand: ParsableCommand {
+    static let maximumTimeoutMinutes = 24 * 60
+
     static let configuration = CommandConfiguration(
         commandName: "runner-test",
         abstract: "Run one GitHub Actions job on a temporary runner machine."
@@ -10,12 +12,15 @@ struct RunnerTestCommand: ParsableCommand {
     @Argument(help: "Repository in owner/name form.")
     var repository: String
 
-    @Option(name: .long, help: "Maximum number of minutes to wait for a job.")
+    @Option(name: .long, help: "Maximum number of minutes to wait for a job, up to 1440.")
     var timeout = 120
 
     mutating func validate() throws {
         guard timeout > 0 else {
             throw ValidationError("--timeout must be greater than zero.")
+        }
+        guard timeout <= Self.maximumTimeoutMinutes else {
+            throw ValidationError("--timeout must not exceed \(Self.maximumTimeoutMinutes) minutes.")
         }
     }
 

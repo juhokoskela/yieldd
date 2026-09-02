@@ -24,17 +24,18 @@ struct DockerReadiness {
         self.checkCancellation = checkCancellation
     }
 
-    func wait(on id: RunnerID) throws -> ProcessResult {
+    func wait(on id: RunnerID) throws {
         var lastError: (any Error)?
 
         for attempt in 1...attempts {
             try checkCancellation()
             do {
-                return try backend.exec(
+                _ = try backend.exec(
                     ["docker", "info"],
                     timeout: Self.probeTimeout,
                     on: id
                 )
+                return
             } catch let error as ProcessExecutionError {
                 if case .launchFailed = error {
                     throw error
