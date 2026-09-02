@@ -178,6 +178,78 @@ func cleanupFailureStopsServiceBeforeAnotherRunnerStarts() {
 }
 
 @Test
+func signalDeferredCleanupStopsWithoutReportingAFailure() throws {
+    let runnerID = RunnerID(value: "runner-1")
+    let cancellation = ProcessExecutionError.cancelled(
+        request: ProcessRequest(
+            executableURL: URL(fileURLWithPath: "/usr/local/bin/container"),
+            arguments: []
+        ),
+        result: processResult(status: SIGTERM, reason: .uncaughtSignal),
+        underlying: SignalInterruption(signal: SIGINT)
+    )
+    let session = RecordingRunnerSession(outcomes: [
+        .failure(RunnerSessionError.cleanupDeferred(
+            runnerID,
+            operation: cancellation
+        )),
+    ])
+    var states: [RunnerServiceState] = []
+    var reportedFailures = 0
+
+    try RunnerService(
+        session: session,
+        makeRunnerID: { runnerID },
+        checkForStop: {},
+        waitUntilStopped: { _ in
+            Issue.record("Deferred cleanup must not back off")
+        },
+        stateChanged: { states.append($0) },
+        sessionFailed: { _ in reportedFailures += 1 }
+    ).run(repository: serviceRepository)
+
+    #expect(session.calls.count == 1)
+    #expect(reportedFailures == 0)
+    #expect(states == [
+        .cleanupDeferred(runnerID),
+        .stopping,
+    ])
+}
+
+@Test
+func operationFailureWithDeferredCleanupIsReportedAndPropagated() {
+    let runnerID = RunnerID(value: "runner-1")
+    let deferredFailure = RunnerSessionError.cleanupDeferred(
+        runnerID,
+        operation: TestFailure.runnerJob
+    )
+    let session = RecordingRunnerSession(outcomes: [.failure(deferredFailure)])
+    var states: [RunnerServiceState] = []
+    var reportedFailures = 0
+
+    do {
+        try RunnerService(
+            session: session,
+            makeRunnerID: { runnerID },
+            checkForStop: {},
+            waitUntilStopped: { _ in
+                Issue.record("Deferred cleanup must not back off")
+            },
+            stateChanged: { states.append($0) },
+            sessionFailed: { _ in reportedFailures += 1 }
+        ).run(repository: serviceRepository)
+        Issue.record("Expected deferred cleanup failure")
+    } catch RunnerSessionError.cleanupDeferred {
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    #expect(session.calls.count == 1)
+    #expect(reportedFailures == 1)
+    #expect(states == [.stopping])
+}
+
+@Test
 func stopDuringBackoffSkipsNextSession() throws {
     let session = RecordingRunnerSession(outcomes: [.failure(TestFailure.runnerJob)])
     var states: [RunnerServiceState] = []

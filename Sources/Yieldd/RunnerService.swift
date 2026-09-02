@@ -46,6 +46,12 @@ struct RunnerService {
                 consecutiveFailures = 0
                 backoff = initialBackoff
             } catch {
+                if let id = (error as? RunnerSessionError)?.deferredRunnerIDAfterSignalInterruption {
+                    stateChanged(.cleanupDeferred(id))
+                    stateChanged(.stopping)
+                    return
+                }
+
                 sessionFailed(error)
                 if error.hasRunnerSessionCleanupFailure {
                     stateChanged(.stopping)
@@ -77,13 +83,29 @@ struct RunnerService {
     }
 }
 
+private extension RunnerSessionError {
+    var deferredRunnerIDAfterSignalInterruption: RunnerID? {
+        guard case let .cleanupDeferred(id, operation?) = self else {
+            return nil
+        }
+        if operation is SignalInterruption {
+            return id
+        }
+        guard case let .cancelled(_, _, underlying) = operation as? ProcessExecutionError,
+              underlying is SignalInterruption else {
+            return nil
+        }
+        return id
+    }
+}
+
 private extension Error {
     var hasRunnerSessionCleanupFailure: Bool {
         guard let error = self as? RunnerSessionError else {
             return false
         }
         return switch error {
-        case .cleanupFailed, .operationAndCleanupFailed:
+        case .cleanupFailed, .cleanupDeferred, .operationAndCleanupFailed:
             true
         }
     }
@@ -91,5 +113,6 @@ private extension Error {
 
 enum RunnerServiceState: Equatable {
     case backingOff(failures: Int, delay: TimeInterval)
+    case cleanupDeferred(RunnerID)
     case stopping
 }

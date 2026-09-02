@@ -157,34 +157,34 @@ struct ProcessExecutor: ProcessExecuting {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
 
-        if let stdinPipe {
-            let descriptor = stdinPipe.fileHandleForWriting.fileDescriptor
-            guard fcntl(descriptor, F_SETNOSIGPIPE, 1) != -1 else {
-                closePipes(stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
-                let errorCode = POSIXErrorCode(rawValue: errno) ?? .EIO
-                throw ProcessExecutionError.inputWriteFailed(
-                    request: request,
-                    underlying: POSIXError(errorCode)
-                )
-            }
-        }
-
         let process: SpawnedProcess
         do {
+            if let stdinPipe {
+                let descriptor = stdinPipe.fileHandleForWriting.fileDescriptor
+                guard fcntl(descriptor, F_SETNOSIGPIPE, 1) != -1 else {
+                    throw ProcessExecutionError.inputWriteFailed(
+                        request: request,
+                        underlying: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    )
+                }
+            }
+
             process = try spawn(
                 request,
                 stdin: stdinPipe,
                 stdout: stdoutPipe,
                 stderr: stderrPipe
             )
+            try? stdinPipe?.fileHandleForReading.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
         } catch {
             closePipes(stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
+            if let executionError = error as? ProcessExecutionError {
+                throw executionError
+            }
             throw ProcessExecutionError.launchFailed(request: request, underlying: error)
         }
-
-        try? stdinPipe?.fileHandleForReading.close()
-        try? stdoutPipe.fileHandleForWriting.close()
-        try? stderrPipe.fileHandleForWriting.close()
 
         let timeoutDeadline = request.timeout.map(deadline(after:))
         let stdoutReader = PipeReader(
@@ -205,11 +205,10 @@ struct ProcessExecutor: ProcessExecuting {
             }
         }
         let group = DispatchGroup()
-        let queue = DispatchQueue(label: "dev.yieldd.process-io", attributes: .concurrent)
 
         for (_, reader) in readers {
             group.enter()
-            queue.async {
+            Thread.detachNewThread {
                 reader.readToEnd()
                 group.leave()
             }
@@ -217,7 +216,7 @@ struct ProcessExecutor: ProcessExecuting {
 
         if let inputWriter {
             group.enter()
-            queue.async {
+            Thread.detachNewThread {
                 inputWriter.write()
                 group.leave()
             }
@@ -317,6 +316,17 @@ struct ProcessExecutor: ProcessExecuting {
                 stdin.fileHandleForReading.fileDescriptor,
                 STDIN_FILENO
             ))
+        } else {
+            let status = "/dev/null".withCString { path in
+                posix_spawn_file_actions_addopen(
+                    &fileActions,
+                    STDIN_FILENO,
+                    path,
+                    O_RDONLY,
+                    0
+                )
+            }
+            try requirePOSIXSuccess(status)
         }
         try requirePOSIXSuccess(posix_spawn_file_actions_adddup2(
             &fileActions,
@@ -328,18 +338,6 @@ struct ProcessExecutor: ProcessExecuting {
             stderr.fileHandleForWriting.fileDescriptor,
             STDERR_FILENO
         ))
-
-        let descriptors = [
-            stdin?.fileHandleForReading.fileDescriptor,
-            stdin?.fileHandleForWriting.fileDescriptor,
-            stdout.fileHandleForReading.fileDescriptor,
-            stdout.fileHandleForWriting.fileDescriptor,
-            stderr.fileHandleForReading.fileDescriptor,
-            stderr.fileHandleForWriting.fileDescriptor,
-        ].compactMap { $0 }
-        for descriptor in Set(descriptors) {
-            try requirePOSIXSuccess(posix_spawn_file_actions_addclose(&fileActions, descriptor))
-        }
 
         var attributes: posix_spawnattr_t?
         try requirePOSIXSuccess(posix_spawnattr_init(&attributes))
@@ -357,7 +355,8 @@ struct ProcessExecutor: ProcessExecuting {
         try requirePOSIXSuccess(posix_spawnattr_setsigmask(&attributes, &signalMask))
         try requirePOSIXSuccess(posix_spawnattr_setpgroup(&attributes, 0))
         let flags = Int16(
-            POSIX_SPAWN_SETPGROUP
+            POSIX_SPAWN_CLOEXEC_DEFAULT
+                | POSIX_SPAWN_SETPGROUP
                 | POSIX_SPAWN_SETSIGDEF
                 | POSIX_SPAWN_SETSIGMASK
         )
@@ -535,7 +534,7 @@ private final class SpawnedProcess: @unchecked Sendable {
     init(processIdentifier: pid_t) {
         self.processIdentifier = processIdentifier
         completion.enter()
-        DispatchQueue.global(qos: .utility).async { [self] in
+        Thread.detachNewThread { [self] in
             let result = Result { try Self.wait(for: processIdentifier) }
             lock.withLock {
                 storedResult = result
@@ -606,7 +605,9 @@ private final class PipeReader: @unchecked Sendable {
         var output = CapturedOutput(capture: capture)
         let result: Result<Data, any Error>
         do {
-            while let chunk = try fileHandle.read(upToCount: Self.chunkSize), !chunk.isEmpty {
+            while let chunk = try autoreleasepool(invoking: {
+                try fileHandle.read(upToCount: Self.chunkSize)
+            }), !chunk.isEmpty {
                 output.append(chunk)
             }
             result = .success(output.data)

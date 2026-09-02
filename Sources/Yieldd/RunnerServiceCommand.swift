@@ -12,6 +12,12 @@ struct RunnerServiceCommand: ParsableCommand {
 
     mutating func run() throws {
         let repository = try GitHubRepository(repository)
+        try withRunnerOwnership { leaseStore in
+            try run(repository: repository, leaseStore: leaseStore)
+        }
+    }
+
+    private func run(repository: GitHubRepository, leaseStore: RunnerLeaseStore) throws {
         let signalMonitor = try SignalMonitor()
         let locator = ExecutableLocator()
         let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
@@ -29,17 +35,32 @@ struct RunnerServiceCommand: ParsableCommand {
                 print("Preparing ephemeral runner \(id.value).")
             case let .waitingForJob(id):
                 print("Runner \(id.value) is waiting for one job labeled 'yieldd'.")
+            case let .waitingForGitHubCleanup(id, retryDelay):
+                let unit = retryDelay == 1 ? "second" : "seconds"
+                print("GitHub still considers runner \(id.value) busy; retrying cleanup in \(Int(retryDelay)) \(unit).")
             case let .cleaningUp(id):
                 print("Cleaning up runner \(id.value).")
+            case let .leaseCleanupFailed(id, reason):
+                writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
             }
         }
         let session = EphemeralRunnerSession(
             backend: backend,
             github: github,
             checkCancellation: signalMonitor.check,
-            stateChanged: sessionStateChanged
+            recoveryWait: signalMonitor.wait,
+            stateChanged: sessionStateChanged,
+            leaseStore: leaseStore
         )
 
+        do {
+            if let recoveredID = try session.recoverAbandonedRunner() {
+                print("Cleaned up abandoned runner \(recoveredID.value).")
+            }
+        } catch is SignalInterruption {
+            print("Stopping yieldd.")
+            return
+        }
         print("Serving ephemeral runners for \(repository.fullName). Press Ctrl+C to stop.")
         try RunnerService(
             session: session,
@@ -53,6 +74,8 @@ struct RunnerServiceCommand: ParsableCommand {
                 case let .backingOff(failures, delay):
                     let unit = delay == 1 ? "second" : "seconds"
                     print("Runner session failed \(failures) time(s); retrying in \(Int(delay)) \(unit).")
+                case let .cleanupDeferred(id):
+                    print("GitHub cleanup for \(id.value) is deferred until GitHub releases its active job.")
                 case .stopping:
                     print("Stopping yieldd.")
                 }
@@ -76,6 +99,6 @@ private func isCancellation(_ error: any Error) -> Bool {
     return false
 }
 
-private func writeToStandardError(_ text: String) {
+func writeToStandardError(_ text: String) {
     FileHandle.standardError.write(Data(text.utf8))
 }

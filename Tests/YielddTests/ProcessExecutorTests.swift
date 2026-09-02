@@ -208,6 +208,21 @@ func writesStandardInputWithoutAddingItToArguments() throws {
 }
 
 @Test
+func childWithoutStandardInputReceivesEndOfFile() throws {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/cat"),
+        arguments: [],
+        timeout: 1
+    )
+
+    let result = try ProcessExecutor().execute(request)
+
+    #expect(result.terminationReason == .exit)
+    #expect(result.terminationStatus == 0)
+    #expect(result.stdout.isEmpty)
+}
+
+@Test
 func childCanExitSuccessfullyWithoutReadingLargeInput() throws {
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/bin/sh"),
@@ -403,19 +418,17 @@ private func executeWithDescendantHoldingOutput(
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("yieldd-process-tree-\(UUID().uuidString)", isDirectory: true)
     let processGroupURL = directory.appendingPathComponent("group.pid")
-    let childPIDURL = directory.appendingPathComponent("child.pid")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer {
-        terminateProcessRecorded(at: childPIDURL)
+        terminateProcessGroupRecorded(at: processGroupURL)
         try? FileManager.default.removeItem(at: directory)
     }
 
     let script = """
         /bin/sh -c 'trap "" HUP TERM; exec /bin/sleep 30' &
         echo $$ > "$1"
-        echo $! > "$2"
         echo 'waiting forever' >&2
-        if [ "$3" = exit ]; then
+        if [ "$2" = exit ]; then
             exit 0
         fi
         trap '' TERM
@@ -425,7 +438,7 @@ private func executeWithDescendantHoldingOutput(
         executableURL: URL(fileURLWithPath: "/bin/sh"),
         arguments: [
             "-c", script, "yieldd-timeout-test",
-            processGroupURL.path, childPIDURL.path, parentAction.rawValue,
+            processGroupURL.path, parentAction.rawValue,
         ],
         timeout: 0.2
     )
@@ -441,7 +454,7 @@ private func executeWithDescendantHoldingOutput(
 
     let completedWithoutClosingDescendant = completion.wait(timeout: .now() + 2)
     if completedWithoutClosingDescendant == .timedOut {
-        terminateProcessRecorded(at: childPIDURL)
+        terminateProcessGroupRecorded(at: processGroupURL)
         _ = completion.wait(timeout: .now() + 2)
     }
 
@@ -492,13 +505,6 @@ private enum RetainedDescriptorTestError: Error {
 private enum RetainedDescriptorParentAction: String {
     case wait
     case exit
-}
-
-private func terminateProcessRecorded(at url: URL) {
-    guard let processIdentifier = processIdentifierRecorded(at: url) else {
-        return
-    }
-    Darwin.kill(processIdentifier, SIGKILL)
 }
 
 private func terminateProcessGroupRecorded(at url: URL) {

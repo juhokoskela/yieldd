@@ -63,7 +63,7 @@ func createsRegistrationTokenWithAuthenticatedGitHubCLI() throws {
 @Test
 func removesOnlyExactRunnerNameMatches() throws {
     let executor = RecordingProcessExecutor(outcomes: [
-        .success(processResult(stdout: #"[{"runners":[{"id":41,"name":"yieldd-test-1-old"},{"id":42,"name":"yieldd-test-1"}]}]"#)),
+        .success(processResult(stdout: #"[{"runners":[{"id":41,"name":"yieldd-test-1-old","busy":false},{"id":42,"name":"yieldd-test-1","busy":false}]}]"#)),
         .success(processResult()),
     ])
     let client = GitHubRunnerClient(ghURL: ghURL, executor: executor)
@@ -97,7 +97,7 @@ func missingRunnerNeedsNoDeleteRequest() throws {
 @Test
 func acceptsDeleteFailureWhenRunnerDisappearedConcurrently() throws {
     let executor = RecordingProcessExecutor(outcomes: [
-        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-test-1"}]}]"#)),
+        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-test-1","busy":false}]}]"#)),
         .success(processResult(stderr: "gh: Not Found (HTTP 404)", status: 1)),
         .success(processResult(stdout: #"[{"runners":[]}]"#)),
     ])
@@ -118,7 +118,7 @@ func acceptsDeleteFailureWhenRunnerDisappearedConcurrently() throws {
 
 @Test
 func preservesDeleteFailureWhenRunnerStillExists() {
-    let runners = #"[{"runners":[{"id":42,"name":"yieldd-test-1"}]}]"#
+    let runners = #"[{"runners":[{"id":42,"name":"yieldd-test-1","busy":false}]}]"#
     let deletionFailure = processResult(stderr: "permission denied", status: 1)
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult(stdout: runners)),
@@ -140,6 +140,48 @@ func preservesDeleteFailureWhenRunnerStillExists() {
     #expect(executor.requests.count == 3)
     #expect(executor.requests.allSatisfy { !$0.cancellable })
     #expect(executor.requests.allSatisfy { $0.timeout == GitHubRunnerClient.cleanupTimeout })
+}
+
+@Test
+func busyRunnerDefersDeletion() {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-test-1","busy":true}]}]"#)),
+    ])
+    let client = GitHubRunnerClient(ghURL: ghURL, executor: executor)
+
+    do {
+        try client.removeRunners(named: "yieldd-test-1", from: repository)
+        Issue.record("Expected busy runner deletion to be deferred")
+    } catch let GitHubRunnerClientError.runnerBusy(name) {
+        #expect(name == "yieldd-test-1")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    #expect(executor.requests.map(\.arguments) == [
+        runnerListArguments(name: "yieldd-test-1"),
+    ])
+}
+
+@Test
+func deletionFailureBecomesDeferredWhenRunnerTurnedBusy() {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-test-1","busy":false}]}]"#)),
+        .success(processResult(stderr: "runner is currently running a job", status: 1)),
+        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-test-1","busy":true}]}]"#)),
+    ])
+    let client = GitHubRunnerClient(ghURL: ghURL, executor: executor)
+
+    do {
+        try client.removeRunners(named: "yieldd-test-1", from: repository)
+        Issue.record("Expected busy runner deletion to be deferred")
+    } catch let GitHubRunnerClientError.runnerBusy(name) {
+        #expect(name == "yieldd-test-1")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    #expect(executor.requests.count == 3)
 }
 
 @Test

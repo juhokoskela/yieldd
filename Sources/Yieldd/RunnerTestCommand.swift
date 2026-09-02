@@ -26,6 +26,12 @@ struct RunnerTestCommand: ParsableCommand {
 
     mutating func run() throws {
         let repository = try GitHubRepository(repository)
+        try withRunnerOwnership { leaseStore in
+            try run(repository: repository, leaseStore: leaseStore)
+        }
+    }
+
+    private func run(repository: GitHubRepository, leaseStore: RunnerLeaseStore) throws {
         let signalMonitor = try SignalMonitor()
         let locator = ExecutableLocator()
         let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
@@ -37,20 +43,35 @@ struct RunnerTestCommand: ParsableCommand {
             ghURL: try locator.locate("gh"),
             executor: executor
         )
-        let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
-
-        print("Starting ephemeral runner \(id.value) for \(repository.fullName).")
-        print("Waiting for one job labeled 'yieldd'.")
-
-        try EphemeralRunnerSession(
+        let session = EphemeralRunnerSession(
             backend: backend,
             github: github,
             jobTimeout: TimeInterval(timeout) * 60,
-            checkCancellation: signalMonitor.check
-        ).run(
-            id: id,
-            repository: repository
+            checkCancellation: signalMonitor.check,
+            recoveryWait: signalMonitor.wait,
+            stateChanged: { state in
+                switch state {
+                case let .waitingForGitHubCleanup(id, retryDelay):
+                    let unit = retryDelay == 1 ? "second" : "seconds"
+                    print("GitHub still considers runner \(id.value) busy; retrying cleanup in \(Int(retryDelay)) \(unit).")
+                case let .leaseCleanupFailed(id, reason):
+                    writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
+                case .preparing, .waitingForJob, .cleaningUp:
+                    break
+                }
+            },
+            leaseStore: leaseStore
         )
+
+        if let recoveredID = try session.recoverAbandonedRunner() {
+            print("Cleaned up abandoned runner \(recoveredID.value).")
+        }
+
+        let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
+        print("Starting ephemeral runner \(id.value) for \(repository.fullName).")
+        print("Waiting for one job labeled 'yieldd'.")
+
+        try session.run(id: id, repository: repository)
         print("Runner job completed and cleanup passed.")
     }
 }
