@@ -4,32 +4,26 @@ import Foundation
 struct RunnerServiceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "serve",
-        abstract: "Continuously run one ephemeral GitHub Actions runner at a time."
+        abstract: "Continuously run ephemeral GitHub Actions runners."
     )
 
-    @Argument(help: "Repository in owner/name form.")
-    var repository: String
+    @Argument(help: "Repositories in owner/name form. Repeat a repository to give it another runner slot.")
+    var repositories: [String]
 
     mutating func run() throws {
-        let repository = try GitHubRepository(repository)
+        let repositories = try repositories.map(GitHubRepository.init)
         try withRunnerOwnership { leaseStore in
-            try run(repository: repository, leaseStore: leaseStore)
+            try run(repositories: repositories, leaseStore: leaseStore)
         }
     }
 
-    private func run(repository: GitHubRepository, leaseStore: RunnerLeaseStore) throws {
+    private func run(repositories: [GitHubRepository], leaseStore: RunnerLeaseStore) throws {
         let signalMonitor = try SignalMonitor()
+        let stop = RunnerPoolStop(checkExternal: signalMonitor.check)
         let locator = ExecutableLocator()
-        let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
-        let backend = AppleContainerBackend(
-            containerURL: try locator.locate("container"),
-            executor: executor
-        )
-        let github = GitHubRunnerClient(
-            ghURL: try locator.locate("gh"),
-            executor: executor
-        )
-        let sessionStateChanged: (RunnerSessionState) -> Void = { state in
+        let containerURL = try locator.locate("container")
+        let ghURL = try locator.locate("gh")
+        let sessionStateChanged: @Sendable (RunnerSessionState) -> Void = { state in
             switch state {
             case let .preparing(id):
                 print("Preparing ephemeral runner \(id.value).")
@@ -44,53 +38,72 @@ struct RunnerServiceCommand: ParsableCommand {
                 writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
             }
         }
-        let session = EphemeralRunnerSession(
-            backend: backend,
-            github: github,
-            checkCancellation: signalMonitor.check,
-            recoveryWait: signalMonitor.wait,
-            stateChanged: sessionStateChanged,
-            leaseStore: leaseStore
-        )
+        let makeSession: @Sendable () -> EphemeralRunnerSession = {
+            let executor = ProcessExecutor(checkCancellation: stop.check)
+            return EphemeralRunnerSession(
+                backend: AppleContainerBackend(
+                    containerURL: containerURL,
+                    executor: executor
+                ),
+                github: GitHubRunnerClient(
+                    ghURL: ghURL,
+                    executor: executor
+                ),
+                checkCancellation: stop.check,
+                recoveryWait: stop.wait,
+                stateChanged: sessionStateChanged,
+                leaseStore: leaseStore
+            )
+        }
 
         do {
-            if let recoveredID = try session.recoverAbandonedRunner() {
+            for recoveredID in try makeSession().recoverAbandonedRunners() {
                 print("Cleaned up abandoned runner \(recoveredID.value).")
             }
-        } catch is SignalInterruption {
+        } catch {
+            guard isCancellation(error) else {
+                throw error
+            }
             print("Stopping yieldd.")
             return
         }
-        print("Serving ephemeral runners for \(repository.fullName). Press Ctrl+C to stop.")
-        try RunnerService(
-            session: session,
-            makeRunnerID: {
-                RunnerID(value: "yieldd-\(UUID().uuidString.lowercased())")
-            },
-            checkForStop: signalMonitor.check,
-            waitUntilStopped: signalMonitor.wait,
-            stateChanged: { state in
-                switch state {
-                case let .backingOff(failures, delay):
-                    let unit = delay == 1 ? "second" : "seconds"
-                    print("Runner session failed \(failures) time(s); retrying in \(Int(delay)) \(unit).")
-                case let .cleanupDeferred(id):
-                    print("GitHub cleanup for \(id.value) is deferred until GitHub releases its active job.")
-                case .stopping:
-                    print("Stopping yieldd.")
+
+        let slot = repositories.count == 1 ? "slot" : "slots"
+        let names = repositories.map(\.fullName).joined(separator: ", ")
+        print("Serving \(repositories.count) ephemeral runner \(slot) for \(names). Press Ctrl+C to stop.")
+        defer { print("Stopping yieldd.") }
+
+        try RunnerPool(stop: stop) { repository, stop in
+            try RunnerService(
+                session: makeSession(),
+                makeRunnerID: {
+                    RunnerID(value: "yieldd-\(UUID().uuidString.lowercased())")
+                },
+                checkForStop: stop.check,
+                waitUntilStopped: stop.wait,
+                stateChanged: { state in
+                    switch state {
+                    case let .backingOff(failures, delay):
+                        let unit = delay == 1 ? "second" : "seconds"
+                        print("Runner slot for \(repository.fullName) failed \(failures) time(s); retrying in \(Int(delay)) \(unit).")
+                    case let .cleanupDeferred(id):
+                        print("GitHub cleanup for \(id.value) is deferred until GitHub releases its active job.")
+                    case .stopping:
+                        break
+                    }
+                },
+                sessionFailed: { error in
+                    if !isCancellation(error) {
+                        writeToStandardError("Runner session for \(repository.fullName) failed: \(describeError(error))\n")
+                    }
                 }
-            },
-            sessionFailed: { error in
-                if !isCancellation(error) {
-                    writeToStandardError("Runner session failed: \(describeError(error))\n")
-                }
-            }
-        ).run(repository: repository)
+            ).run(repository: repository)
+        }.run(repositories: repositories)
     }
 }
 
-private func isCancellation(_ error: any Error) -> Bool {
-    if error is SignalInterruption {
+func isCancellation(_ error: any Error) -> Bool {
+    if error is SignalInterruption || error is CancellationError {
         return true
     }
     if case ProcessExecutionError.cancelled = error {

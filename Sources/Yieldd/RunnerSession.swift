@@ -133,26 +133,30 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         clearLeaseAfterCleanup(id: id)
     }
 
-    func recoverAbandonedRunner() throws -> RunnerID? {
-        guard let leaseStore, let lease = try leaseStore.load() else {
-            return nil
+    func recoverAbandonedRunners() throws -> [RunnerID] {
+        guard let leaseStore else {
+            return []
         }
 
-        var cleanupFailures = cleanup(
-            lifecycle: .runnerMayBeRunning,
-            id: lease.runnerID,
-            repository: lease.repository
-        )
-        cleanupFailures = try retryDeferredGitHubCleanup(
-            cleanupFailures,
-            id: lease.runnerID,
-            repository: lease.repository
-        )
-        guard cleanupFailures.isEmpty else {
-            throw RunnerSessionError.cleanupFailed(cleanupFailures)
+        var recovered: [RunnerID] = []
+        for lease in try leaseStore.load() {
+            var cleanupFailures = cleanup(
+                lifecycle: .runnerMayBeRunning,
+                id: lease.runnerID,
+                repository: lease.repository
+            )
+            cleanupFailures = try retryDeferredGitHubCleanup(
+                cleanupFailures,
+                id: lease.runnerID,
+                repository: lease.repository
+            )
+            guard cleanupFailures.isEmpty else {
+                throw RunnerSessionError.cleanupFailed(cleanupFailures)
+            }
+            clearLeaseAfterCleanup(id: lease.runnerID)
+            recovered.append(lease.runnerID)
         }
-        clearLeaseAfterCleanup(id: lease.runnerID)
-        return lease.runnerID
+        return recovered
     }
 
     private func retryDeferredGitHubCleanup(
@@ -178,7 +182,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             return
         }
         do {
-            try leaseStore.clear()
+            try leaseStore.clear(id)
         } catch {
             stateChanged(.leaseCleanupFailed(id, reason: describeError(error)))
         }

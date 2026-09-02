@@ -1,6 +1,6 @@
 # yieldd
 
-`yieldd` turns spare Mac resources into ephemeral GitHub Actions runners. The current package provides host diagnostics, Apple container machine management, integration tests, and a foreground worker that serves one repository with one ephemeral runner at a time.
+`yieldd` turns spare Mac resources into ephemeral GitHub Actions runners. The current package provides host diagnostics, Apple container machine management, integration tests, and a foreground worker with one ephemeral runner slot per repository argument.
 
 ## Requirements
 
@@ -70,16 +70,16 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner
 
 The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
 
-`runner-test` and `serve` cannot run at the same time. They record the active runner in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next command cleans up that exact runner before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps the lease and the next command waits with exponential backoff until GitHub releases it.
+`runner-test` and `serve` cannot run at the same time. They record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next command cleans up those exact runners before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps its lease and the next command waits with exponential backoff until GitHub releases it.
 
 ## Foreground runner service
 
 To keep serving jobs until the process is stopped, run:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd serve OWNER/REPOSITORY
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd serve OWNER/REPOSITORY [OWNER/REPOSITORY ...]
 ```
 
-`serve` creates and registers one ephemeral runner, waits for one job, cleans up both the GitHub registration and machine, and then starts the next runner. It never runs two sessions concurrently. Setup and runner failures use exponential backoff capped at 30 seconds; a successful session resets the delay. A cleanup failure stops the service rather than risking another runner alongside a machine whose removal could not be confirmed.
+Each repository argument creates one independent runner slot. Repeat a repository to give it more than one slot. Every slot creates and registers an ephemeral runner, waits for one job, cleans up both the GitHub registration and machine, and then starts its next runner. Setup and runner failures use exponential backoff capped at 30 seconds; a successful session resets that slot's delay. A cleanup failure stops the pool and cleans up the other slots rather than admitting more work alongside a machine whose removal could not be confirmed.
 
-This is a foreground command, not a daemon. Ctrl+C and SIGTERM interrupt the active command and run cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.
+This is a foreground command, not a daemon. Ctrl+C and SIGTERM interrupt every active slot and run cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.

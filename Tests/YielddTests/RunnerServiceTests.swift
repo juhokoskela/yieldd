@@ -289,6 +289,23 @@ func unexpectedStopCheckFailureIsPropagated() {
 }
 
 @Test
+func poolCancellationStopsServiceBeforeStartingASession() throws {
+    let session = RecordingRunnerSession(outcomes: [])
+    var states: [RunnerServiceState] = []
+
+    try RunnerService(
+        session: session,
+        makeRunnerID: { RunnerID(value: "runner-1") },
+        checkForStop: { throw CancellationError() },
+        waitUntilStopped: { _ in },
+        stateChanged: { states.append($0) }
+    ).run(repository: serviceRepository)
+
+    #expect(session.calls.isEmpty)
+    #expect(states == [.stopping])
+}
+
+@Test
 func unexpectedBackoffWaitFailureIsPropagated() {
     let session = RecordingRunnerSession(outcomes: [.failure(TestFailure.runnerJob)])
     var states: [RunnerServiceState] = []

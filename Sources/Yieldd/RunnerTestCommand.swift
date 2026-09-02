@@ -63,7 +63,7 @@ struct RunnerTestCommand: ParsableCommand {
             leaseStore: leaseStore
         )
 
-        if let recoveredID = try session.recoverAbandonedRunner() {
+        for recoveredID in try session.recoverAbandonedRunners() {
             print("Cleaned up abandoned runner \(recoveredID.value).")
         }
 
