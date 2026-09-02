@@ -45,6 +45,10 @@ struct RunnerService {
                 try session.run(id: makeRunnerID(), repository: repository)
                 consecutiveFailures = 0
                 backoff = initialBackoff
+            } catch let RunnerSessionError.cleanupDeferred(id, _) {
+                stateChanged(.cleanupDeferred(id))
+                stateChanged(.stopping)
+                return
             } catch {
                 sessionFailed(error)
                 if error.hasRunnerSessionCleanupFailure {
@@ -83,7 +87,7 @@ private extension Error {
             return false
         }
         return switch error {
-        case .cleanupFailed, .operationAndCleanupFailed:
+        case .cleanupFailed, .cleanupDeferred, .operationAndCleanupFailed:
             true
         }
     }
@@ -91,5 +95,6 @@ private extension Error {
 
 enum RunnerServiceState: Equatable {
     case backingOff(failures: Int, delay: TimeInterval)
+    case cleanupDeferred(RunnerID)
     case stopping
 }

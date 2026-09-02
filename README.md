@@ -70,6 +70,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner
 
 The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
 
+`runner-test` and `serve` cannot run at the same time. They record the active runner in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next command cleans up that exact runner before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps the lease and the next command waits with exponential backoff until GitHub releases it.
+
 ## Foreground runner service
 
 To keep serving jobs until the process is stopped, run:

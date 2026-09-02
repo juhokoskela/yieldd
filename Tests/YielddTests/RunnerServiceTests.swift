@@ -178,6 +178,37 @@ func cleanupFailureStopsServiceBeforeAnotherRunnerStarts() {
 }
 
 @Test
+func deferredCleanupStopsWithoutReportingAFailure() throws {
+    let runnerID = RunnerID(value: "runner-1")
+    let session = RecordingRunnerSession(outcomes: [
+        .failure(RunnerSessionError.cleanupDeferred(
+            runnerID,
+            operation: TestFailure.cancelled
+        )),
+    ])
+    var states: [RunnerServiceState] = []
+    var reportedFailures = 0
+
+    try RunnerService(
+        session: session,
+        makeRunnerID: { runnerID },
+        checkForStop: {},
+        waitUntilStopped: { _ in
+            Issue.record("Deferred cleanup must not back off")
+        },
+        stateChanged: { states.append($0) },
+        sessionFailed: { _ in reportedFailures += 1 }
+    ).run(repository: serviceRepository)
+
+    #expect(session.calls.count == 1)
+    #expect(reportedFailures == 0)
+    #expect(states == [
+        .cleanupDeferred(runnerID),
+        .stopping,
+    ])
+}
+
+@Test
 func stopDuringBackoffSkipsNextSession() throws {
     let session = RecordingRunnerSession(outcomes: [.failure(TestFailure.runnerJob)])
     var states: [RunnerServiceState] = []
