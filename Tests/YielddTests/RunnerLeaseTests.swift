@@ -9,7 +9,7 @@ private let lease = RunnerLease(
 
 @Test
 func leaseStoreRoundTripsAndClearsLease() throws {
-    let directory = try makeStateDirectory()
+    let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
 
@@ -25,32 +25,47 @@ func leaseStoreRoundTripsAndClearsLease() throws {
 
 @Test
 func leaseStoreRejectsOversizedState() throws {
-    let directory = try makeStateDirectory()
+    let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
     try Data(repeating: 0, count: RunnerLeaseStore.maximumBytes + 1).write(to: store.fileURL)
 
-    #expect(throws: RunnerLeaseError.tooLarge(maximumBytes: RunnerLeaseStore.maximumBytes)) {
+    #expect(throws: RunnerLeaseError.tooLarge(
+        path: store.fileURL.path,
+        maximumBytes: RunnerLeaseStore.maximumBytes
+    )) {
+        try store.load()
+    }
+}
+
+@Test
+func leaseStoreReportsPathForInvalidContents() throws {
+    let directory = makeStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    try Data("not JSON".utf8).write(to: store.fileURL)
+
+    #expect(throws: RunnerLeaseError.invalidContents(path: store.fileURL.path)) {
         try store.load()
     }
 }
 
 @Test
 func leaseStoreRejectsInvalidRunnerID() throws {
-    let directory = try makeStateDirectory()
+    let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
 
     try Data(#"{"runnerID":"other-runner","repository":"owner/repository"}"#.utf8)
         .write(to: store.fileURL)
-    #expect(throws: RunnerLeaseError.invalidRunnerID) {
+    #expect(throws: RunnerLeaseError.invalidRunnerID(path: store.fileURL.path)) {
         try store.load()
     }
 }
 
 @Test
 func runnerOwnershipRejectsConcurrentCommandsAndReleasesTheLock() throws {
-    let directory = try makeStateDirectory()
+    let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
 
     try withRunnerOwnership(in: directory) { _ in
@@ -72,9 +87,7 @@ func runnerOwnershipRejectsConcurrentCommandsAndReleasesTheLock() throws {
     #expect(reacquired)
 }
 
-private func makeStateDirectory() throws -> URL {
-    let directory = FileManager.default.temporaryDirectory
+private func makeStateDirectory() -> URL {
+    FileManager.default.temporaryDirectory
         .appendingPathComponent("yieldd-state-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    return directory
 }

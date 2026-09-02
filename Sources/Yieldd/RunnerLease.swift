@@ -32,21 +32,35 @@ struct RunnerLeaseStore {
             return nil
         }
 
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
         defer { try? handle.close() }
         let data = try handle.read(upToCount: Self.maximumBytes + 1) ?? Data()
         guard data.count <= Self.maximumBytes else {
-            throw RunnerLeaseError.tooLarge(maximumBytes: Self.maximumBytes)
+            throw RunnerLeaseError.tooLarge(
+                path: fileURL.path,
+                maximumBytes: Self.maximumBytes
+            )
         }
 
-        let stored = try JSONDecoder().decode(StoredRunnerLease.self, from: data)
+        let stored: StoredRunnerLease
+        do {
+            stored = try JSONDecoder().decode(StoredRunnerLease.self, from: data)
+        } catch {
+            throw RunnerLeaseError.invalidContents(path: fileURL.path)
+        }
         guard Self.isValidRunnerID(stored.runnerID) else {
-            throw RunnerLeaseError.invalidRunnerID
+            throw RunnerLeaseError.invalidRunnerID(path: fileURL.path)
+        }
+        let repository: GitHubRepository
+        do {
+            repository = try GitHubRepository(stored.repository)
+        } catch {
+            throw RunnerLeaseError.invalidContents(path: fileURL.path)
         }
 
         return RunnerLease(
             runnerID: RunnerID(value: stored.runnerID),
-            repository: try GitHubRepository(stored.repository)
+            repository: repository
         )
     }
 
@@ -57,7 +71,10 @@ struct RunnerLeaseStore {
         )
         let data = try JSONEncoder().encode(stored)
         guard data.count <= Self.maximumBytes else {
-            throw RunnerLeaseError.tooLarge(maximumBytes: Self.maximumBytes)
+            throw RunnerLeaseError.tooLarge(
+                path: fileURL.path,
+                maximumBytes: Self.maximumBytes
+            )
         }
         try data.write(to: fileURL, options: .atomic)
     }
@@ -84,17 +101,12 @@ func withRunnerOwnership(
     in directory: URL? = nil,
     operation: (RunnerLeaseStore) throws -> Void
 ) throws {
-    let stateDirectory: URL
-    if let directory {
-        stateDirectory = directory
-    } else {
-        stateDirectory = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ).appendingPathComponent("yieldd", isDirectory: true)
-    }
+    let stateDirectory = try directory ?? FileManager.default.url(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask,
+        appropriateFor: nil,
+        create: true
+    ).appendingPathComponent("yieldd", isDirectory: true)
 
     let store = try RunnerLeaseStore(directory: stateDirectory)
     let lockURL = stateDirectory.appendingPathComponent("runner.lock", isDirectory: false)
@@ -118,15 +130,18 @@ func withRunnerOwnership(
 }
 
 enum RunnerLeaseError: Error, Equatable, LocalizedError {
-    case invalidRunnerID
-    case tooLarge(maximumBytes: Int)
+    case invalidContents(path: String)
+    case invalidRunnerID(path: String)
+    case tooLarge(path: String, maximumBytes: Int)
 
     var errorDescription: String? {
         switch self {
-        case .invalidRunnerID:
-            "The saved runner lease contains an invalid runner ID."
-        case let .tooLarge(maximumBytes):
-            "The saved runner lease exceeds \(maximumBytes) bytes."
+        case let .invalidContents(path):
+            "The saved runner lease at \(path) is invalid."
+        case let .invalidRunnerID(path):
+            "The saved runner lease at \(path) contains an invalid runner ID."
+        case let .tooLarge(path, maximumBytes):
+            "The saved runner lease at \(path) exceeds \(maximumBytes) bytes."
         }
     }
 }
