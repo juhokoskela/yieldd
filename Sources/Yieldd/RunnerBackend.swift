@@ -9,11 +9,6 @@ enum RunnerGuestUser: String, Equatable, Sendable {
     case runner
 }
 
-enum RunnerCPUAllocation: String, Equatable, Sendable {
-    case constrained
-    case full
-}
-
 enum RunnerMemoryAllocation: String, Equatable, Sendable {
     case constrained
     case full
@@ -76,20 +71,6 @@ extension RunnerBackend {
             standardInput: nil,
             timeout: timeout,
             as: .runner,
-            on: id
-        )
-    }
-
-    @discardableResult
-    func setCPUAllocation(
-        _ allocation: RunnerCPUAllocation,
-        on id: RunnerID
-    ) throws -> ProcessResult {
-        try exec(
-            ["yieldd-runner-control", "cpu", allocation.rawValue],
-            standardInput: nil,
-            timeout: nil,
-            as: .root,
             on: id
         )
     }

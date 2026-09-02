@@ -14,7 +14,6 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
         events: events,
         execOutcomes: [
             .success(processResult(stdout: "docker info")),
-            .success(processResult(stdout: "cpu allocation set")),
             .success(processResult(stdout: "memory allocation set")),
             .success(processResult(stdout: "configured")),
             .success(processResult(stdout: "job complete")),
@@ -37,7 +36,6 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
         .createRegistrationToken(runnerTestRepository),
         .create(runnerTestID, EphemeralRunnerSession.image),
         .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout, .runner),
-        .exec(runnerTestID, ["yieldd-runner-control", "cpu", "constrained"], nil, nil, .root),
         .exec(runnerTestID, ["yieldd-runner-control", "memory", "full"], nil, nil, .root),
         .exec(
             runnerTestID,
@@ -124,7 +122,6 @@ func runnerTimeoutStillRemovesRegistrationAndMachine() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(ProcessExecutionError.timedOut(
                 request: timeoutRequest,
                 result: timeoutResult
@@ -173,7 +170,6 @@ func cancelledRunnerCommandStillRemovesRegistrationAndMachine() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(ProcessExecutionError.cancelled(
                 request: cancelledRequest,
                 result: cancelledResult,
@@ -218,7 +214,6 @@ func runnerFailureStillRemovesRegistrationAndMachine() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(TestFailure.runnerJob),
         ]
     )
@@ -254,7 +249,6 @@ func failedRunnerStopDestroysMachineBeforeRemovingRegistration() {
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
-            .success(processResult()),
             .failure(TestFailure.runnerJob),
         ],
         stopError: TestFailure.runnerStop
@@ -282,7 +276,6 @@ func failedRunnerStopAndMachineDestroySkipGitHubCleanup() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
             .success(processResult()),
             .success(processResult()),
             .success(processResult()),
@@ -345,34 +338,6 @@ func failureBeforeRunnerConfigurationSkipsGitHubCleanup() {
     ])
 }
 
-@Test
-func cpuAllocationFailureSkipsGitHubCleanupAndDestroysMachine() {
-    let events = RunnerTestEventRecorder()
-    let backend = RunnerTestBackend(
-        events: events,
-        execOutcomes: [
-            .success(processResult()),
-            .failure(TestFailure.cpuAllocation),
-        ]
-    )
-    let github = RunnerTestGitHub(events: events)
-
-    #expect(throws: TestFailure.cpuAllocation) {
-        try EphemeralRunnerSession(backend: backend, github: github).run(
-            id: runnerTestID,
-            repository: runnerTestRepository
-        )
-    }
-
-    #expect(events.values == [
-        .createRegistrationToken(runnerTestRepository),
-        .create(runnerTestID, EphemeralRunnerSession.image),
-        .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout, .runner),
-        .exec(runnerTestID, ["yieldd-runner-control", "cpu", "constrained"], nil, nil, .root),
-        .destroy(runnerTestID),
-    ])
-}
-
 @Test(arguments: [
     HostMemoryPressure.warning,
     HostMemoryPressure.critical,
@@ -384,7 +349,7 @@ func elevatedOrUnknownMemoryPressureKeepsConstrainedAllocation(
     let events = RunnerTestEventRecorder()
     let backend = RunnerTestBackend(
         events: events,
-        execOutcomes: Array(repeating: .success(processResult()), count: 5)
+        execOutcomes: Array(repeating: .success(processResult()), count: 4)
     )
     let github = RunnerTestGitHub(events: events)
 
@@ -412,7 +377,6 @@ func memoryAllocationFailureSkipsGitHubCleanupAndDestroysMachine() {
         events: events,
         execOutcomes: [
             .success(processResult()),
-            .success(processResult()),
             .failure(TestFailure.memoryAllocation),
         ]
     )
@@ -438,7 +402,6 @@ func runnerTestRetainsOperationAndBothCleanupFailures() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
             .success(processResult()),
             .success(processResult()),
             .failure(TestFailure.runnerConfiguration),
@@ -474,7 +437,6 @@ func runnerTestRetainsOperationAndBothCleanupFailures() {
         .createRegistrationToken(runnerTestRepository),
         .create(runnerTestID, EphemeralRunnerSession.image),
         .exec(runnerTestID, ["docker", "info"], nil, DockerReadiness.probeTimeout, .runner),
-        .exec(runnerTestID, ["yieldd-runner-control", "cpu", "constrained"], nil, nil, .root),
         .exec(runnerTestID, ["yieldd-runner-control", "memory", "full"], nil, nil, .root),
         .exec(
             runnerTestID,

@@ -47,25 +47,6 @@ func constructsExecCommandWithoutInterpretingArguments() throws {
 }
 
 @Test
-func constructsRootCommandForCPUAllocation() throws {
-    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
-
-    _ = try backend.setCPUAllocation(.full, on: runnerID)
-
-    #expect(executor.requests == [ProcessRequest(
-        executableURL: containerURL,
-        arguments: [
-            "machine", "run",
-            "--name", runnerID.value,
-            "--user", "root",
-            "--",
-            "yieldd-runner-control", "cpu", "full",
-        ]
-    )])
-}
-
-@Test
 func constructsRootCommandForMemoryAllocation() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)

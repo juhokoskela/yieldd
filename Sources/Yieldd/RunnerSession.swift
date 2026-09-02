@@ -58,8 +58,6 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             try checkCancellation()
             _ = try dockerReadiness.wait(on: id)
             try checkCancellation()
-            _ = try backend.setCPUAllocation(.constrained, on: id)
-            try checkCancellation()
             let memoryAllocation: RunnerMemoryAllocation = readMemoryPressure()
                 .permitsFullRunnerMemory ? .full : .constrained
             _ = try backend.setMemoryAllocation(memoryAllocation, on: id)
