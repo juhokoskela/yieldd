@@ -339,18 +339,6 @@ struct ProcessExecutor: ProcessExecuting {
             STDERR_FILENO
         ))
 
-        let descriptors = [
-            stdin?.fileHandleForReading.fileDescriptor,
-            stdin?.fileHandleForWriting.fileDescriptor,
-            stdout.fileHandleForReading.fileDescriptor,
-            stdout.fileHandleForWriting.fileDescriptor,
-            stderr.fileHandleForReading.fileDescriptor,
-            stderr.fileHandleForWriting.fileDescriptor,
-        ].compactMap { $0 }
-        for descriptor in Set(descriptors) where descriptor > STDERR_FILENO {
-            try requirePOSIXSuccess(posix_spawn_file_actions_addclose(&fileActions, descriptor))
-        }
-
         var attributes: posix_spawnattr_t?
         try requirePOSIXSuccess(posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
