@@ -85,6 +85,92 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
 }
 
 @Test
+func successfulJobWaitsUntilGitHubReleasesItsBusyRunner() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let events = RunnerTestEventRecorder()
+    let backend = RunnerTestBackend(
+        events: events,
+        execOutcomes: Array(repeating: .success(processResult()), count: 4)
+    )
+    let github = RunnerTestGitHub(
+        events: events,
+        removeOutcomes: [
+            .failure(GitHubRunnerClientError.runnerBusy(name: runnerTestID.value)),
+            .success(()),
+        ]
+    )
+    var retryDelays: [TimeInterval] = []
+    var states: [RunnerSessionState] = []
+
+    try EphemeralRunnerSession(
+        backend: backend,
+        github: github,
+        readMemoryPressure: { .normal },
+        recoveryWait: { retryDelays.append($0) },
+        stateChanged: { states.append($0) },
+        leaseStore: leaseStore
+    ).run(id: runnerTestID, repository: runnerTestRepository)
+
+    #expect(events.values.suffix(3) == [
+        .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
+        .destroy(runnerTestID),
+        .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
+    ])
+    #expect(retryDelays == [1])
+    #expect(states.suffix(2) == [
+        .cleaningUp(runnerTestID),
+        .waitingForGitHubCleanup(runnerTestID, retryDelay: 1),
+    ])
+    #expect(try leaseStore.load() == nil)
+}
+
+@Test
+func leaseClearFailureAfterSuccessfulCleanupIsAWarning() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer {
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: stateDirectory.path
+        )
+        try? FileManager.default.removeItem(at: stateDirectory)
+    }
+    let events = RunnerTestEventRecorder()
+    let backend = RunnerTestBackend(
+        events: events,
+        execOutcomes: Array(repeating: .success(processResult()), count: 4)
+    )
+    var states: [RunnerSessionState] = []
+    var madeDirectoryReadOnly = false
+
+    try EphemeralRunnerSession(
+        backend: backend,
+        github: RunnerTestGitHub(events: events),
+        readMemoryPressure: { .normal },
+        stateChanged: { state in
+            states.append(state)
+            guard case .cleaningUp = state else {
+                return
+            }
+            madeDirectoryReadOnly = (try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o500],
+                ofItemAtPath: stateDirectory.path
+            )) != nil
+        },
+        leaseStore: leaseStore
+    ).run(id: runnerTestID, repository: runnerTestRepository)
+
+    #expect(madeDirectoryReadOnly)
+    guard case let .leaseCleanupFailed(id, reason) = states.last else {
+        Issue.record("Expected a lease cleanup warning")
+        return
+    }
+    #expect(id == runnerTestID)
+    #expect(!reason.isEmpty)
+    #expect(try leaseStore.load() != nil)
+}
+
+@Test
 func recoversAbandonedRunnerAndClearsItsLease() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
@@ -173,7 +259,7 @@ func interruptedRecoveryKeepsTheLease() throws {
     )
 
     #expect(throws: SignalInterruption(signal: SIGINT)) {
-        try session.recoverAbandonedRunner()
+        _ = try session.recoverAbandonedRunner()
     }
 
     #expect(events.values == [
@@ -202,7 +288,7 @@ func failedRecoveryKeepsTheLease() throws {
     )
 
     #expect(throws: RunnerSessionError.self) {
-        try session.recoverAbandonedRunner()
+        _ = try session.recoverAbandonedRunner()
     }
 
     #expect(events.values == [
@@ -559,7 +645,10 @@ func failureBeforeRunnerConfigurationSkipsGitHubCleanup() {
         events: events,
         createError: TestFailure.create
     )
-    let github = RunnerTestGitHub(events: events, removeError: TestFailure.githubCleanup)
+    let github = RunnerTestGitHub(
+        events: events,
+        removeOutcomes: [.failure(TestFailure.githubCleanup)]
+    )
 
     #expect(throws: TestFailure.create) {
         try EphemeralRunnerSession(backend: backend, github: github).run(
@@ -651,7 +740,10 @@ func runnerTestRetainsOperationAndBothCleanupFailures() {
         ],
         destroyError: TestFailure.machineCleanup
     )
-    let github = RunnerTestGitHub(events: events, removeError: TestFailure.githubCleanup)
+    let github = RunnerTestGitHub(
+        events: events,
+        removeOutcomes: [.failure(TestFailure.githubCleanup)]
+    )
 
     do {
         try EphemeralRunnerSession(
@@ -789,13 +881,12 @@ private final class RunnerTestGitHub: GitHubRunnerManaging {
         events: RunnerTestEventRecorder,
         registrationToken: String = "registration-token",
         tokenError: (any Error)? = nil,
-        removeError: (any Error)? = nil,
-        removeOutcomes: [Result<Void, any Error>]? = nil
+        removeOutcomes: [Result<Void, any Error>] = []
     ) {
         self.events = events
         self.registrationToken = registrationToken
         self.tokenError = tokenError
-        self.removeOutcomes = removeOutcomes ?? removeError.map { [.failure($0)] } ?? []
+        self.removeOutcomes = removeOutcomes
     }
 
     func createRegistrationToken(for repository: GitHubRepository) throws -> String {

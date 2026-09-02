@@ -40,6 +40,8 @@ struct RunnerServiceCommand: ParsableCommand {
                 print("GitHub still considers runner \(id.value) busy; retrying cleanup in \(Int(retryDelay)) \(unit).")
             case let .cleaningUp(id):
                 print("Cleaning up runner \(id.value).")
+            case let .leaseCleanupFailed(id, reason):
+                writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
             }
         }
         let session = EphemeralRunnerSession(
@@ -97,6 +99,6 @@ private func isCancellation(_ error: any Error) -> Bool {
     return false
 }
 
-private func writeToStandardError(_ text: String) {
+func writeToStandardError(_ text: String) {
     FileHandle.standardError.write(Data(text.utf8))
 }

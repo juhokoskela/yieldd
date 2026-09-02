@@ -103,9 +103,12 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             id: id,
             repository: repository
         )
-        if cleanupFailures.isEmpty, let leaseStore,
-           let leaseFailure = cleanupFailure(step: .runnerLease, operation: leaseStore.clear) {
-            cleanupFailures.append(leaseFailure)
+        if operationFailure == nil, isDeferredGitHubCleanup(cleanupFailures) {
+            cleanupFailures = try retryDeferredGitHubCleanup(
+                cleanupFailures,
+                id: id,
+                repository: repository
+            )
         }
 
         if leaseStore != nil, isDeferredGitHubCleanup(cleanupFailures) {
@@ -127,9 +130,9 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         guard cleanupFailures.isEmpty else {
             throw RunnerSessionError.cleanupFailed(cleanupFailures)
         }
+        clearLeaseAfterCleanup(id: id)
     }
 
-    @discardableResult
     func recoverAbandonedRunner() throws -> RunnerID? {
         guard let leaseStore, let lease = try leaseStore.load() else {
             return nil
@@ -140,26 +143,45 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             id: lease.runnerID,
             repository: lease.repository
         )
-        var retryDelay: TimeInterval = 1
-        while isDeferredGitHubCleanup(cleanupFailures) {
-            stateChanged(.waitingForGitHubCleanup(lease.runnerID, retryDelay: retryDelay))
-            try recoveryWait(retryDelay)
-            cleanupFailures = [cleanupFailure(step: .githubRunner) {
-                try github.removeRunners(
-                    named: lease.runnerID.value,
-                    from: lease.repository
-                )
-            }].compactMap { $0 }
-            retryDelay = min(retryDelay * 2, Self.maximumRecoveryRetryDelay)
-        }
-        if cleanupFailures.isEmpty,
-           let leaseFailure = cleanupFailure(step: .runnerLease, operation: leaseStore.clear) {
-            cleanupFailures.append(leaseFailure)
-        }
+        cleanupFailures = try retryDeferredGitHubCleanup(
+            cleanupFailures,
+            id: lease.runnerID,
+            repository: lease.repository
+        )
         guard cleanupFailures.isEmpty else {
             throw RunnerSessionError.cleanupFailed(cleanupFailures)
         }
+        clearLeaseAfterCleanup(id: lease.runnerID)
         return lease.runnerID
+    }
+
+    private func retryDeferredGitHubCleanup(
+        _ initialFailures: [RunnerSessionCleanupFailure],
+        id: RunnerID,
+        repository: GitHubRepository
+    ) throws -> [RunnerSessionCleanupFailure] {
+        var failures = initialFailures
+        var retryDelay: TimeInterval = 1
+        while isDeferredGitHubCleanup(failures) {
+            stateChanged(.waitingForGitHubCleanup(id, retryDelay: retryDelay))
+            try recoveryWait(retryDelay)
+            failures = [cleanupFailure(step: .githubRunner) {
+                try github.removeRunners(named: id.value, from: repository)
+            }].compactMap { $0 }
+            retryDelay = min(retryDelay * 2, Self.maximumRecoveryRetryDelay)
+        }
+        return failures
+    }
+
+    private func clearLeaseAfterCleanup(id: RunnerID) {
+        guard let leaseStore else {
+            return
+        }
+        do {
+            try leaseStore.clear()
+        } catch {
+            stateChanged(.leaseCleanupFailed(id, reason: describeError(error)))
+        }
     }
 
     private func cleanup(
@@ -232,6 +254,7 @@ enum RunnerSessionState: Equatable {
     case waitingForJob(RunnerID)
     case waitingForGitHubCleanup(RunnerID, retryDelay: TimeInterval)
     case cleaningUp(RunnerID)
+    case leaseCleanupFailed(RunnerID, reason: String)
 }
 
 struct RunnerSessionCleanupFailure {
@@ -242,7 +265,6 @@ struct RunnerSessionCleanupFailure {
 enum RunnerSessionCleanupStep: String, Equatable {
     case githubRunner = "GitHub runner"
     case machine
-    case runnerLease = "runner lease"
     case runnerProcess = "runner process"
 }
 
