@@ -617,7 +617,9 @@ private final class PipeReader: @unchecked Sendable {
         var output = CapturedOutput(capture: capture)
         let result: Result<Data, any Error>
         do {
-            while let chunk = try fileHandle.read(upToCount: Self.chunkSize), !chunk.isEmpty {
+            while let chunk = try autoreleasepool(invoking: {
+                try fileHandle.read(upToCount: Self.chunkSize)
+            }), !chunk.isEmpty {
                 output.append(chunk)
             }
             result = .success(output.data)
