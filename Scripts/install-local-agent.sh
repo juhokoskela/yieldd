@@ -23,11 +23,26 @@ mkdir -p "$applications_directory"
 staging_directory=$(mktemp -d "$applications_directory/.yieldd-install.XXXXXX")
 staged_application="$staging_directory/yieldd.app"
 previous_application="$staging_directory/previous-yieldd.app"
+guest_image="local/yieldd-guest:dev"
+staged_image="local/yieldd-guest:installing-$$"
 replacement_complete=false
+stop_builder=false
+remove_staged_image=false
 
 cleanup() {
     status=$?
     trap - 0
+    if [ "$stop_builder" = true ] && ! container builder stop; then
+        if [ "$status" -eq 0 ]; then
+            status=1
+        fi
+    fi
+    if [ "$remove_staged_image" = true ] \
+        && ! container image delete --force "$staged_image"; then
+        if [ "$status" -eq 0 ]; then
+            status=1
+        fi
+    fi
     if [ "$replacement_complete" = false ] \
         && [ -d "$previous_application" ] \
         && [ ! -e "$installed_application" ]; then
@@ -45,6 +60,11 @@ ditto "$source_application" "$staged_application"
 codesign --verify --strict "$staged_application"
 "$staged_application/Contents/MacOS/yieldd" agent install \
     --preflight-only "$@"
+stop_builder=true
+remove_staged_image=true
+container build -t "$staged_image" "$repository_directory/Guest"
+container builder stop
+stop_builder=false
 
 if [ -e "$installed_application" ]; then
     installed_executable="$installed_application/Contents/MacOS/yieldd"
@@ -56,6 +76,11 @@ if [ -e "$installed_application" ]; then
     "$installed_executable" agent uninstall
     mv "$installed_application" "$previous_application"
 fi
+
+container image delete --force "$guest_image"
+container image tag "$staged_image" "$guest_image"
+container image delete "$staged_image"
+remove_staged_image=false
 
 mv "$staged_application" "$installed_application"
 replacement_complete=true
