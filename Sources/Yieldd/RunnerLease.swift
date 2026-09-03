@@ -74,13 +74,10 @@ final class RunnerLeaseStore: @unchecked Sendable {
             )
         }
 
-        let decoder = JSONDecoder()
         let stored: [StoredRunnerLease]
-        if let leases = try? decoder.decode([StoredRunnerLease].self, from: data) {
-            stored = leases
-        } else if let lease = try? decoder.decode(StoredRunnerLease.self, from: data) {
-            stored = [lease]
-        } else {
+        do {
+            stored = try JSONDecoder().decode([StoredRunnerLease].self, from: data)
+        } catch {
             throw RunnerLeaseError.invalidContents(path: fileURL.path)
         }
 
