@@ -36,7 +36,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd doctor
 
 ## Guest image
 
-Build the Ubuntu 24.04 guest image from the repository root:
+The local-agent installer builds the Ubuntu 24.04 guest image automatically. To build it manually for the foreground commands, run this from the repository root:
 
 ```sh
 container build -t local/yieldd-guest:dev Guest
@@ -94,7 +94,7 @@ Install one or more runner slots from the repository root:
 Scripts/install-local-agent.sh OWNER/REPOSITORY [OWNER/REPOSITORY ...]
 ```
 
-The script builds and verifies an ad-hoc-signed application before replacing any existing installation at `~/Applications/yieldd.app`. It waits for the previous agent to stop and recover active runners, installs the new application, stores the repository slots plus the resolved absolute paths to `container` and `gh`, and registers a per-user LaunchAgent through `SMAppService`. The agent starts Apple Container without interactive kernel installation, recovers abandoned runners, and then serves the configured repositories. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
+Before replacing any existing installation at `~/Applications/yieldd.app`, the script builds the guest image and an ad-hoc-signed application, then verifies the application. It waits for the previous agent to stop and recover active runners, installs the new application, stores the repository slots plus the resolved absolute paths to `container` and `gh`, and registers a per-user LaunchAgent through `SMAppService`. The agent starts Apple Container without interactive kernel installation, recovers abandoned runners, and then serves the configured repositories. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
 
 launchd gives the agent 60 seconds to stop. `yieldd` uses a 50-second shutdown budget for its runner processes and cleanup commands so launchd does not kill it halfway through cleanup. Any lease that cannot be cleared within that budget remains available for recovery on the next launch.
 
