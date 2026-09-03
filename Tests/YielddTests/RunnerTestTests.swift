@@ -81,7 +81,7 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
         .cleaningUp(runnerTestID),
     ])
     #expect(!events.values.description.contains("registration-token"))
-    #expect(try leaseStore.load() == nil)
+    #expect(try leaseStore.load().isEmpty)
 }
 
 @Test
@@ -122,7 +122,7 @@ func successfulJobWaitsUntilGitHubReleasesItsBusyRunner() throws {
         .cleaningUp(runnerTestID),
         .waitingForGitHubCleanup(runnerTestID, retryDelay: 1),
     ])
-    #expect(try leaseStore.load() == nil)
+    #expect(try leaseStore.load().isEmpty)
 }
 
 @Test
@@ -167,14 +167,17 @@ func leaseClearFailureAfterSuccessfulCleanupIsAWarning() throws {
     }
     #expect(id == runnerTestID)
     #expect(!reason.isEmpty)
-    #expect(try leaseStore.load() != nil)
+    #expect(try leaseStore.load().count == 1)
 }
 
 @Test
-func recoversAbandonedRunnerAndClearsItsLease() throws {
+func recoversAbandonedRunnersAndClearsTheirLeases() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
     try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
+    let secondID = RunnerID(value: "yieldd-test-runner-two")
+    let secondRepository = try GitHubRepository("other/repository")
+    try leaseStore.save(RunnerLease(runnerID: secondID, repository: secondRepository))
     let events = RunnerTestEventRecorder()
     let session = EphemeralRunnerSession(
         backend: RunnerTestBackend(events: events),
@@ -182,15 +185,101 @@ func recoversAbandonedRunnerAndClearsItsLease() throws {
         leaseStore: leaseStore
     )
 
-    let recoveredID = try session.recoverAbandonedRunner()
+    let recoveredIDs = try session.recoverAbandonedRunners()
 
-    #expect(recoveredID == runnerTestID)
+    #expect(recoveredIDs == [runnerTestID, secondID])
     #expect(events.values == [
         .stopRunner(runnerTestID),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
+        .stopRunner(secondID),
+        .removeGitHubRunner(secondID.value, secondRepository),
+        .destroy(secondID),
     ])
-    #expect(try leaseStore.load() == nil)
+    #expect(try leaseStore.load().isEmpty)
+}
+
+@Test
+func recoveryCleansEveryLeaseBeforeRetryingBusyRegistration() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let secondID = RunnerID(value: "yieldd-test-runner-two")
+    let secondRepository = try GitHubRepository("other/repository")
+    try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
+    try leaseStore.save(RunnerLease(runnerID: secondID, repository: secondRepository))
+    let events = RunnerTestEventRecorder()
+    let github = RunnerTestGitHub(
+        events: events,
+        removeOutcomes: [
+            .failure(GitHubRunnerClientError.runnerBusy(name: runnerTestID.value)),
+            .success(()),
+            .success(()),
+        ]
+    )
+    let session = EphemeralRunnerSession(
+        backend: RunnerTestBackend(events: events),
+        github: github,
+        recoveryWait: { _ in },
+        leaseStore: leaseStore
+    )
+
+    let recoveredIDs = try session.recoverAbandonedRunners()
+
+    #expect(recoveredIDs == [runnerTestID, secondID])
+    #expect(events.values == [
+        .stopRunner(runnerTestID),
+        .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
+        .destroy(runnerTestID),
+        .stopRunner(secondID),
+        .removeGitHubRunner(secondID.value, secondRepository),
+        .destroy(secondID),
+        .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
+    ])
+    #expect(try leaseStore.load().isEmpty)
+}
+
+@Test
+func recoveryAttemptsLaterLeasesBeforeReportingCleanupFailures() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let secondID = RunnerID(value: "yieldd-test-runner-two")
+    let secondRepository = try GitHubRepository("other/repository")
+    let firstLease = RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository)
+    try leaseStore.save(firstLease)
+    try leaseStore.save(RunnerLease(runnerID: secondID, repository: secondRepository))
+    let events = RunnerTestEventRecorder()
+    let session = EphemeralRunnerSession(
+        backend: RunnerTestBackend(events: events),
+        github: RunnerTestGitHub(
+            events: events,
+            removeOutcomes: [
+                .failure(TestFailure.githubCleanup),
+                .success(()),
+            ]
+        ),
+        leaseStore: leaseStore
+    )
+
+    do {
+        _ = try session.recoverAbandonedRunners()
+        Issue.record("Expected recovery cleanup to fail")
+    } catch let RunnerSessionError.cleanupFailed(failures) {
+        #expect(failures.count == 1)
+        #expect(failures.first?.step == .githubRunner)
+        #expect(failures.first?.error as? TestFailure == .githubCleanup)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    #expect(events.values == [
+        .stopRunner(runnerTestID),
+        .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
+        .destroy(runnerTestID),
+        .stopRunner(secondID),
+        .removeGitHubRunner(secondID.value, secondRepository),
+        .destroy(secondID),
+    ])
+    #expect(try leaseStore.load() == [firstLease])
 }
 
 @Test
@@ -218,9 +307,9 @@ func recoveryWaitsUntilGitHubReleasesABusyRunner() throws {
         leaseStore: leaseStore
     )
 
-    let recoveredID = try session.recoverAbandonedRunner()
+    let recoveredIDs = try session.recoverAbandonedRunners()
 
-    #expect(recoveredID == runnerTestID)
+    #expect(recoveredIDs == [runnerTestID])
     #expect(events.values == [
         .stopRunner(runnerTestID),
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
@@ -235,7 +324,7 @@ func recoveryWaitsUntilGitHubReleasesABusyRunner() throws {
         .waitingForGitHubCleanup(runnerTestID, retryDelay: 2),
         .waitingForGitHubCleanup(runnerTestID, retryDelay: 4),
     ])
-    #expect(try leaseStore.load() == nil)
+    #expect(try leaseStore.load().isEmpty)
 }
 
 @Test
@@ -259,7 +348,7 @@ func interruptedRecoveryKeepsTheLease() throws {
     )
 
     #expect(throws: SignalInterruption(signal: SIGINT)) {
-        _ = try session.recoverAbandonedRunner()
+        _ = try session.recoverAbandonedRunners()
     }
 
     #expect(events.values == [
@@ -267,7 +356,7 @@ func interruptedRecoveryKeepsTheLease() throws {
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
     ])
-    #expect(try leaseStore.load() == lease)
+    #expect(try leaseStore.load() == [lease])
 }
 
 @Test
@@ -288,14 +377,14 @@ func failedRecoveryKeepsTheLease() throws {
     )
 
     #expect(throws: RunnerSessionError.self) {
-        _ = try session.recoverAbandonedRunner()
+        _ = try session.recoverAbandonedRunners()
     }
 
     #expect(events.values == [
         .stopRunner(runnerTestID),
         .destroy(runnerTestID),
     ])
-    #expect(try leaseStore.load() == lease)
+    #expect(try leaseStore.load() == [lease])
 }
 
 @Test
@@ -317,10 +406,10 @@ func sessionCleanupFailureKeepsTheLease() throws {
         try session.run(id: runnerTestID, repository: runnerTestRepository)
     }
 
-    #expect(try leaseStore.load() == RunnerLease(
+    #expect(try leaseStore.load() == [RunnerLease(
         runnerID: runnerTestID,
         repository: runnerTestRepository
-    ))
+    )])
 }
 
 @Test
@@ -522,10 +611,10 @@ func busyGitHubRunnerDefersCleanupAndKeepsLease() throws {
         .removeGitHubRunner(runnerTestID.value, runnerTestRepository),
         .destroy(runnerTestID),
     ])
-    #expect(try leaseStore.load() == RunnerLease(
+    #expect(try leaseStore.load() == [RunnerLease(
         runnerID: runnerTestID,
         repository: runnerTestRepository
-    ))
+    )])
 }
 
 @Test

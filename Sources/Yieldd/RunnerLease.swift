@@ -1,15 +1,17 @@
 import Darwin
 import Foundation
 
-struct RunnerLease: Equatable {
+struct RunnerLease: Equatable, Sendable {
     let runnerID: RunnerID
     let repository: GitHubRepository
 }
 
-struct RunnerLeaseStore {
-    static let maximumBytes = 4 * 1_024
+// The lock serializes every read-modify-write operation on the shared lease file.
+final class RunnerLeaseStore: @unchecked Sendable {
+    static let maximumBytes = 8 * 1_024
 
     let fileURL: URL
+    private let lock = NSLock()
 
     init(directory: URL) throws {
         try FileManager.default.createDirectory(
@@ -20,7 +22,37 @@ struct RunnerLeaseStore {
         fileURL = directory.appendingPathComponent("active-runner.json", isDirectory: false)
     }
 
-    func load() throws -> RunnerLease? {
+    func load() throws -> [RunnerLease] {
+        try lock.withLock {
+            try loadUnlocked()
+        }
+    }
+
+    func save(_ lease: RunnerLease) throws {
+        try lock.withLock {
+            var leases = try loadUnlocked()
+            if let index = leases.firstIndex(where: { $0.runnerID == lease.runnerID }) {
+                leases[index] = lease
+            } else {
+                leases.append(lease)
+            }
+            try writeUnlocked(leases)
+        }
+    }
+
+    func clear(_ id: RunnerID) throws {
+        try lock.withLock {
+            var leases = try loadUnlocked()
+            let previousCount = leases.count
+            leases.removeAll(where: { $0.runnerID == id })
+            guard leases.count != previousCount else {
+                return
+            }
+            try writeUnlocked(leases)
+        }
+    }
+
+    private func loadUnlocked() throws -> [RunnerLease] {
         let descriptor = fileURL.path.withCString { path in
             Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
         }
@@ -29,7 +61,7 @@ struct RunnerLeaseStore {
             guard errorNumber == ENOENT else {
                 throw POSIXError(POSIXErrorCode(rawValue: errorNumber) ?? .EIO)
             }
-            return nil
+            return []
         }
 
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
@@ -42,33 +74,54 @@ struct RunnerLeaseStore {
             )
         }
 
-        let stored: StoredRunnerLease
-        do {
-            stored = try JSONDecoder().decode(StoredRunnerLease.self, from: data)
-        } catch {
-            throw RunnerLeaseError.invalidContents(path: fileURL.path)
-        }
-        guard Self.isValidRunnerID(stored.runnerID) else {
-            throw RunnerLeaseError.invalidRunnerID(path: fileURL.path)
-        }
-        let repository: GitHubRepository
-        do {
-            repository = try GitHubRepository(stored.repository)
-        } catch {
+        let decoder = JSONDecoder()
+        let stored: [StoredRunnerLease]
+        if let leases = try? decoder.decode([StoredRunnerLease].self, from: data) {
+            stored = leases
+        } else if let lease = try? decoder.decode(StoredRunnerLease.self, from: data) {
+            stored = [lease]
+        } else {
             throw RunnerLeaseError.invalidContents(path: fileURL.path)
         }
 
-        return RunnerLease(
-            runnerID: RunnerID(value: stored.runnerID),
-            repository: repository
-        )
+        let leases = try stored.map { storedLease in
+            guard Self.isValidRunnerID(storedLease.runnerID) else {
+                throw RunnerLeaseError.invalidRunnerID(path: fileURL.path)
+            }
+            guard let repository = try? GitHubRepository(storedLease.repository) else {
+                throw RunnerLeaseError.invalidContents(path: fileURL.path)
+            }
+            return RunnerLease(
+                runnerID: RunnerID(value: storedLease.runnerID),
+                repository: repository
+            )
+        }
+        guard Set(leases.map(\.runnerID)).count == leases.count else {
+            throw RunnerLeaseError.invalidContents(path: fileURL.path)
+        }
+        return leases
     }
 
-    func save(_ lease: RunnerLease) throws {
-        let stored = StoredRunnerLease(
-            runnerID: lease.runnerID.value,
-            repository: lease.repository.fullName
-        )
+    private func writeUnlocked(_ leases: [RunnerLease]) throws {
+        guard !leases.isEmpty else {
+            guard fileURL.path.withCString(Darwin.unlink) == 0 else {
+                let errorNumber = errno
+                guard errorNumber == ENOENT else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errorNumber) ?? .EIO)
+                }
+                return
+            }
+            return
+        }
+
+        let stored = leases
+            .sorted { $0.runnerID.value < $1.runnerID.value }
+            .map { lease in
+                StoredRunnerLease(
+                    runnerID: lease.runnerID.value,
+                    repository: lease.repository.fullName
+                )
+            }
         let data = try JSONEncoder().encode(stored)
         guard data.count <= Self.maximumBytes else {
             throw RunnerLeaseError.tooLarge(
@@ -77,16 +130,6 @@ struct RunnerLeaseStore {
             )
         }
         try data.write(to: fileURL, options: .atomic)
-    }
-
-    func clear() throws {
-        guard fileURL.path.withCString(Darwin.unlink) == 0 else {
-            let errorNumber = errno
-            guard errorNumber == ENOENT else {
-                throw POSIXError(POSIXErrorCode(rawValue: errorNumber) ?? .EIO)
-            }
-            return
-        }
     }
 
     private static func isValidRunnerID(_ value: String) -> Bool {

@@ -17,8 +17,6 @@ func serviceRunsOneSessionAtATimeUntilStopped() throws {
         }
     )
     var nextID = 0
-    var states: [RunnerServiceState] = []
-
     try RunnerService(
         session: session,
         makeRunnerID: {
@@ -32,8 +30,7 @@ func serviceRunsOneSessionAtATimeUntilStopped() throws {
         },
         waitUntilStopped: { _ in
             Issue.record("Successful sessions must not back off")
-        },
-        stateChanged: { states.append($0) }
+        }
     ).run(repository: serviceRepository)
 
     #expect(session.calls == [
@@ -41,7 +38,6 @@ func serviceRunsOneSessionAtATimeUntilStopped() throws {
         RunnerSessionCall(id: RunnerID(value: "runner-2"), repository: serviceRepository),
     ])
     #expect(session.maximumActiveSessions == 1)
-    #expect(states == [.stopping])
 }
 
 @Test
@@ -86,7 +82,6 @@ func successfulSessionResetsExponentialBackoff() throws {
         .backingOff(failures: 1, delay: 1),
         .backingOff(failures: 2, delay: 2),
         .backingOff(failures: 1, delay: 1),
-        .stopping,
     ])
 }
 
@@ -126,7 +121,6 @@ func stopAfterSessionFailureSkipsRetry() throws {
         outcomes: [.failure(TestFailure.cancelled)],
         onRun: { _ in stopped = true }
     )
-    var states: [RunnerServiceState] = []
     var reportedFailures = 0
 
     try RunnerService(
@@ -140,13 +134,11 @@ func stopAfterSessionFailureSkipsRetry() throws {
         waitUntilStopped: { _ in
             Issue.record("A stopped service must not back off")
         },
-        stateChanged: { states.append($0) },
         sessionFailed: { _ in reportedFailures += 1 }
     ).run(repository: serviceRepository)
 
     #expect(session.calls.count == 1)
     #expect(reportedFailures == 1)
-    #expect(states == [.stopping])
 }
 
 @Test
@@ -155,8 +147,6 @@ func cleanupFailureStopsServiceBeforeAnotherRunnerStarts() {
         RunnerSessionCleanupFailure(step: .machine, error: TestFailure.machineCleanup),
     ])
     let session = RecordingRunnerSession(outcomes: [.failure(cleanupFailure)])
-    var states: [RunnerServiceState] = []
-
     do {
         try RunnerService(
             session: session,
@@ -164,8 +154,7 @@ func cleanupFailureStopsServiceBeforeAnotherRunnerStarts() {
             checkForStop: {},
             waitUntilStopped: { _ in
                 Issue.record("Cleanup failure must not be retried with a new runner")
-            },
-            stateChanged: { states.append($0) }
+            }
         ).run(repository: serviceRepository)
         Issue.record("Expected cleanup failure")
     } catch RunnerSessionError.cleanupFailed {
@@ -174,7 +163,6 @@ func cleanupFailureStopsServiceBeforeAnotherRunnerStarts() {
     }
 
     #expect(session.calls.count == 1)
-    #expect(states == [.stopping])
 }
 
 @Test
@@ -210,10 +198,7 @@ func signalDeferredCleanupStopsWithoutReportingAFailure() throws {
 
     #expect(session.calls.count == 1)
     #expect(reportedFailures == 0)
-    #expect(states == [
-        .cleanupDeferred(runnerID),
-        .stopping,
-    ])
+    #expect(states == [.cleanupDeferred(runnerID)])
 }
 
 @Test
@@ -224,7 +209,6 @@ func operationFailureWithDeferredCleanupIsReportedAndPropagated() {
         operation: TestFailure.runnerJob
     )
     let session = RecordingRunnerSession(outcomes: [.failure(deferredFailure)])
-    var states: [RunnerServiceState] = []
     var reportedFailures = 0
 
     do {
@@ -235,7 +219,6 @@ func operationFailureWithDeferredCleanupIsReportedAndPropagated() {
             waitUntilStopped: { _ in
                 Issue.record("Deferred cleanup must not back off")
             },
-            stateChanged: { states.append($0) },
             sessionFailed: { _ in reportedFailures += 1 }
         ).run(repository: serviceRepository)
         Issue.record("Expected deferred cleanup failure")
@@ -246,7 +229,6 @@ func operationFailureWithDeferredCleanupIsReportedAndPropagated() {
 
     #expect(session.calls.count == 1)
     #expect(reportedFailures == 1)
-    #expect(states == [.stopping])
 }
 
 @Test
@@ -263,10 +245,7 @@ func stopDuringBackoffSkipsNextSession() throws {
     ).run(repository: serviceRepository)
 
     #expect(session.calls.count == 1)
-    #expect(states == [
-        .backingOff(failures: 1, delay: 1),
-        .stopping,
-    ])
+    #expect(states == [.backingOff(failures: 1, delay: 1)])
 }
 
 @Test
@@ -286,6 +265,20 @@ func unexpectedStopCheckFailureIsPropagated() {
 
     #expect(session.calls.isEmpty)
     #expect(states.isEmpty)
+}
+
+@Test
+func poolCancellationStopsServiceBeforeStartingASession() throws {
+    let session = RecordingRunnerSession(outcomes: [])
+
+    try RunnerService(
+        session: session,
+        makeRunnerID: { RunnerID(value: "runner-1") },
+        checkForStop: { throw CancellationError() },
+        waitUntilStopped: { _ in }
+    ).run(repository: serviceRepository)
+
+    #expect(session.calls.isEmpty)
 }
 
 @Test

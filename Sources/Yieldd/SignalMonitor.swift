@@ -3,7 +3,8 @@ import Foundation
 
 private let signalMonitorInstallation = SignalMonitorInstallation()
 
-final class SignalMonitor {
+// Dispatch sources are immutable after initialization, and SignalMonitorState synchronizes delivery.
+final class SignalMonitor: @unchecked Sendable {
     private let state: SignalMonitorState
     private let sources: [any DispatchSourceSignal]
     private let previousHandlers: [(signal: Int32, handler: sig_t?)]

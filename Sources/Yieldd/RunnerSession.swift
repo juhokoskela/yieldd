@@ -133,26 +133,56 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         clearLeaseAfterCleanup(id: id)
     }
 
-    func recoverAbandonedRunner() throws -> RunnerID? {
-        guard let leaseStore, let lease = try leaseStore.load() else {
-            return nil
+    func recoverAbandonedRunners() throws -> [RunnerID] {
+        guard let leaseStore else {
+            return []
         }
 
-        var cleanupFailures = cleanup(
-            lifecycle: .runnerMayBeRunning,
-            id: lease.runnerID,
-            repository: lease.repository
-        )
-        cleanupFailures = try retryDeferredGitHubCleanup(
-            cleanupFailures,
-            id: lease.runnerID,
-            repository: lease.repository
-        )
-        guard cleanupFailures.isEmpty else {
-            throw RunnerSessionError.cleanupFailed(cleanupFailures)
+        let leases = try leaseStore.load()
+        var recovered: Set<RunnerID> = []
+        var deferredCleanup: [(
+            lease: RunnerLease,
+            failures: [RunnerSessionCleanupFailure]
+        )] = []
+        var recoveryFailures: [RunnerSessionCleanupFailure] = []
+
+        for lease in leases {
+            let failures = cleanup(
+                lifecycle: .runnerMayBeRunning,
+                id: lease.runnerID,
+                repository: lease.repository
+            )
+
+            if failures.isEmpty {
+                clearLeaseAfterCleanup(id: lease.runnerID)
+                recovered.insert(lease.runnerID)
+            } else if isDeferredGitHubCleanup(failures) {
+                deferredCleanup.append((lease, failures))
+            } else {
+                recoveryFailures.append(contentsOf: failures)
+            }
         }
-        clearLeaseAfterCleanup(id: lease.runnerID)
-        return lease.runnerID
+
+        for deferred in deferredCleanup {
+            let failures = try retryDeferredGitHubCleanup(
+                deferred.failures,
+                id: deferred.lease.runnerID,
+                repository: deferred.lease.repository
+            )
+            if failures.isEmpty {
+                clearLeaseAfterCleanup(id: deferred.lease.runnerID)
+                recovered.insert(deferred.lease.runnerID)
+            } else {
+                recoveryFailures.append(contentsOf: failures)
+            }
+        }
+
+        guard recoveryFailures.isEmpty else {
+            throw RunnerSessionError.cleanupFailed(recoveryFailures)
+        }
+        return leases.compactMap { lease in
+            recovered.contains(lease.runnerID) ? lease.runnerID : nil
+        }
     }
 
     private func retryDeferredGitHubCleanup(
@@ -178,7 +208,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             return
         }
         do {
-            try leaseStore.clear()
+            try leaseStore.clear(id)
         } catch {
             stateChanged(.leaseCleanupFailed(id, reason: describeError(error)))
         }
