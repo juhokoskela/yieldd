@@ -37,7 +37,9 @@ struct RunnerTestCommand: ParsableCommand {
         let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
         let backend = AppleContainerBackend(
             containerURL: try locator.locate("container"),
-            executor: executor
+            executor: executor,
+            wait: signalMonitor.wait,
+            checkCancellation: signalMonitor.check
         )
         let github = GitHubRunnerClient(
             ghURL: try locator.locate("gh"),
@@ -46,6 +48,7 @@ struct RunnerTestCommand: ParsableCommand {
         let session = EphemeralRunnerSession(
             backend: backend,
             github: github,
+            memoryAdmission: RunnerMemoryAdmission(),
             jobTimeout: TimeInterval(timeout) * 60,
             checkCancellation: signalMonitor.check,
             recoveryWait: signalMonitor.wait,

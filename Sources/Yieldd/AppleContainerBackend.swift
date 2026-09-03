@@ -2,23 +2,66 @@ import Foundation
 
 struct AppleContainerBackend: RunnerBackend {
     static let creationTimeout: TimeInterval = 5 * 60
+    static let memoryConfigurationTimeout: TimeInterval = 30
     static let cleanupTimeout: TimeInterval = 90
     static let runnerStopTimeout: TimeInterval = 30
     static let virtualCPUs = 4
     static let memory = "12G"
+    static let memoryBytes: UInt64 = 12 * 1_024 * 1_024 * 1_024
+    static let image = "local/yieldd-guest:dev"
 
     let containerURL: URL
     let executor: any ProcessExecuting
+    let dockerReadiness: DockerReadiness
 
-    func create(id: RunnerID, image: String) throws {
+    var memoryRequirements: RunnerMemoryRequirements {
+        RunnerMemoryRequirements(
+            constrainedBytes: Self.memoryBytes,
+            fullBytes: Self.memoryBytes
+        )
+    }
+
+    init(
+        containerURL: URL,
+        executor: any ProcessExecuting,
+        dockerInfoAttempts: Int = 30,
+        retryDelay: TimeInterval = 1,
+        wait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
+        checkCancellation: @escaping () throws -> Void = {}
+    ) {
+        self.containerURL = containerURL
+        self.executor = executor
+        dockerReadiness = DockerReadiness(
+            attempts: dockerInfoAttempts,
+            retryDelay: retryDelay,
+            wait: wait,
+            checkCancellation: checkCancellation
+        )
+    }
+
+    func create(id: RunnerID, memory allocation: RunnerMemoryAllocation) throws {
         _ = try run([
             "machine", "create",
             "--name", id.value,
             "--home-mount", "none",
             "--cpus", String(Self.virtualCPUs),
             "--memory", Self.memory,
-            image,
+            Self.image,
         ], timeout: Self.creationTimeout)
+        try dockerReadiness.wait {
+            _ = try exec(
+                ["docker", "info"],
+                timeout: DockerReadiness.probeTimeout,
+                on: id
+            )
+        }
+        _ = try exec(
+            ["yieldd-runner-control", "memory", allocation.rawValue],
+            timeout: Self.memoryConfigurationTimeout,
+            outputCapture: .all,
+            as: .root,
+            on: id
+        )
     }
 
     func exec(

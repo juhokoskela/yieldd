@@ -15,7 +15,9 @@ enum RunnerMemoryAllocation: String, Equatable, Sendable {
 }
 
 protocol RunnerBackend {
-    func create(id: RunnerID, image: String) throws
+    var memoryRequirements: RunnerMemoryRequirements { get }
+
+    func create(id: RunnerID, memory: RunnerMemoryAllocation) throws
     func exec(
         _ arguments: [String],
         standardInput: Data?,
@@ -62,21 +64,6 @@ extension RunnerBackend {
         )
     }
 
-    @discardableResult
-    func setMemoryAllocation(
-        _ allocation: RunnerMemoryAllocation,
-        timeout: TimeInterval,
-        on id: RunnerID
-    ) throws -> ProcessResult {
-        try exec(
-            ["yieldd-runner-control", "memory", allocation.rawValue],
-            standardInput: nil,
-            timeout: timeout,
-            outputCapture: .all,
-            as: .root,
-            on: id
-        )
-    }
 }
 
 enum RunnerBackendError: Error, Equatable, LocalizedError {

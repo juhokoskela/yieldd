@@ -57,6 +57,7 @@ func runRunnerService(
     stop: RunnerPoolStop,
     output: RunnerServiceOutput
 ) throws {
+    let memoryAdmission = RunnerMemoryAdmission()
     let sessionStateChanged: @Sendable (RunnerSessionState) -> Void = { state in
         switch state {
         case let .preparing(id):
@@ -77,6 +78,7 @@ func runRunnerService(
             containerURL: containerURL,
             ghURL: ghURL,
             stop: stop,
+            memoryAdmission: memoryAdmission,
             stateChanged: sessionStateChanged
         )
     }
@@ -127,6 +129,7 @@ func makeRunnerSession(
     containerURL: URL,
     ghURL: URL,
     stop: RunnerPoolStop,
+    memoryAdmission: RunnerMemoryAdmission,
     stateChanged: @escaping (RunnerSessionState) -> Void
 ) -> EphemeralRunnerSession {
     let executor = ProcessExecutor(
@@ -136,12 +139,15 @@ func makeRunnerSession(
     return EphemeralRunnerSession(
         backend: AppleContainerBackend(
             containerURL: containerURL,
-            executor: executor
+            executor: executor,
+            wait: stop.wait,
+            checkCancellation: stop.check
         ),
         github: GitHubRunnerClient(
             ghURL: ghURL,
             executor: executor
         ),
+        memoryAdmission: memoryAdmission,
         checkCancellation: stop.check,
         recoveryWait: stop.wait,
         stateChanged: stateChanged,

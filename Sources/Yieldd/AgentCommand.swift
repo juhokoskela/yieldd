@@ -160,6 +160,7 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
             containerURL: configuration.containerURL,
             ghURL: configuration.ghURL,
             stop: stop,
+            memoryAdmission: RunnerMemoryAdmission(),
             stateChanged: { state in
                 switch state {
                 case let .waitingForGitHubCleanup(id, retryDelay):

@@ -12,7 +12,9 @@ struct MachineTestCommand: ParsableCommand {
         let containerURL = try ExecutableLocator().locate("container")
         let backend = AppleContainerBackend(
             containerURL: containerURL,
-            executor: ProcessExecutor(checkCancellation: signalMonitor.check)
+            executor: ProcessExecutor(checkCancellation: signalMonitor.check),
+            wait: signalMonitor.wait,
+            checkCancellation: signalMonitor.check
         )
         let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
 
@@ -25,42 +27,23 @@ struct MachineTestCommand: ParsableCommand {
 }
 
 struct MachineTestRunner {
-    static let image = "local/yieldd-guest:dev"
     static let helloWorldTimeout: TimeInterval = 2 * 60
 
     let backend: any RunnerBackend
-    private let dockerInfoAttempts: Int
-    private let retryDelay: TimeInterval
-    private let sleep: (TimeInterval) -> Void
     private let checkCancellation: () throws -> Void
 
     init(
         backend: any RunnerBackend,
-        dockerInfoAttempts: Int = 30,
-        retryDelay: TimeInterval = 1,
-        sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:),
         checkCancellation: @escaping () throws -> Void = {}
     ) {
-        precondition(dockerInfoAttempts > 0)
         self.backend = backend
-        self.dockerInfoAttempts = dockerInfoAttempts
-        self.retryDelay = retryDelay
-        self.sleep = sleep
         self.checkCancellation = checkCancellation
     }
 
     func run(id: RunnerID) throws {
         let operation = Result<Void, any Error> {
             try checkCancellation()
-            try backend.create(id: id, image: Self.image)
-            try checkCancellation()
-            try DockerReadiness(
-                backend: backend,
-                attempts: dockerInfoAttempts,
-                retryDelay: retryDelay,
-                sleep: sleep,
-                checkCancellation: checkCancellation
-            ).wait(on: id)
+            try backend.create(id: id, memory: .constrained)
             try checkCancellation()
             _ = try backend.exec(
                 ["docker", "run", "--rm", "hello-world"],

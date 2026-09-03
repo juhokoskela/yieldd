@@ -8,100 +8,14 @@ private let machineTestID = RunnerID(value: "yieldd-test-machine")
 @Test
 func machineTestRunsChecksAndCleanupInOrder() throws {
     let backend = RecordingRunnerBackend(
-        execOutcomes: [
-            .success(processResult(stdout: "docker info")),
-            .success(processResult(stdout: "hello world")),
-        ]
+        execOutcomes: [.success(processResult(stdout: "hello world"))]
     )
 
     try MachineTestRunner(backend: backend).run(id: machineTestID)
 
     #expect(backend.calls == [
-        .create(machineTestID, MachineTestRunner.image),
-        .exec(machineTestID, ["docker", "info"]),
+        .create(machineTestID, .constrained),
         .exec(machineTestID, ["docker", "run", "--rm", "hello-world"]),
-        .destroy(machineTestID),
-    ])
-}
-
-@Test
-func failedDockerInfoSkipsHelloWorldAndCleansUp() {
-    let backend = RecordingRunnerBackend(execOutcomes: [.failure(TestFailure.dockerInfo)])
-    let runner = MachineTestRunner(
-        backend: backend,
-        dockerInfoAttempts: 1,
-        sleep: { _ in }
-    )
-
-    #expect(throws: TestFailure.dockerInfo) {
-        try runner.run(id: machineTestID)
-    }
-    #expect(backend.calls == [
-        .create(machineTestID, MachineTestRunner.image),
-        .exec(machineTestID, ["docker", "info"]),
-        .destroy(machineTestID),
-    ])
-}
-
-@Test
-func retriesDockerInfoWhileTheMachineBoots() throws {
-    let backend = RecordingRunnerBackend(execOutcomes: [
-        .failure(TestFailure.dockerInfo),
-        .success(processResult(stdout: "docker info")),
-        .success(processResult(stdout: "hello world")),
-    ])
-    var delays: [TimeInterval] = []
-    let runner = MachineTestRunner(
-        backend: backend,
-        dockerInfoAttempts: 2,
-        retryDelay: 0.25,
-        sleep: { delays.append($0) }
-    )
-
-    try runner.run(id: machineTestID)
-
-    #expect(delays == [0.25])
-    #expect(backend.calls == [
-        .create(machineTestID, MachineTestRunner.image),
-        .exec(machineTestID, ["docker", "info"]),
-        .exec(machineTestID, ["docker", "info"]),
-        .exec(machineTestID, ["docker", "run", "--rm", "hello-world"]),
-        .destroy(machineTestID),
-    ])
-}
-
-@Test
-func launchFailureDoesNotRetryDockerInfo() {
-    let request = ProcessRequest(
-        executableURL: URL(fileURLWithPath: "/usr/local/bin/container"),
-        arguments: ["machine", "run"]
-    )
-    let backend = RecordingRunnerBackend(execOutcomes: [
-        .failure(ProcessExecutionError.launchFailed(
-            request: request,
-            underlying: TestFailure.dockerInfo
-        )),
-    ])
-    var delays: [TimeInterval] = []
-    let runner = MachineTestRunner(
-        backend: backend,
-        dockerInfoAttempts: 30,
-        sleep: { delays.append($0) }
-    )
-
-    do {
-        try runner.run(id: machineTestID)
-        Issue.record("Expected process launch to fail")
-    } catch let ProcessExecutionError.launchFailed(actualRequest, _) {
-        #expect(actualRequest == request)
-    } catch {
-        Issue.record("Unexpected error: \(error)")
-    }
-
-    #expect(delays.isEmpty)
-    #expect(backend.calls == [
-        .create(machineTestID, MachineTestRunner.image),
-        .exec(machineTestID, ["docker", "info"]),
         .destroy(machineTestID),
     ])
 }
@@ -109,7 +23,6 @@ func launchFailureDoesNotRetryDockerInfo() {
 @Test
 func failedHelloWorldStillCleansUp() {
     let backend = RecordingRunnerBackend(execOutcomes: [
-        .success(processResult()),
         .failure(TestFailure.helloWorld),
     ])
 
@@ -128,7 +41,7 @@ func failedCreateStillAttemptsCleanup() {
         try MachineTestRunner(backend: backend).run(id: machineTestID)
     }
     #expect(backend.calls == [
-        .create(machineTestID, MachineTestRunner.image),
+        .create(machineTestID, .constrained),
         .destroy(machineTestID),
     ])
 }
@@ -136,7 +49,7 @@ func failedCreateStillAttemptsCleanup() {
 @Test
 func cleanupFailureAfterSuccessfulChecksIsReported() {
     let backend = RecordingRunnerBackend(
-        execOutcomes: [.success(processResult()), .success(processResult())],
+        execOutcomes: [.success(processResult())],
         destroyError: TestFailure.cleanup
     )
 
@@ -182,12 +95,16 @@ func interruptionAfterCreateCleansUpWithoutRunningChecks() {
         try runner.run(id: machineTestID)
     }
     #expect(backend.calls == [
-        .create(machineTestID, MachineTestRunner.image),
+        .create(machineTestID, .constrained),
         .destroy(machineTestID),
     ])
 }
 
 private final class RecordingRunnerBackend: RunnerBackend {
+    let memoryRequirements = RunnerMemoryRequirements(
+        constrainedBytes: 1,
+        fullBytes: 1
+    )
     private(set) var calls: [RunnerBackendCall] = []
     private let createError: (any Error)?
     private var execOutcomes: [Result<ProcessResult, any Error>]
@@ -203,8 +120,8 @@ private final class RecordingRunnerBackend: RunnerBackend {
         self.destroyError = destroyError
     }
 
-    func create(id: RunnerID, image: String) throws {
-        calls.append(.create(id, image))
+    func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
+        calls.append(.create(id, memory))
         if let createError {
             throw createError
         }
@@ -221,11 +138,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
         #expect(standardInput == nil)
         #expect(outputCapture == .all)
         #expect(user == .runner)
-        if arguments == ["docker", "info"] {
-            #expect(timeout == DockerReadiness.probeTimeout)
-        } else {
-            #expect(timeout == MachineTestRunner.helloWorldTimeout)
-        }
+        #expect(timeout == MachineTestRunner.helloWorldTimeout)
         calls.append(.exec(id, arguments))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall
@@ -246,7 +159,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
 }
 
 private enum RunnerBackendCall: Equatable {
-    case create(RunnerID, String)
+    case create(RunnerID, RunnerMemoryAllocation)
     case exec(RunnerID, [String])
     case destroy(RunnerID)
 }

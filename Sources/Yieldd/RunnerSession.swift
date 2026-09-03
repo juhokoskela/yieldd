@@ -5,17 +5,14 @@ protocol RunnerSessionRunning {
 }
 
 struct EphemeralRunnerSession: RunnerSessionRunning {
-    static let image = MachineTestRunner.image
     static let configurationTimeout: TimeInterval = 5 * 60
-    static let memoryConfigurationTimeout: TimeInterval = 30
     static let jobOutputTailBytes = 1_024 * 1_024
     static let maximumRecoveryRetryDelay: TimeInterval = 30
 
     let backend: any RunnerBackend
     let github: any GitHubRunnerManaging
+    private let memoryAdmission: RunnerMemoryAdmission
     private let jobTimeout: TimeInterval?
-    private let dockerReadiness: DockerReadiness
-    private let readMemoryPressure: () -> HostMemoryPressure
     private let checkCancellation: () throws -> Void
     private let recoveryWait: (TimeInterval) throws -> Void
     private let stateChanged: (RunnerSessionState) -> Void
@@ -24,11 +21,8 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
     init(
         backend: any RunnerBackend,
         github: any GitHubRunnerManaging,
+        memoryAdmission: RunnerMemoryAdmission,
         jobTimeout: TimeInterval? = nil,
-        dockerInfoAttempts: Int = 30,
-        retryDelay: TimeInterval = 1,
-        sleep: @escaping (TimeInterval) -> Void = Thread.sleep(forTimeInterval:),
-        readMemoryPressure: @escaping () -> HostMemoryPressure = HostMemoryPressure.current,
         checkCancellation: @escaping () throws -> Void = {},
         recoveryWait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         stateChanged: @escaping (RunnerSessionState) -> Void = { _ in },
@@ -39,41 +33,31 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         }
         self.backend = backend
         self.github = github
+        self.memoryAdmission = memoryAdmission
         self.jobTimeout = jobTimeout
-        self.readMemoryPressure = readMemoryPressure
         self.checkCancellation = checkCancellation
         self.recoveryWait = recoveryWait
         self.stateChanged = stateChanged
         self.leaseStore = leaseStore
-        dockerReadiness = DockerReadiness(
-            backend: backend,
-            attempts: dockerInfoAttempts,
-            retryDelay: retryDelay,
-            sleep: sleep,
-            checkCancellation: checkCancellation
-        )
     }
 
     func run(id: RunnerID, repository: GitHubRepository) throws {
         stateChanged(.preparing(id))
-        let registrationToken = try github.createRegistrationToken(for: repository)
         try checkCancellation()
         try leaseStore?.save(RunnerLease(runnerID: id, repository: repository))
 
         var lifecycle = RunnerLifecycle.machineMayExist
+        var memoryReservation: RunnerMemoryReservation?
         var operationFailure: (any Error)?
         do {
-            try backend.create(id: id, image: Self.image)
-            try checkCancellation()
-            try dockerReadiness.wait(on: id)
-            try checkCancellation()
-            let memoryAllocation: RunnerMemoryAllocation = readMemoryPressure()
-                .permitsFullRunnerMemory ? .full : .constrained
-            _ = try backend.setMemoryAllocation(
-                memoryAllocation,
-                timeout: Self.memoryConfigurationTimeout,
-                on: id
+            let reservation = try memoryAdmission.acquire(
+                requirements: backend.memoryRequirements,
+                checkCancellation: checkCancellation
             )
+            memoryReservation = reservation
+            let registrationToken = try github.createRegistrationToken(for: repository)
+            try checkCancellation()
+            try backend.create(id: id, memory: reservation.allocation)
             try checkCancellation()
             lifecycle = .runnerRegistrationMayExist
             _ = try backend.exec(
@@ -101,7 +85,8 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         var cleanupFailures = cleanup(
             lifecycle: lifecycle,
             id: id,
-            repository: repository
+            repository: repository,
+            memoryReservation: memoryReservation
         )
         if operationFailure == nil, isDeferredGitHubCleanup(cleanupFailures) {
             cleanupFailures = try retryDeferredGitHubCleanup(
@@ -150,7 +135,8 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             let failures = cleanup(
                 lifecycle: .runnerMayBeRunning,
                 id: lease.runnerID,
-                repository: lease.repository
+                repository: lease.repository,
+                memoryReservation: nil
             )
 
             if failures.isEmpty {
@@ -217,7 +203,8 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
     private func cleanup(
         lifecycle: RunnerLifecycle,
         id: RunnerID,
-        repository: GitHubRepository
+        repository: GitHubRepository,
+        memoryReservation: RunnerMemoryReservation?
     ) -> [RunnerSessionCleanupFailure] {
         let removeRunner = {
             cleanupFailure(step: .githubRunner) {
@@ -225,9 +212,13 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             }
         }
         let destroyMachine = {
-            cleanupFailure(step: .machine) {
+            let failure = cleanupFailure(step: .machine) {
                 try backend.destroy(id)
             }
+            if failure == nil, let memoryReservation {
+                memoryAdmission.release(memoryReservation)
+            }
+            return failure
         }
 
         switch lifecycle {
