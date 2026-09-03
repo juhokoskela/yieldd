@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.yieldd.agent</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>dev.yieldd</string>
+    </array>
+    <key>BundleProgram</key>
+    <string>Contents/Resources/yieldd-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>yieldd-agent</string>
+        <string>agent</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ExitTimeOut</key>
+    <integer>180</integer>
+</dict>
+</plist>
