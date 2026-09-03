@@ -7,7 +7,7 @@
 - An Apple Silicon Mac running macOS 26 or newer
 - Swift 6.2 or newer
 - Apple `container` with container machine support
-- A running container system
+- A running container system for foreground commands
 - GitHub CLI authenticated to `github.com` with administration access to the test repository
 
 For safety, `yieldd` rejects empty `PATH` components instead of interpreting them as the working directory.
@@ -83,3 +83,35 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd serve 
 Each repository argument creates one independent runner slot, up to 16 slots per process. Repeat a repository to give it more than one slot. Every slot creates and registers an ephemeral runner, waits for one job, cleans up both the GitHub registration and machine, and then starts its next runner. Setup and runner failures use exponential backoff capped at 30 seconds; a successful session resets that slot's delay. A cleanup failure stops the pool and cleans up the other slots rather than admitting more work alongside a machine whose removal could not be confirmed.
 
 This is a foreground command, not a daemon. Ctrl+C and SIGTERM interrupt every active slot and run cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.
+
+## Local agent
+
+The local agent runs the same runner pool at login without keeping a terminal open. Before installing it, run `yieldd doctor` and start the container system once so Apple Container can install any required kernel components.
+
+Install one or more runner slots from the repository root:
+
+```sh
+Scripts/install-local-agent.sh OWNER/REPOSITORY [OWNER/REPOSITORY ...]
+```
+
+The script creates an ad-hoc-signed local build at `~/Applications/yieldd.app`, stores the repository slots plus the resolved absolute paths to `container` and `gh`, and registers a per-user LaunchAgent through `SMAppService`. The agent starts Apple Container without interactive kernel installation, recovers abandoned runners, and then serves the configured repositories. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
+
+Check the registration, configured slots, and active runner leases with:
+
+```sh
+~/Applications/yieldd.app/Contents/MacOS/yieldd service status
+```
+
+If macOS reports that approval is required, enable `yieldd` under System Settings > General > Login Items & Extensions. Agent logs are available through unified logging:
+
+```sh
+log stream --style compact --predicate 'subsystem == "dev.yieldd" && category == "agent"'
+```
+
+To change the repository slots, uninstall and then install the new configuration with the packaged command. To remove the agent configuration and stop launching it at login:
+
+```sh
+~/Applications/yieldd.app/Contents/MacOS/yieldd service uninstall
+```
+
+The application remains in `~/Applications` after unregistering so an active process can finish stopping safely. Move it to the Trash only after uninstalling it.
