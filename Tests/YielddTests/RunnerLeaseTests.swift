@@ -76,7 +76,7 @@ func leaseStoreSupportsMaximumRunnerSlots() throws {
         "\(String(repeating: "o", count: 39))/\(String(repeating: "r", count: 100))"
     )
 
-    for index in 0..<RunnerServiceCommand.maximumSlots {
+    for index in 0..<RunnerPool.maximumSlots {
         let suffix = String(index)
         let runnerID = RunnerID(value:
             "yieldd-\(String(repeating: "a", count: 121 - suffix.count))\(suffix)"
@@ -84,7 +84,7 @@ func leaseStoreSupportsMaximumRunnerSlots() throws {
         try store.save(RunnerLease(runnerID: runnerID, repository: repository))
     }
 
-    #expect(try store.load().count == RunnerServiceCommand.maximumSlots)
+    #expect(try store.load().count == RunnerPool.maximumSlots)
 }
 
 @Test

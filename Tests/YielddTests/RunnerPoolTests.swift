@@ -57,6 +57,21 @@ func poolFailureCancelsOtherSlotsAndPreservesTheFirstError() {
 }
 
 @Test
+func poolStopStartsOneShutdownDeadline() throws {
+    let stop = RunnerPoolStop(shutdownTimeout: 1)
+    #expect(stop.executionDeadline() == nil)
+
+    stop.request()
+    let deadline = try #require(stop.executionDeadline())
+    stop.request()
+
+    #expect(stop.executionDeadline() == deadline)
+    #expect(throws: CancellationError.self) {
+        try stop.check()
+    }
+}
+
+@Test
 func serviceCommandPreservesRepeatedRepositories() throws {
     let command = try RunnerServiceCommand.parse([
         firstPoolRepository.fullName,
@@ -73,7 +88,7 @@ func serviceCommandPreservesRepeatedRepositories() throws {
 func serviceCommandRejectsTooManyRunnerSlots() {
     let arguments = Array(
         repeating: firstPoolRepository.fullName,
-        count: RunnerServiceCommand.maximumSlots + 1
+        count: RunnerPool.maximumSlots + 1
     )
 
     do {
@@ -81,7 +96,7 @@ func serviceCommandRejectsTooManyRunnerSlots() {
         Issue.record("Expected excessive runner slots to be rejected")
     } catch {
         #expect(String(describing: error).contains(
-            "at most \(RunnerServiceCommand.maximumSlots) runner slots"
+            "at most \(RunnerPool.maximumSlots) runner slots"
         ))
     }
 }
@@ -90,7 +105,7 @@ func serviceCommandRejectsTooManyRunnerSlots() {
 func serviceCommandAcceptsMaximumRunnerSlots() throws {
     let arguments = Array(
         repeating: firstPoolRepository.fullName,
-        count: RunnerServiceCommand.maximumSlots
+        count: RunnerPool.maximumSlots
     )
 
     _ = try RunnerServiceCommand.parse(arguments)

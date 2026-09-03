@@ -2,7 +2,7 @@ import Foundation
 
 struct AppleContainerSystem {
     static let commandTimeout: TimeInterval = 60
-    static let processTimeout: TimeInterval = 75
+    static let processTimeout: TimeInterval = commandTimeout + 15
 
     let containerURL: URL
     let executor: any ProcessExecuting
@@ -18,6 +18,6 @@ struct AppleContainerSystem {
             timeout: Self.processTimeout,
             outputCapture: .tail(maxBytes: 1_024 * 1_024)
         )
-        _ = try executor.execute(request).requireSuccess(for: request)
+        try executor.execute(request).requireSuccess(for: request)
     }
 }

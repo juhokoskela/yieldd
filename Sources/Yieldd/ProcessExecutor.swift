@@ -79,6 +79,7 @@ enum ProcessExecutionError: Error {
     case outputReadFailed(request: ProcessRequest, stream: CapturedStream, underlying: any Error)
     case waitFailed(request: ProcessRequest, underlying: any Error)
     case cancelled(request: ProcessRequest, result: ProcessResult, underlying: any Error)
+    case executionDeadlineExceeded(request: ProcessRequest, result: ProcessResult?)
     case timedOut(request: ProcessRequest, result: ProcessResult)
     case nonZeroExit(request: ProcessRequest, result: ProcessResult)
     case terminatedBySignal(request: ProcessRequest, result: ProcessResult)
@@ -101,6 +102,16 @@ extension ProcessExecutionError: LocalizedError {
                 reason: "was cancelled: \(underlying.localizedDescription)",
                 stderr: result.stderrText
             )
+        case let .executionDeadlineExceeded(request, result):
+            if let result {
+                processFailureDescription(
+                    executableURL: request.executableURL,
+                    reason: "exceeded its execution deadline",
+                    stderr: result.stderrText
+                )
+            } else {
+                "Process \(request.executableURL.path) was not launched because its execution deadline had expired."
+            }
         case let .timedOut(request, result):
             processFailureDescription(
                 executableURL: request.executableURL,
@@ -139,20 +150,30 @@ struct ProcessExecutor: ProcessExecuting {
     private let terminationGracePeriod: TimeInterval
     private let cancellationPollInterval: TimeInterval
     private let checkCancellation: (() throws -> Void)?
+    private let maximumExecutionDeadline: (@Sendable () -> DispatchTime?)?
 
     init(
         terminationGracePeriod: TimeInterval = 2,
         cancellationPollInterval: TimeInterval = 0.1,
-        checkCancellation: (() throws -> Void)? = nil
+        checkCancellation: (() throws -> Void)? = nil,
+        maximumExecutionDeadline: (@Sendable () -> DispatchTime?)? = nil
     ) {
         precondition(terminationGracePeriod.isFinite && terminationGracePeriod >= 0)
         precondition(cancellationPollInterval.isFinite && cancellationPollInterval > 0)
         self.terminationGracePeriod = terminationGracePeriod
         self.cancellationPollInterval = cancellationPollInterval
         self.checkCancellation = checkCancellation
+        self.maximumExecutionDeadline = maximumExecutionDeadline
     }
 
     func execute(_ request: ProcessRequest) throws -> ProcessResult {
+        if executionDeadlineHasPassed() {
+            throw ProcessExecutionError.executionDeadlineExceeded(
+                request: request,
+                result: nil
+            )
+        }
+
         let stdinPipe = request.standardInput.map { _ in Pipe() }
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -237,7 +258,7 @@ struct ProcessExecutor: ProcessExecuting {
             )
         }
         switch waitOutcome {
-        case .timedOut, .cancelled:
+        case .timedOut, .cancelled, .executionDeadlineExceeded:
             terminate(process)
             for (_, reader) in readers {
                 reader.cancel()
@@ -276,6 +297,11 @@ struct ProcessExecutor: ProcessExecuting {
         )
 
         switch waitOutcome {
+        case .executionDeadlineExceeded:
+            throw ProcessExecutionError.executionDeadlineExceeded(
+                request: request,
+                result: result
+            )
         case .timedOut:
             throw ProcessExecutionError.timedOut(request: request, result: result)
         case let .cancelled(error):
@@ -399,7 +425,8 @@ struct ProcessExecutor: ProcessExecuting {
         wait: (DispatchTime) -> DispatchTimeoutResult,
         waitIndefinitely: () -> Void
     ) -> ProcessWaitOutcome {
-        guard cancellable, checkCancellation != nil else {
+        let pollsForCancellation = cancellable && checkCancellation != nil
+        guard pollsForCancellation || maximumExecutionDeadline != nil else {
             guard let deadline else {
                 waitIndefinitely()
                 return .exited
@@ -412,21 +439,54 @@ struct ProcessExecutor: ProcessExecuting {
                 return .exited
             }
 
-            do {
-                try checkCancellation?()
-            } catch {
-                return .cancelled(error)
+            if pollsForCancellation {
+                do {
+                    try checkCancellation?()
+                } catch {
+                    return .cancelled(error)
+                }
             }
 
-            let waitDeadline = nextPollDeadline(timeoutDeadline: deadline)
+            let executionDeadline = maximumExecutionDeadline?()
+            let waitDeadline = nextPollDeadline(
+                timeoutDeadline: earlier(deadline, executionDeadline)
+            )
             if wait(waitDeadline) == .success {
                 return .exited
             }
 
-            if let deadline, DispatchTime.now().uptimeNanoseconds >= deadline.uptimeNanoseconds {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if let executionDeadline,
+               now >= executionDeadline.uptimeNanoseconds {
+                return .executionDeadlineExceeded
+            }
+            if let deadline, now >= deadline.uptimeNanoseconds {
                 return .timedOut
             }
         }
+    }
+
+    private func earlier(
+        _ first: DispatchTime?,
+        _ second: DispatchTime?
+    ) -> DispatchTime? {
+        switch (first, second) {
+        case let (first?, second?):
+            first.uptimeNanoseconds <= second.uptimeNanoseconds ? first : second
+        case let (first?, nil):
+            first
+        case let (nil, second?):
+            second
+        case (nil, nil):
+            nil
+        }
+    }
+
+    private func executionDeadlineHasPassed() -> Bool {
+        guard let deadline = maximumExecutionDeadline?() else {
+            return false
+        }
+        return DispatchTime.now().uptimeNanoseconds >= deadline.uptimeNanoseconds
     }
 
     private func terminate(_ process: SpawnedProcess) {
@@ -516,6 +576,7 @@ struct ProcessExecutor: ProcessExecuting {
 private enum ProcessWaitOutcome {
     case exited
     case timedOut
+    case executionDeadlineExceeded
     case cancelled(any Error)
 }
 

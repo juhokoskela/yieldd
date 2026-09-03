@@ -1,6 +1,9 @@
+import Dispatch
 import Foundation
 
 struct RunnerPool: Sendable {
+    static let maximumSlots = 16
+
     private let stop: RunnerPoolStop
     private let runSlot: @Sendable (GitHubRepository, RunnerPoolStop) throws -> Void
 
@@ -41,26 +44,49 @@ final class RunnerPoolStop: @unchecked Sendable {
     private static let checkInterval: TimeInterval = 0.1
 
     private let condition = NSCondition()
-    private let checkExternal: @Sendable () throws -> Void
+    private let shutdownTimeout: TimeInterval?
     private var requested = false
+    private var stopDeadline: DispatchTime?
+    private var signalMonitor: SignalMonitor?
 
-    init(checkExternal: @escaping @Sendable () throws -> Void = {}) {
-        self.checkExternal = checkExternal
+    init(shutdownTimeout: TimeInterval? = nil) {
+        if let shutdownTimeout {
+            precondition(shutdownTimeout.isFinite && shutdownTimeout > 0)
+        }
+        self.shutdownTimeout = shutdownTimeout
+    }
+
+    static func monitoringSignals(
+        shutdownTimeout: TimeInterval? = nil
+    ) throws -> RunnerPoolStop {
+        let stop = RunnerPoolStop(shutdownTimeout: shutdownTimeout)
+        stop.signalMonitor = try SignalMonitor(signalReceived: { [weak stop] _ in
+            stop?.request()
+        })
+        return stop
     }
 
     func request() {
         condition.withLock {
+            if !requested, let shutdownTimeout {
+                stopDeadline = DispatchTime.now() + .milliseconds(
+                    Int((shutdownTimeout * 1_000).rounded(.up))
+                )
+            }
             requested = true
             condition.broadcast()
         }
     }
 
     func check() throws {
-        try checkExternal()
         let shouldStop = condition.withLock { requested }
         if shouldStop {
             throw CancellationError()
         }
+    }
+
+    func executionDeadline() -> DispatchTime? {
+        condition.withLock { stopDeadline }
     }
 
     func wait(for interval: TimeInterval) throws {

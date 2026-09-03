@@ -351,6 +351,52 @@ func noncancellableRequestIgnoresCancellationChecker() throws {
 }
 
 @Test
+func executionDeadlineBoundsAnAlreadyRunningNoncancellableProcess() {
+    let deadline = DeferredExecutionDeadline(delay: 0.05)
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "while :; do :; done"],
+        timeout: 10,
+        cancellable: false
+    )
+    let executor = ProcessExecutor(
+        terminationGracePeriod: 0.05,
+        cancellationPollInterval: 0.01,
+        maximumExecutionDeadline: deadline.value
+    )
+
+    do {
+        _ = try executor.execute(request)
+        Issue.record("Expected the execution deadline to stop the process")
+    } catch let ProcessExecutionError.executionDeadlineExceeded(actualRequest, result?) {
+        #expect(actualRequest == request)
+        #expect(result.terminationReason == .uncaughtSignal)
+        #expect(result.terminationStatus == SIGTERM)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test
+func expiredExecutionDeadlinePreventsProcessLaunch() {
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/missing/executable"),
+        arguments: []
+    )
+
+    do {
+        _ = try ProcessExecutor(
+            maximumExecutionDeadline: { .now() }
+        ).execute(request)
+        Issue.record("Expected the expired deadline to prevent launch")
+    } catch let ProcessExecutionError.executionDeadlineExceeded(actualRequest, nil) {
+        #expect(actualRequest == request)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test
 func terminatesProcessAfterTimeout() {
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/bin/sh"),
@@ -540,5 +586,29 @@ private final class ProcessExecutionOutcome: @unchecked Sendable {
 
     func result() -> Result<ProcessResult, any Error>? {
         lock.withLock { storedResult }
+    }
+}
+
+private final class DeferredExecutionDeadline: @unchecked Sendable {
+    private let lock = NSLock()
+    private let delay: TimeInterval
+    private var calls = 0
+    private var deadline: DispatchTime?
+
+    init(delay: TimeInterval) {
+        self.delay = delay
+    }
+
+    func value() -> DispatchTime? {
+        lock.withLock {
+            calls += 1
+            guard calls > 1 else {
+                return nil
+            }
+            if deadline == nil {
+                deadline = .now() + delay
+            }
+            return deadline
+        }
     }
 }

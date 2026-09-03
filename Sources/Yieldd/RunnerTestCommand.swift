@@ -52,8 +52,7 @@ struct RunnerTestCommand: ParsableCommand {
             stateChanged: { state in
                 switch state {
                 case let .waitingForGitHubCleanup(id, retryDelay):
-                    let unit = retryDelay == 1 ? "second" : "seconds"
-                    print("GitHub still considers runner \(id.value) busy; retrying cleanup in \(Int(retryDelay)) \(unit).")
+                    print(githubCleanupRetryMessage(id: id, delay: retryDelay))
                 case let .leaseCleanupFailed(id, reason):
                     writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
                 case .preparing, .waitingForJob, .cleaningUp:
