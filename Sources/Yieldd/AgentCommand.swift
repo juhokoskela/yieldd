@@ -82,9 +82,6 @@ struct AgentUninstallCommand: AsyncParsableCommand {
         abstract: "Disable the local agent and remove its configuration."
     )
 
-    @Flag(name: .long, help: .hidden)
-    var preserveConfiguration = false
-
     mutating func run() async throws {
         let service = try localAgentService()
         if service.status() == .notFound {
@@ -97,13 +94,11 @@ struct AgentUninstallCommand: AsyncParsableCommand {
         try await uninstallAgent(
             store: store,
             service: service,
-            preserveConfiguration: preserveConfiguration,
             recover: {
                 try recoverAgentRunners(store: store)
             }
         )
-        let suffix = preserveConfiguration ? " preserved." : " removed."
-        print("Local agent unregistered and configuration\(suffix)")
+        print("Local agent unregistered and configuration removed.")
     }
 }
 

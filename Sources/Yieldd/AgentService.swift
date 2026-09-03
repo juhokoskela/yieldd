@@ -80,7 +80,6 @@ func reportAgentStatus(
 func uninstallAgent(
     store: AgentConfigurationStore,
     service: LocalAgentService,
-    preserveConfiguration: Bool = false,
     recover: () throws -> Void
 ) async throws {
     switch service.status() {
@@ -97,9 +96,7 @@ func uninstallAgent(
     }
 
     try recover()
-    if !preserveConfiguration {
-        try store.remove()
-    }
+    try store.remove()
 }
 
 func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {

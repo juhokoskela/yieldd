@@ -53,7 +53,7 @@ if [ -e "$installed_application" ]; then
         exit 1
     fi
 
-    "$installed_executable" agent uninstall --preserve-configuration
+    "$installed_executable" agent uninstall
     mv "$installed_application" "$previous_application"
 fi
 

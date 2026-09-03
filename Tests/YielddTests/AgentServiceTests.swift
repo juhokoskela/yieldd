@@ -184,22 +184,6 @@ func agentUninstallPreservesConfigurationWhenRecoveryFails() async throws {
 }
 
 @Test
-func agentUninstallCanPreserveConfigurationForAnUpgrade() async throws {
-    let fixture = try AgentServiceFixture(status: .enabled)
-    defer { fixture.remove() }
-    try fixture.store.save(fixture.configuration)
-
-    try await uninstallAgent(
-        store: fixture.store,
-        service: fixture.service,
-        preserveConfiguration: true,
-        recover: {}
-    )
-
-    #expect(try fixture.store.load() == fixture.configuration)
-}
-
-@Test
 func agentUninstallTreatsConfirmedMissingServiceAsAlreadyStopped() async throws {
     let fixture = try AgentServiceFixture(status: .notFound)
     defer { fixture.remove() }
