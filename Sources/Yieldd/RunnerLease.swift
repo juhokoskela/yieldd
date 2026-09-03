@@ -10,14 +10,20 @@ struct RunnerLease: Equatable, Sendable {
 final class RunnerLeaseStore: @unchecked Sendable {
     static let maximumBytes = 8 * 1_024
 
+    let directory: URL
     let fileURL: URL
     private let lock = NSLock()
 
     init(directory: URL) throws {
+        self.directory = directory
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
         )
         fileURL = directory.appendingPathComponent("active-runner.json", isDirectory: false)
     }

@@ -19,6 +19,18 @@ func localAgentPlistRunsTheMainExecutableWithBoundedShutdown() throws {
     #expect(plist["AssociatedBundleIdentifiers"] == nil)
 }
 
+@Test
+func localAgentEntitlementsEnableVirtualization() throws {
+    let entitlementsURL = repositoryRoot
+        .appendingPathComponent("Packaging/yieldd.entitlements", isDirectory: false)
+    let data = try Data(contentsOf: entitlementsURL)
+    let entitlements = try #require(
+        PropertyListSerialization.propertyList(from: data, format: nil)
+            as? [String: Any]
+    )
+    #expect(entitlements["com.apple.security.virtualization"] as? Bool == true)
+}
+
 private let repositoryRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()

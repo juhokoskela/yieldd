@@ -12,6 +12,27 @@ private let secondLease = RunnerLease(
 )
 
 @Test
+func leaseStoreRepairsStateDirectoryPermissions() throws {
+    let directory = makeStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o755]
+    )
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: directory.path
+    )
+
+    let store = try RunnerLeaseStore(directory: directory)
+    let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+
+    #expect(store.directory == directory)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+}
+
+@Test
 func leaseStoreRoundTripsAndClearsLease() throws {
     let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
