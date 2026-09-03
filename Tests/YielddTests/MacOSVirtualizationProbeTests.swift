@@ -35,9 +35,20 @@ func virtualizationProbeCloneIsPrivateAndUsesFreshIdentity() throws {
     )
     #expect(try permissions(of: fixture.cloneRootURL) == 0o700)
     #expect(try permissions(of: clone.url) == 0o700)
-    for filename in ["HardwareModel", "MachineIdentifier", "AuxiliaryStorage", "Disk.img"] {
+    for filename in [
+        "HardwareModel",
+        "MachineIdentifier",
+        "MACAddress",
+        "AuxiliaryStorage",
+        "Disk.img",
+    ] {
         #expect(try permissions(of: clone.url.appendingPathComponent(filename)) == 0o600)
     }
+    #expect(MacOSGuestAddressResolver.parseMACAddress(clone.macAddress) != nil)
+    #expect(
+        try String(contentsOf: clone.url.appendingPathComponent("MACAddress"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines) == clone.macAddress
+    )
 
     try Data("changed-disk".utf8).write(to: clone.url.appendingPathComponent("Disk.img"))
     try Data("changed-auxiliary".utf8).write(
@@ -166,6 +177,7 @@ func virtualizationProbeStartsAndForceStopsMachine() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     var reportedStarted = false
+    var reportedMACAddress: String?
     var waitedFor: TimeInterval?
     let probe = MacOSVirtualizationProbe(
         requireEntitlement: {},
@@ -180,6 +192,7 @@ func virtualizationProbeStartsAndForceStopsMachine() throws {
         templateURL: fixture.templateURL,
         cloneRootURL: fixture.cloneRootURL,
         wait: { waitedFor = $0 },
+        waitUntilGuestReady: { reportedMACAddress = $0 },
         started: { reportedStarted = true }
     )
 
@@ -187,6 +200,7 @@ func virtualizationProbeStartsAndForceStopsMachine() throws {
     #expect(machine.stopCount == 1)
     #expect(machine.isStopped)
     #expect(reportedStarted)
+    #expect(reportedMACAddress.flatMap(MacOSGuestAddressResolver.parseMACAddress) != nil)
     #expect(waitedFor == MacOSVirtualizationProbe.runDuration)
     #expect(try fixture.cloneRootContents().isEmpty)
 }
@@ -234,7 +248,14 @@ func virtualizationProbeCommandValidatesTheTemplateBeforeRunning() throws {
     }
 }
 
-@Test(arguments: ["HardwareModel", "MachineIdentifier", "AuxiliaryStorage", "Disk.img"])
+@Test(arguments: [
+    "HardwareModel",
+    "MachineIdentifier",
+    "AuxiliaryStorage",
+    "Disk.img",
+    "SSHPrivateKey",
+    "SSHKnownHosts",
+])
 func virtualizationProbeCommandRequiresEveryTemplateFile(_ filename: String) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
@@ -251,6 +272,27 @@ func virtualizationProbeCommandRequiresEveryTemplateFile(_ filename: String) thr
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
+}
+
+@Test
+func virtualizationProbeGuestReadinessFailureStillStopsAndDeletesTheClone() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let machine = ProbeVirtualMachine()
+    let probe = MacOSVirtualizationProbe(
+        requireEntitlement: {},
+        makeMachine: { _, _ in machine }
+    )
+
+    #expect(throws: TestFailure.create) {
+        try probe.run(
+            templateURL: fixture.templateURL,
+            cloneRootURL: fixture.cloneRootURL,
+            waitUntilGuestReady: { _ in throw TestFailure.create }
+        )
+    }
+    #expect(machine.stopCount == 1)
+    #expect(try fixture.cloneRootContents().isEmpty)
 }
 
 @Test
@@ -603,6 +645,8 @@ private struct ProbeBundleFixture {
     let machineIdentifier = Data("template-identifier".utf8)
     let auxiliaryStorage = Data("auxiliary".utf8)
     let disk = Data("disk".utf8)
+    let privateKey = Data("private-key".utf8)
+    let knownHosts = Data("known-host".utf8)
 
     var templateURL: URL {
         rootURL.appendingPathComponent("Template.bundle", isDirectory: true)
@@ -613,7 +657,14 @@ private struct ProbeBundleFixture {
     }
 
     var requiredFileURLs: [URL] {
-        ["HardwareModel", "MachineIdentifier", "AuxiliaryStorage", "Disk.img"]
+        [
+            "HardwareModel",
+            "MachineIdentifier",
+            "AuxiliaryStorage",
+            "Disk.img",
+            "SSHPrivateKey",
+            "SSHKnownHosts",
+        ]
             .map(templateURL.appendingPathComponent)
     }
 
@@ -630,6 +681,13 @@ private struct ProbeBundleFixture {
             to: templateURL.appendingPathComponent("AuxiliaryStorage")
         )
         try disk.write(to: templateURL.appendingPathComponent("Disk.img"))
+        let privateKeyURL = templateURL.appendingPathComponent("SSHPrivateKey")
+        try privateKey.write(to: privateKeyURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: privateKeyURL.path
+        )
+        try knownHosts.write(to: templateURL.appendingPathComponent("SSHKnownHosts"))
     }
 
     func cloneRootContents() throws -> [URL] {
