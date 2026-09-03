@@ -40,6 +40,7 @@ struct MacOSVirtualizationProbeClone {
     private static let requiredFiles = clonedFiles + ["MachineIdentifier"]
 
     let url: URL
+    let macAddress: String
 
     static func validateTemplate(at templateURL: URL) throws {
         let templateURL = templateURL.resolvingSymlinksInPath()
@@ -58,6 +59,7 @@ struct MacOSVirtualizationProbeClone {
     static func create(templateURL: URL, cloneRootURL: URL) throws -> Self {
         let fileManager = FileManager.default
         let machineIdentifier = try machineIdentifierData()
+        let macAddress = try macAddressString()
         let templateURL = templateURL.resolvingSymlinksInPath()
         let templateDescriptor = try openDirectory(
             at: templateURL,
@@ -111,15 +113,17 @@ struct MacOSVirtualizationProbeClone {
                     cloneURL: cloneURL
                 )
             }
-            try machineIdentifier.write(
-                to: cloneURL.appendingPathComponent("MachineIdentifier"),
-                options: .atomic
+            try writePrivateFile(
+                machineIdentifier,
+                named: "MachineIdentifier",
+                to: cloneURL
             )
-            try fileManager.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: cloneURL.appendingPathComponent("MachineIdentifier").path
+            try writePrivateFile(
+                Data("\(macAddress)\n".utf8),
+                named: "MACAddress",
+                to: cloneURL
             )
-            return Self(url: cloneURL)
+            return Self(url: cloneURL, macAddress: macAddress)
         } catch {
             do {
                 try fileManager.removeItem(at: cloneURL)
@@ -304,6 +308,19 @@ struct MacOSVirtualizationProbeClone {
         }
     }
 
+    private static func writePrivateFile(
+        _ data: Data,
+        named filename: String,
+        to directoryURL: URL
+    ) throws {
+        let fileURL = directoryURL.appendingPathComponent(filename)
+        try data.write(to: fileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+    }
+
     private static func fileOperationError(
         operation: String,
         url: URL,
@@ -319,6 +336,14 @@ struct MacOSVirtualizationProbeClone {
     private static func machineIdentifierData() throws -> Data {
 #if arch(arm64)
         VZMacMachineIdentifier().dataRepresentation
+#else
+        throw MacOSVirtualizationProbeError.requiresAppleSilicon
+#endif
+    }
+
+    private static func macAddressString() throws -> String {
+#if arch(arm64)
+        VZMACAddress.randomLocallyAdministered().string
 #else
         throw MacOSVirtualizationProbeError.requiresAppleSilicon
 #endif
@@ -382,6 +407,7 @@ struct MacOSVirtualizationProbe {
         stopTimeout: TimeInterval = Self.stopTimeout,
         checkCancellation: () throws -> Void = {},
         wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
+        waitUntilGuestReady: (String) throws -> Void = { _ in },
         started: () -> Void = {}
     ) throws {
         try requireEntitlement()
@@ -406,6 +432,7 @@ struct MacOSVirtualizationProbe {
                 checkCancellation: checkCancellation
             )
             started()
+            try waitUntilGuestReady(clone.macAddress)
             try wait(Self.runDuration)
             try checkCancellation()
             switch createdMachine.state {
@@ -609,6 +636,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
         let machineIdentifierURL = bundleURL.appendingPathComponent("MachineIdentifier")
         let auxiliaryStorageURL = bundleURL.appendingPathComponent("AuxiliaryStorage")
         let diskURL = bundleURL.appendingPathComponent("Disk.img")
+        let macAddressURL = bundleURL.appendingPathComponent("MACAddress")
 
         guard let hardwareModel = VZMacHardwareModel(
             dataRepresentation: try Data(contentsOf: hardwareModelURL)
@@ -626,6 +654,11 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
             throw MacOSVirtualizationProbeError.invalidMachineIdentifier(
                 path: machineIdentifierURL.path
             )
+        }
+        let macAddressString = try String(contentsOf: macAddressURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let macAddress = VZMACAddress(string: macAddressString) else {
+            throw MacOSVirtualizationProbeError.invalidMACAddress(path: macAddressURL.path)
         }
 
         let platform = VZMacPlatformConfiguration()
@@ -652,7 +685,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
 
         let network = VZVirtioNetworkDeviceConfiguration()
         network.attachment = VZNATNetworkDeviceAttachment()
-        network.macAddress = VZMACAddress.randomLocallyAdministered()
+        network.macAddress = macAddress
 
         let configuration = VZVirtualMachineConfiguration()
         configuration.bootLoader = VZMacOSBootLoader()
@@ -723,6 +756,7 @@ enum MacOSVirtualizationProbeError: Error {
     case invalidHardwareModel(path: String)
     case unsupportedHardwareModel
     case invalidMachineIdentifier(path: String)
+    case invalidMACAddress(path: String)
     case templateFileIsNotRegular(path: String)
     case cloneRequiresSameVolume(templatePath: String, cloneRootPath: String)
     case cloneUnsupported(templatePath: String, cloneRootPath: String)
@@ -752,6 +786,8 @@ extension MacOSVirtualizationProbeError: LocalizedError {
             "The macOS VM hardware model is not supported on this host."
         case let .invalidMachineIdentifier(path):
             "The macOS VM machine identifier is invalid: \(path)"
+        case let .invalidMACAddress(path):
+            "The macOS VM MAC address is invalid: \(path)"
         case let .templateFileIsNotRegular(path):
             "The macOS VM template file is not a regular file: \(path)"
         case let .cloneRequiresSameVolume(templatePath, cloneRootPath):

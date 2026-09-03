@@ -31,6 +31,7 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
     mutating func validate() throws {
         do {
             try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
+            try MacOSGuestSSH.validateTemplate(at: templateURL)
         } catch {
             throw ValidationError(describeError(error))
         }
@@ -49,6 +50,12 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
                 }
             )
             defer { memoryAdmission.release(reservation) }
+            let guestConnection = MacOSGuestConnection(
+                ssh: MacOSGuestSSH(
+                    templateURL: templateURL,
+                    executor: ProcessExecutor(checkCancellation: signalMonitor.check)
+                )
+            )
 
             try MacOSVirtualizationProbe().run(
                 templateURL: templateURL,
@@ -57,6 +64,14 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
                 memory: reservation.allocation,
                 checkCancellation: signalMonitor.check,
                 wait: signalMonitor.wait,
+                waitUntilGuestReady: { macAddress in
+                    let address = try guestConnection.waitUntilReady(
+                        macAddress: macAddress,
+                        checkCancellation: signalMonitor.check,
+                        wait: signalMonitor.wait
+                    )
+                    print("macOS guest \(address) is ready over SSH.")
+                },
                 started: {
                     print("macOS virtual machine started without a window.")
                 }
