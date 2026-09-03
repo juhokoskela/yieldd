@@ -37,49 +37,90 @@ struct MacOSVirtualizationProbeClone {
         "AuxiliaryStorage",
         "Disk.img",
     ]
+    private static let requiredFiles = clonedFiles + ["MachineIdentifier"]
 
     let url: URL
 
+    static func validateTemplate(at templateURL: URL) throws {
+        let templateURL = templateURL.resolvingSymlinksInPath()
+        let directoryDescriptor = try openDirectory(
+            at: templateURL,
+            operation: "Opening the macOS VM template"
+        )
+        defer { _ = Darwin.close(directoryDescriptor) }
+
+        try validateRequiredFiles(
+            in: directoryDescriptor,
+            templateURL: templateURL
+        )
+    }
+
     static func create(templateURL: URL, cloneRootURL: URL) throws -> Self {
         let fileManager = FileManager.default
+        let machineIdentifier = try machineIdentifierData()
+        let templateURL = templateURL.resolvingSymlinksInPath()
+        let templateDescriptor = try openDirectory(
+            at: templateURL,
+            operation: "Opening the macOS VM template"
+        )
+        defer { _ = Darwin.close(templateDescriptor) }
+        try validateRequiredFiles(
+            in: templateDescriptor,
+            templateURL: templateURL
+        )
+
         try fileManager.createDirectory(
             at: cloneRootURL,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: cloneRootURL.path
+        )
 
-        let templateURL = templateURL.resolvingSymlinksInPath()
         let cloneRootURL = cloneRootURL.resolvingSymlinksInPath()
         let cloneURL = cloneRootURL.appendingPathComponent(
             "yieldd-virtualization-probe-\(UUID().uuidString.lowercased()).bundle",
             isDirectory: true
         )
-        var created = false
+        try fileManager.createDirectory(
+            at: cloneURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
 
         do {
-            try fileManager.createDirectory(
-                at: cloneURL,
-                withIntermediateDirectories: false,
-                attributes: [.posixPermissions: 0o700]
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: cloneURL.path
             )
-            created = true
+            let cloneDescriptor = try openDirectory(
+                at: cloneURL,
+                operation: "Opening the macOS VM clone"
+            )
+            defer { _ = Darwin.close(cloneDescriptor) }
+
             for filename in clonedFiles {
                 try cloneFile(
-                    from: templateURL.appendingPathComponent(filename),
-                    to: cloneURL.appendingPathComponent(filename),
+                    named: filename,
+                    from: templateDescriptor,
+                    to: cloneDescriptor,
                     templateURL: templateURL,
-                    cloneRootURL: cloneRootURL
+                    cloneRootURL: cloneRootURL,
+                    cloneURL: cloneURL
                 )
             }
-            try machineIdentifierData().write(
+            try machineIdentifier.write(
                 to: cloneURL.appendingPathComponent("MachineIdentifier"),
                 options: .atomic
             )
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: cloneURL.appendingPathComponent("MachineIdentifier").path
+            )
             return Self(url: cloneURL)
         } catch {
-            guard created else {
-                throw error
-            }
             do {
                 try fileManager.removeItem(at: cloneURL)
             } catch let cleanupError {
@@ -97,37 +138,182 @@ struct MacOSVirtualizationProbeClone {
     }
 
     private static func cloneFile(
-        from sourceURL: URL,
-        to destinationURL: URL,
+        named filename: String,
+        from sourceDirectory: Int32,
+        to destinationDirectory: Int32,
         templateURL: URL,
-        cloneRootURL: URL
+        cloneRootURL: URL,
+        cloneURL: URL
     ) throws {
-        let sourceDescriptor = sourceURL.path.withCString {
-            Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        }
-        guard sourceDescriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+        let sourceURL = templateURL.appendingPathComponent(filename)
+        let destinationURL = cloneURL.appendingPathComponent(filename)
+        let sourceDescriptor = try openRegularFile(
+            named: filename,
+            in: sourceDirectory,
+            fileURL: sourceURL
+        )
         defer { _ = Darwin.close(sourceDescriptor) }
 
-        let result = destinationURL.path.withCString { destinationPath in
-            Darwin.fclonefileat(
+        let (result, errorNumber) = filename.withCString { destinationName in
+            let result = Darwin.fclonefileat(
                 sourceDescriptor,
-                AT_FDCWD,
-                destinationPath,
-                UInt32(CLONE_NOOWNERCOPY)
+                destinationDirectory,
+                destinationName,
+                UInt32(CLONE_NOOWNERCOPY | CLONE_NOFOLLOW_ANY)
             )
+            return (result, result == 0 ? 0 : errno)
         }
         guard result == 0 else {
-            let errorNumber = errno
-            if errorNumber == EXDEV {
-                throw MacOSVirtualizationProbeError.cloneRequiresSameVolume(
-                    templatePath: templateURL.path,
-                    cloneRootPath: cloneRootURL.path
-                )
-            }
-            throw POSIXError(POSIXErrorCode(rawValue: errorNumber) ?? .EIO)
+            throw cloneError(
+                errorNumber: errorNumber,
+                templateURL: templateURL,
+                cloneRootURL: cloneRootURL,
+                destinationURL: destinationURL
+            )
         }
+        try setPermissions(
+            0o600,
+            named: filename,
+            in: destinationDirectory,
+            url: destinationURL
+        )
+    }
+
+    static func cloneError(
+        errorNumber: Int32,
+        templateURL: URL,
+        cloneRootURL: URL,
+        destinationURL: URL
+    ) -> MacOSVirtualizationProbeError {
+        switch errorNumber {
+        case EXDEV:
+            .cloneRequiresSameVolume(
+                templatePath: templateURL.path,
+                cloneRootPath: cloneRootURL.path
+            )
+        case ENOTSUP:
+            .cloneUnsupported(
+                templatePath: templateURL.path,
+                cloneRootPath: cloneRootURL.path
+            )
+        default:
+            fileOperationError(
+                operation: "Cloning the macOS VM template file",
+                url: destinationURL,
+                errorNumber: errorNumber
+            )
+        }
+    }
+
+    private static func validateRequiredFiles(
+        in directoryDescriptor: Int32,
+        templateURL: URL
+    ) throws {
+        for filename in requiredFiles {
+            let descriptor = try openRegularFile(
+                named: filename,
+                in: directoryDescriptor,
+                fileURL: templateURL.appendingPathComponent(filename)
+            )
+            _ = Darwin.close(descriptor)
+        }
+    }
+
+    private static func openRegularFile(
+        named filename: String,
+        in directoryDescriptor: Int32,
+        fileURL: URL
+    ) throws -> Int32 {
+        let (descriptor, errorNumber) = filename.withCString { name in
+            let descriptor = Darwin.openat(
+                directoryDescriptor,
+                name,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+            )
+            return (descriptor, descriptor >= 0 ? 0 : errno)
+        }
+        guard descriptor >= 0 else {
+            throw fileOperationError(
+                operation: "Opening the macOS VM template file",
+                url: fileURL,
+                errorNumber: errorNumber
+            )
+        }
+
+        var fileStatus = stat()
+        guard Darwin.fstat(descriptor, &fileStatus) == 0 else {
+            let errorNumber = errno
+            _ = Darwin.close(descriptor)
+            throw fileOperationError(
+                operation: "Inspecting the macOS VM template file",
+                url: fileURL,
+                errorNumber: errorNumber
+            )
+        }
+        guard fileStatus.st_mode & S_IFMT == S_IFREG else {
+            _ = Darwin.close(descriptor)
+            throw MacOSVirtualizationProbeError.templateFileIsNotRegular(
+                path: fileURL.path
+            )
+        }
+        return descriptor
+    }
+
+    private static func openDirectory(
+        at url: URL,
+        operation: String
+    ) throws -> Int32 {
+        let (descriptor, errorNumber) = url.path.withCString { path in
+            let descriptor = Darwin.open(
+                path,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY
+            )
+            return (descriptor, descriptor >= 0 ? 0 : errno)
+        }
+        guard descriptor >= 0 else {
+            throw fileOperationError(
+                operation: operation,
+                url: url,
+                errorNumber: errorNumber
+            )
+        }
+        return descriptor
+    }
+
+    private static func setPermissions(
+        _ permissions: mode_t,
+        named filename: String,
+        in directoryDescriptor: Int32,
+        url: URL
+    ) throws {
+        let (result, errorNumber) = filename.withCString { name in
+            let result = Darwin.fchmodat(
+                directoryDescriptor,
+                name,
+                permissions,
+                AT_SYMLINK_NOFOLLOW
+            )
+            return (result, result == 0 ? 0 : errno)
+        }
+        guard result == 0 else {
+            throw fileOperationError(
+                operation: "Setting private permissions",
+                url: url,
+                errorNumber: errorNumber
+            )
+        }
+    }
+
+    private static func fileOperationError(
+        operation: String,
+        url: URL,
+        errorNumber: Int32
+    ) -> MacOSVirtualizationProbeError {
+        .fileOperationFailed(
+            operation: operation,
+            path: url.path,
+            code: POSIXErrorCode(rawValue: errorNumber) ?? .EIO
+        )
     }
 
     private static func machineIdentifierData() throws -> Data {
@@ -139,11 +325,17 @@ struct MacOSVirtualizationProbeClone {
     }
 }
 
-enum MacOSVirtualMachineState: Equatable {
+enum MacOSVirtualMachineState {
     case stopped
     case running
     case stoppable
     case transitioning
+    case failed(any Error)
+}
+
+enum MacOSVirtualMachineStopOutcome: Sendable {
+    case stopped
+    case retry
 }
 
 protocol MacOSVirtualMachineControlling: Sendable {
@@ -153,24 +345,29 @@ protocol MacOSVirtualMachineControlling: Sendable {
         completion: @escaping @Sendable (Result<Void, any Error>) -> Void
     )
     func forceStop(
-        completion: @escaping @Sendable (Result<Void, any Error>) -> Void
+        completion:
+            @escaping @Sendable (
+                Result<MacOSVirtualMachineStopOutcome, any Error>
+            ) -> Void
     )
 }
+
+private let macOSVirtualMachineCheckInterval: TimeInterval = 0.1
 
 struct MacOSVirtualizationProbe {
     static let bootTimeout: TimeInterval = 60
     static let stopTimeout: TimeInterval = 15
     static let runDuration: TimeInterval = 5
     static let memoryBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
-    private static let checkInterval: TimeInterval = 0.1
+    static let constrainedMemoryBytes = memoryBytes * 3 / 4
 
     private let requireEntitlement: () throws -> Void
-    private let makeMachine: (URL) throws -> any MacOSVirtualMachineControlling
+    private let makeMachine: (URL, UInt64) throws -> any MacOSVirtualMachineControlling
 
     init(
         requireEntitlement: @escaping () throws -> Void =
             VirtualizationEntitlement.requireCurrentProcess,
-        makeMachine: @escaping (URL) throws -> any MacOSVirtualMachineControlling =
+        makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
             MacOSVirtualizationProbe.makeMachine
     ) {
         self.requireEntitlement = requireEntitlement
@@ -180,6 +377,9 @@ struct MacOSVirtualizationProbe {
     func run(
         templateURL: URL,
         cloneRootURL: URL,
+        memory allocation: RunnerMemoryAllocation = .full,
+        bootTimeout: TimeInterval = Self.bootTimeout,
+        stopTimeout: TimeInterval = Self.stopTimeout,
         checkCancellation: () throws -> Void = {},
         wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         started: () -> Void = {}
@@ -193,40 +393,61 @@ struct MacOSVirtualizationProbe {
         var machine: (any MacOSVirtualMachineControlling)?
         let operation = Result<Void, any Error> {
             try checkCancellation()
-            let createdMachine = try makeMachine(clone.url)
+            let createdMachine = try makeMachine(
+                clone.url,
+                Self.memoryBytes(for: allocation)
+            )
             machine = createdMachine
-            let completion = VirtualMachineCompletion()
+            let completion = VirtualMachineCompletion<Void>()
             createdMachine.start(completion: completion.complete)
             try completion.wait(
                 operation: "starting the macOS virtual machine",
-                timeout: Self.bootTimeout,
+                deadline: ProcessInfo.processInfo.systemUptime + bootTimeout,
                 checkCancellation: checkCancellation
             )
             started()
             try wait(Self.runDuration)
             try checkCancellation()
-            guard createdMachine.state == .running else {
+            switch createdMachine.state {
+            case .running:
+                break
+            case .failed(let error):
+                throw MacOSVirtualizationProbeError.virtualMachineFailed(error)
+            case .stopped, .stoppable, .transitioning:
                 throw MacOSVirtualizationProbeError.stoppedUnexpectedly
             }
         }
-        let cleanup = Result<Void, any Error> {
+        let stopResult = Result<Void, any Error> {
             if let machine {
-                try forceStop(machine, timeout: Self.stopTimeout)
+                try forceStop(machine, timeout: stopTimeout)
             }
+        }
+        let removalResult = Result<Void, any Error> {
             try clone.remove()
+        }
+        let cleanup: Result<Void, any Error>
+        switch (stopResult, removalResult) {
+        case (.success, .success):
+            cleanup = .success(())
+        case (.failure(let error), .success), (.success, .failure(let error)):
+            cleanup = .failure(error)
+        case (.failure(let stopError), .failure(let removalError)):
+            cleanup = .failure(
+                MacOSVirtualizationProbeError.operationAndCleanupFailed(
+                    operation: stopError,
+                    cleanup: removalError
+                ))
         }
 
         switch (operation, cleanup) {
         case (.success, .success):
             try checkCancellation()
-        case let (.failure(operationError), .success):
-            throw operationError
-        case let (.success, .failure(stopError)):
-            throw stopError
-        case let (.failure(operationError), .failure(stopError)):
+        case (.failure(let error), .success), (.success, .failure(let error)):
+            throw error
+        case (.failure(let operationError), .failure(let cleanupError)):
             throw MacOSVirtualizationProbeError.operationAndCleanupFailed(
                 operation: operationError,
-                cleanup: stopError
+                cleanup: cleanupError
             )
         }
     }
@@ -238,42 +459,51 @@ struct MacOSVirtualizationProbe {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
 
         while true {
-            switch machine.state {
+            let completion = VirtualMachineCompletion<MacOSVirtualMachineStopOutcome>()
+            machine.forceStop(completion: completion.complete)
+            switch try completion.wait(
+                operation: "stopping the macOS virtual machine",
+                deadline: deadline
+            ) {
             case .stopped:
                 return
-            case .running, .stoppable:
-                let completion = VirtualMachineCompletion()
-                machine.forceStop(completion: completion.complete)
-                do {
-                    try completion.wait(
-                        operation: "stopping the macOS virtual machine",
-                        deadline: deadline
-                    )
-                } catch {
-                    guard machine.state == .stopped else {
-                        throw error
-                    }
-                }
-                return
-            case .transitioning:
-                guard ProcessInfo.processInfo.systemUptime < deadline else {
+            case .retry:
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                guard remaining > 0 else {
                     throw MacOSVirtualizationProbeError.timedOut(
                         operation: "stopping the macOS virtual machine"
                     )
                 }
-                Thread.sleep(forTimeInterval: Self.checkInterval)
+                Thread.sleep(
+                    forTimeInterval: min(
+                        remaining,
+                        macOSVirtualMachineCheckInterval
+                    ))
             }
         }
     }
 
+    private static func memoryBytes(for allocation: RunnerMemoryAllocation) -> UInt64 {
+        switch allocation {
+        case .constrained:
+            constrainedMemoryBytes
+        case .full:
+            memoryBytes
+        }
+    }
+
     private static func makeMachine(
-        bundleURL: URL
+        bundleURL: URL,
+        memoryBytes: UInt64
     ) throws -> any MacOSVirtualMachineControlling {
 #if arch(arm64)
         guard VZVirtualMachine.isSupported else {
             throw MacOSVirtualizationProbeError.virtualizationUnavailable
         }
-        return try VirtualizationFrameworkMachine(bundleURL: bundleURL)
+        return try VirtualizationFrameworkMachine(
+            bundleURL: bundleURL,
+            memoryBytes: memoryBytes
+        )
 #else
         throw MacOSVirtualizationProbeError.requiresAppleSilicon
 #endif
@@ -281,28 +511,38 @@ struct MacOSVirtualizationProbe {
 }
 
 #if arch(arm64)
-private final class VirtualizationFrameworkMachine: @unchecked Sendable,
-    MacOSVirtualMachineControlling
+private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendable,
+    MacOSVirtualMachineControlling, VZVirtualMachineDelegate
 {
     private static let virtualCPUs = 4
 
     private let queue: DispatchQueue
     private let machine: VZVirtualMachine
+    private var failure: (any Error)?
 
-    init(bundleURL: URL) throws {
-        let configuration = try Self.configuration(bundleURL: bundleURL)
+    init(bundleURL: URL, memoryBytes: UInt64) throws {
+        let configuration = try Self.configuration(
+            bundleURL: bundleURL,
+            memoryBytes: memoryBytes
+        )
         try configuration.validate()
 
         let queue = DispatchQueue(label: "dev.yieldd.macos-vm-probe")
         self.queue = queue
         machine = VZVirtualMachine(configuration: configuration, queue: queue)
+        super.init()
+        queue.sync {
+            machine.delegate = self
+        }
     }
 
     var state: MacOSVirtualMachineState {
         queue.sync {
             switch machine.state {
-            case .stopped, .error:
+            case .stopped:
                 .stopped
+            case .error:
+                .failed(failure ?? MacOSVirtualizationProbeError.virtualMachineEnteredErrorState)
             case .running:
                 .running
             default:
@@ -320,21 +560,50 @@ private final class VirtualizationFrameworkMachine: @unchecked Sendable,
     }
 
     func forceStop(
-        completion: @escaping @Sendable (Result<Void, any Error>) -> Void
+        completion:
+            @escaping @Sendable (
+                Result<MacOSVirtualMachineStopOutcome, any Error>
+            ) -> Void
     ) {
         queue.async {
+            switch self.machine.state {
+            case .stopped:
+                completion(.success(.stopped))
+                return
+            case .error:
+                completion(
+                    .failure(
+                        self.failure
+                            ?? MacOSVirtualizationProbeError.virtualMachineEnteredErrorState
+                    ))
+                return
+            default:
+                guard self.machine.canStop else {
+                    completion(.success(.retry))
+                    return
+                }
+            }
+
             self.machine.stop { error in
                 if let error {
                     completion(.failure(error))
                 } else {
-                    completion(.success(()))
+                    completion(.success(.stopped))
                 }
             }
         }
     }
 
+    func virtualMachine(
+        _: VZVirtualMachine,
+        didStopWithError error: any Error
+    ) {
+        failure = error
+    }
+
     private static func configuration(
-        bundleURL: URL
+        bundleURL: URL,
+        memoryBytes: UInt64
     ) throws -> VZVirtualMachineConfiguration {
         let hardwareModelURL = bundleURL.appendingPathComponent("HardwareModel")
         let machineIdentifierURL = bundleURL.appendingPathComponent("MachineIdentifier")
@@ -389,7 +658,7 @@ private final class VirtualizationFrameworkMachine: @unchecked Sendable,
         configuration.bootLoader = VZMacOSBootLoader()
         configuration.platform = platform
         configuration.cpuCount = virtualCPUs
-        configuration.memorySize = MacOSVirtualizationProbe.memoryBytes
+        configuration.memorySize = memoryBytes
         configuration.storageDevices = [storage]
         configuration.graphicsDevices = [graphics]
         configuration.networkDevices = [network]
@@ -401,40 +670,25 @@ private final class VirtualizationFrameworkMachine: @unchecked Sendable,
 }
 #endif
 
-private final class VirtualMachineCompletion: @unchecked Sendable {
-    private static let checkInterval: TimeInterval = 0.1
+final class VirtualMachineCompletion<Success: Sendable>: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var result: Result<Success, any Error>?
 
-    private let lock = NSLock()
-    private let signal = DispatchSemaphore(value: 0)
-    private var result: Result<Void, any Error>?
-
-    func complete(_ result: Result<Void, any Error>) {
-        lock.withLock {
+    func complete(_ result: Result<Success, any Error>) {
+        condition.withLock {
             precondition(self.result == nil, "Virtual machine completion invoked more than once")
             self.result = result
+            condition.broadcast()
         }
-        signal.signal()
-    }
-
-    func wait(
-        operation: String,
-        timeout: TimeInterval,
-        checkCancellation: () throws -> Void
-    ) throws {
-        try wait(
-            operation: operation,
-            deadline: ProcessInfo.processInfo.systemUptime + timeout,
-            checkCancellation: checkCancellation
-        )
     }
 
     func wait(
         operation: String,
         deadline: TimeInterval,
         checkCancellation: () throws -> Void = {}
-    ) throws {
+    ) throws -> Success {
         while true {
-            if let result = lock.withLock({ self.result }) {
+            if let result = condition.withLock({ self.result }) {
                 return try result.get()
             }
             try checkCancellation()
@@ -445,9 +699,18 @@ private final class VirtualMachineCompletion: @unchecked Sendable {
                     operation: operation
                 )
             }
-            _ = signal.wait(timeout: .now() + .milliseconds(
-                max(1, Int((min(remaining, Self.checkInterval) * 1_000).rounded(.up)))
-            ))
+            condition.withLock {
+                guard self.result == nil else {
+                    return
+                }
+                _ = condition.wait(
+                    until: Date(
+                        timeIntervalSinceNow: min(
+                            remaining,
+                            macOSVirtualMachineCheckInterval
+                        )
+                    ))
+            }
         }
     }
 }
@@ -460,9 +723,14 @@ enum MacOSVirtualizationProbeError: Error {
     case invalidHardwareModel(path: String)
     case unsupportedHardwareModel
     case invalidMachineIdentifier(path: String)
+    case templateFileIsNotRegular(path: String)
     case cloneRequiresSameVolume(templatePath: String, cloneRootPath: String)
+    case cloneUnsupported(templatePath: String, cloneRootPath: String)
+    case fileOperationFailed(operation: String, path: String, code: POSIXErrorCode)
     case timedOut(operation: String)
     case stoppedUnexpectedly
+    case virtualMachineEnteredErrorState
+    case virtualMachineFailed(any Error)
     case operationAndCleanupFailed(operation: any Error, cleanup: any Error)
 }
 
@@ -484,12 +752,23 @@ extension MacOSVirtualizationProbeError: LocalizedError {
             "The macOS VM hardware model is not supported on this host."
         case let .invalidMachineIdentifier(path):
             "The macOS VM machine identifier is invalid: \(path)"
+        case let .templateFileIsNotRegular(path):
+            "The macOS VM template file is not a regular file: \(path)"
         case let .cloneRequiresSameVolume(templatePath, cloneRootPath):
             "The macOS VM template at \(templatePath) must be on the same volume as \(cloneRootPath)."
+        case let .cloneUnsupported(templatePath, cloneRootPath):
+            "The filesystem containing the macOS VM template at \(templatePath) "
+                + "and clone root at \(cloneRootPath) does not support copy-on-write clones."
+        case let .fileOperationFailed(operation, path, code):
+            "\(operation) failed for \(path): \(POSIXError(code).localizedDescription)"
         case let .timedOut(operation):
             "Timed out while \(operation)."
         case .stoppedUnexpectedly:
             "The macOS virtual machine stopped before the probe completed."
+        case .virtualMachineEnteredErrorState:
+            "The macOS virtual machine entered an error state without reporting a reason."
+        case let .virtualMachineFailed(error):
+            "The macOS virtual machine failed: \(describeError(error))"
         case let .operationAndCleanupFailed(operation, cleanup):
             "macOS VM probe failed: \(describeError(operation)). "
                 + "Cleanup also failed: \(describeError(cleanup))"

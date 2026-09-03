@@ -28,6 +28,14 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
     @Argument(help: "macOS VM template bundle. The probe boots a disposable copy-on-write clone.")
     var bundlePath: String
 
+    mutating func validate() throws {
+        do {
+            try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
+        } catch {
+            throw ValidationError(describeError(error))
+        }
+    }
+
     mutating func run() throws {
         try withRunnerOwnership { leaseStore in
             let signalMonitor = try SignalMonitor()
@@ -43,9 +51,10 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
             defer { memoryAdmission.release(reservation) }
 
             try MacOSVirtualizationProbe().run(
-                templateURL: URL(fileURLWithPath: bundlePath).standardizedFileURL,
-                cloneRootURL: leaseStore.fileURL.deletingLastPathComponent()
+                templateURL: templateURL,
+                cloneRootURL: leaseStore.directory
                     .appendingPathComponent("macos-probes", isDirectory: true),
+                memory: reservation.allocation,
                 checkCancellation: signalMonitor.check,
                 wait: signalMonitor.wait,
                 started: {
@@ -54,6 +63,10 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
             )
             print("macOS virtualization probe passed and the VM was force-stopped.")
         }
+    }
+
+    private var templateURL: URL {
+        URL(fileURLWithPath: bundlePath).standardizedFileURL
     }
 }
 
