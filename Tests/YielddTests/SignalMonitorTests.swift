@@ -14,7 +14,11 @@ func signalMonitorHandlesTimeoutFailedInstallAndCaughtSignal() throws {
         Issue.record("Unexpected error: \(error)")
     }
 
-    let monitor = try SignalMonitor(signals: [SIGUSR2])
+    let delivery = RecordedSignal()
+    let monitor = try SignalMonitor(
+        signals: [SIGUSR2],
+        signalReceived: delivery.record
+    )
     try monitor.wait(for: 0)
     #expect(Darwin.kill(Darwin.getpid(), SIGUSR2) == 0)
 
@@ -26,6 +30,7 @@ func signalMonitorHandlesTimeoutFailedInstallAndCaughtSignal() throws {
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
+    #expect(delivery.value == SIGUSR2)
 
     do {
         try monitor.check()
@@ -34,5 +39,18 @@ func signalMonitorHandlesTimeoutFailedInstallAndCaughtSignal() throws {
         #expect(interruption.signal == SIGUSR2)
     } catch {
         Issue.record("Unexpected error: \(error)")
+    }
+}
+
+private final class RecordedSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signal: Int32?
+
+    var value: Int32? {
+        lock.withLock { signal }
+    }
+
+    func record(_ signal: Int32) {
+        lock.withLock { self.signal = signal }
     }
 }

@@ -1,0 +1,188 @@
+import ArgumentParser
+import Foundation
+import OSLog
+
+private let agentLogger = Logger(subsystem: "dev.yieldd", category: "agent")
+
+struct AgentCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "agent",
+        abstract: "Manage the installed local agent.",
+        subcommands: [
+            AgentInstallCommand.self,
+            AgentStatusCommand.self,
+            AgentUninstallCommand.self,
+            AgentRunCommand.self,
+        ]
+    )
+}
+
+struct AgentInstallCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "install",
+        abstract: "Configure and enable the local agent."
+    )
+
+    @Argument(help: "Repositories in owner/name form. Repeat a repository to give it another runner slot.")
+    var repositories: [String]
+
+    @Flag(name: .long, help: .hidden)
+    var preflightOnly = false
+
+    mutating func validate() throws {
+        guard repositories.count <= RunnerPool.maximumSlots else {
+            throw ValidationError("The local agent supports at most \(RunnerPool.maximumSlots) runner slots.")
+        }
+        _ = try repositories.map(GitHubRepository.init)
+    }
+
+    mutating func run() throws {
+        let locator = ExecutableLocator()
+        try run(locateExecutable: locator.locate)
+    }
+
+    func run(locateExecutable: (String) throws -> URL) throws {
+        let configuration = try AgentConfiguration(
+            repositories: repositories.map(GitHubRepository.init),
+            containerURL: locateExecutable("container"),
+            ghURL: locateExecutable("gh")
+        )
+        guard !preflightOnly else {
+            return
+        }
+
+        let service = try localAgentService()
+        try installAgent(
+            configuration: configuration,
+            store: AgentConfigurationStore(),
+            service: service
+        )
+        print(registrationStatusDescription(service.status()))
+    }
+}
+
+struct AgentStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "status",
+        abstract: "Show local agent registration, configuration, and active runners."
+    )
+
+    mutating func run() throws {
+        try reportAgentStatus(
+            store: AgentConfigurationStore(),
+            service: localAgentService(),
+            output: { print($0) }
+        )
+    }
+}
+
+struct AgentUninstallCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "uninstall",
+        abstract: "Disable the local agent and remove its configuration."
+    )
+
+    mutating func run() async throws {
+        let service = try localAgentService()
+        if service.status() == .notFound {
+            writeToStandardError(
+                "Warning: macOS could not resolve the local agent registration; attempting cleanup anyway.\n"
+            )
+        }
+
+        let store = try AgentConfigurationStore()
+        try await uninstallAgent(
+            store: store,
+            service: service,
+            recover: {
+                try recoverAgentRunners(store: store)
+            }
+        )
+        print("Local agent unregistered and configuration removed.")
+    }
+}
+
+struct AgentRunCommand: ParsableCommand {
+    static let shutdownTimeout: TimeInterval = 50
+
+    static let configuration = CommandConfiguration(
+        commandName: "run",
+        abstract: "Run the configured local agent.",
+        shouldDisplay: false
+    )
+
+    mutating func run() throws {
+        let stop = try RunnerPoolStop.monitoringSignals(
+            shutdownTimeout: Self.shutdownTimeout
+        )
+        defer { agentLogger.notice("Stopping yieldd.") }
+        do {
+            let store = try AgentConfigurationStore()
+            let configuration = try store.load()
+            try configuration.requireExecutables()
+            try withRunnerOwnership(in: store.directory) { leaseStore in
+                try AppleContainerSystem(
+                    containerURL: configuration.containerURL,
+                    executor: ProcessExecutor(
+                        checkCancellation: stop.check,
+                        maximumExecutionDeadline: stop.executionDeadline
+                    )
+                ).start()
+                try runRunnerService(
+                    repositories: configuration.repositories,
+                    leaseStore: leaseStore,
+                    containerURL: configuration.containerURL,
+                    ghURL: configuration.ghURL,
+                    stop: stop,
+                    output: .agentLog
+                )
+            }
+        } catch where isCancellation(error) {
+            return
+        } catch {
+            agentLogger.error("Local agent failed: \(describeError(error), privacy: .public)")
+            throw error
+        }
+    }
+}
+
+private func recoverAgentRunners(store: AgentConfigurationStore) throws {
+    try withRunnerOwnership(in: store.directory) { leaseStore in
+        guard !(try leaseStore.load()).isEmpty else {
+            return
+        }
+
+        let configuration = try store.load()
+        try configuration.requireExecutables()
+        let stop = try RunnerPoolStop.monitoringSignals()
+        let session = makeRunnerSession(
+            leaseStore: leaseStore,
+            containerURL: configuration.containerURL,
+            ghURL: configuration.ghURL,
+            stop: stop,
+            stateChanged: { state in
+                switch state {
+                case let .waitingForGitHubCleanup(id, retryDelay):
+                    print(githubCleanupRetryMessage(id: id, delay: retryDelay))
+                case let .leaseCleanupFailed(id, reason):
+                    writeToStandardError(
+                        "Warning: Could not clear runner lease for \(id.value): \(reason)\n"
+                    )
+                case .preparing, .waitingForJob, .cleaningUp:
+                    break
+                }
+            }
+        )
+        for id in try session.recoverAbandonedRunners() {
+            print("Cleaned up abandoned runner \(id.value).")
+        }
+    }
+}
+
+private extension RunnerServiceOutput {
+    static let agentLog = RunnerServiceOutput(
+        info: { agentLogger.notice("\($0, privacy: .public)") },
+        warning: { agentLogger.warning("\($0, privacy: .public)") },
+        error: { agentLogger.error("\($0, privacy: .public)") }
+    )
+}

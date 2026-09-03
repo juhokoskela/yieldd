@@ -32,18 +32,6 @@ func leaseStoreRoundTripsAndClearsLease() throws {
 }
 
 @Test
-func leaseStoreReadsTheSingleRunnerFormat() throws {
-    let directory = makeStateDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try RunnerLeaseStore(directory: directory)
-    try Data(
-        #"{"runnerID":"yieldd-test-123","repository":"owner/repository"}"#.utf8
-    ).write(to: store.fileURL)
-
-    #expect(try store.load() == [lease])
-}
-
-@Test
 func leaseStorePreservesConcurrentUpdates() async throws {
     let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -76,7 +64,7 @@ func leaseStoreSupportsMaximumRunnerSlots() throws {
         "\(String(repeating: "o", count: 39))/\(String(repeating: "r", count: 100))"
     )
 
-    for index in 0..<RunnerServiceCommand.maximumSlots {
+    for index in 0..<RunnerPool.maximumSlots {
         let suffix = String(index)
         let runnerID = RunnerID(value:
             "yieldd-\(String(repeating: "a", count: 121 - suffix.count))\(suffix)"
@@ -84,7 +72,7 @@ func leaseStoreSupportsMaximumRunnerSlots() throws {
         try store.save(RunnerLease(runnerID: runnerID, repository: repository))
     }
 
-    #expect(try store.load().count == RunnerServiceCommand.maximumSlots)
+    #expect(try store.load().count == RunnerPool.maximumSlots)
 }
 
 @Test
@@ -107,7 +95,9 @@ func leaseStoreReportsPathForInvalidContents() throws {
     let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
-    try Data("not JSON".utf8).write(to: store.fileURL)
+    try Data(
+        #"{"runnerID":"yieldd-test-123","repository":"owner/repository"}"#.utf8
+    ).write(to: store.fileURL)
 
     #expect(throws: RunnerLeaseError.invalidContents(path: store.fileURL.path)) {
         try store.load()
@@ -120,7 +110,7 @@ func leaseStoreRejectsInvalidRunnerID() throws {
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
 
-    try Data(#"{"runnerID":"other-runner","repository":"owner/repository"}"#.utf8)
+    try Data(#"[{"runnerID":"other-runner","repository":"owner/repository"}]"#.utf8)
         .write(to: store.fileURL)
     #expect(throws: RunnerLeaseError.invalidRunnerID(path: store.fileURL.path)) {
         try store.load()

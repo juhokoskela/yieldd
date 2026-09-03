@@ -7,7 +7,7 @@
 - An Apple Silicon Mac running macOS 26 or newer
 - Swift 6.2 or newer
 - Apple `container` with container machine support
-- A running container system
+- A running container system for foreground commands
 - GitHub CLI authenticated to `github.com` with administration access to the test repository
 
 For safety, `yieldd` rejects empty `PATH` components instead of interpreting them as the working directory.
@@ -70,7 +70,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner
 
 The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
 
-`runner-test` and `serve` cannot run at the same time. They record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next command cleans up those exact runners before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps its lease and the next command waits with exponential backoff until GitHub releases it.
+`runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock and record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next runner command cleans up those exact runners before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps its lease and the next command waits with exponential backoff until GitHub releases it.
 
 ## Foreground runner service
 
@@ -83,3 +83,37 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd serve 
 Each repository argument creates one independent runner slot, up to 16 slots per process. Repeat a repository to give it more than one slot. Every slot creates and registers an ephemeral runner, waits for one job, cleans up both the GitHub registration and machine, and then starts its next runner. Setup and runner failures use exponential backoff capped at 30 seconds; a successful session resets that slot's delay. A cleanup failure stops the pool and cleans up the other slots rather than admitting more work alongside a machine whose removal could not be confirmed.
 
 This is a foreground command, not a daemon. Ctrl+C and SIGTERM interrupt every active slot and run cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.
+
+## Local agent
+
+The local agent runs the same runner pool at login without keeping a terminal open. Before installing it, run `yieldd doctor` and start the container system once so Apple Container can install any required kernel components.
+
+Install one or more runner slots from the repository root:
+
+```sh
+Scripts/install-local-agent.sh OWNER/REPOSITORY [OWNER/REPOSITORY ...]
+```
+
+The script builds and verifies an ad-hoc-signed application before replacing any existing installation at `~/Applications/yieldd.app`. It waits for the previous agent to stop and recover active runners, installs the new application, stores the repository slots plus the resolved absolute paths to `container` and `gh`, and registers a per-user LaunchAgent through `SMAppService`. The agent starts Apple Container without interactive kernel installation, recovers abandoned runners, and then serves the configured repositories. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
+
+launchd gives the agent 60 seconds to stop. `yieldd` uses a 50-second shutdown budget for its runner processes and cleanup commands so launchd does not kill it halfway through cleanup. Any lease that cannot be cleared within that budget remains available for recovery on the next launch.
+
+Check the registration, configured slots, and active runner leases with:
+
+```sh
+~/Applications/yieldd.app/Contents/MacOS/yieldd agent status
+```
+
+If macOS reports that approval is required, enable `yieldd` under System Settings > General > Login Items & Extensions. Agent logs are available through unified logging:
+
+```sh
+log stream --style compact --predicate 'subsystem == "dev.yieldd" && category == "agent"'
+```
+
+Rerun `Scripts/install-local-agent.sh` to upgrade the application or change its repository slots. To remove the agent configuration and stop launching it at login:
+
+```sh
+~/Applications/yieldd.app/Contents/MacOS/yieldd agent uninstall
+```
+
+Uninstall waits for the agent to stop, recovers any remaining runner leases, and removes its configuration. After the command returns successfully, the application can be moved to the Trash.

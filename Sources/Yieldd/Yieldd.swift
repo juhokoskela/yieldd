@@ -1,7 +1,7 @@
 import ArgumentParser
 
 @main
-struct Yieldd: ParsableCommand {
+struct Yieldd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "yieldd",
         abstract: "Manage ephemeral GitHub Actions runner machines.",
@@ -10,6 +10,7 @@ struct Yieldd: ParsableCommand {
             MachineTestCommand.self,
             RunnerTestCommand.self,
             RunnerServiceCommand.self,
+            AgentCommand.self,
         ]
     )
 }

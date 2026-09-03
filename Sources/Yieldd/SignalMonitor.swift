@@ -9,7 +9,10 @@ final class SignalMonitor: @unchecked Sendable {
     private let sources: [any DispatchSourceSignal]
     private let previousHandlers: [(signal: Int32, handler: sig_t?)]
 
-    init(signals: [Int32] = [SIGINT, SIGTERM]) throws {
+    init(
+        signals: [Int32] = [SIGINT, SIGTERM],
+        signalReceived: @escaping @Sendable (Int32) -> Void = { _ in }
+    ) throws {
         guard signalMonitorInstallation.acquire() else {
             throw SignalMonitorError.alreadyInstalled
         }
@@ -33,6 +36,7 @@ final class SignalMonitor: @unchecked Sendable {
                 )
                 source.setEventHandler {
                     state.record(signal: signalNumber)
+                    signalReceived(signalNumber)
                 }
                 source.resume()
                 sources.append(source)
