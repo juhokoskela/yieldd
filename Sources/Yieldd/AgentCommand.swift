@@ -26,13 +26,21 @@ struct AgentInstallCommand: ParsableCommand {
     @Argument(help: "Repositories in owner/name form. Repeat a repository to give it another runner slot.")
     var repositories: [String]
 
+    @Flag(name: .long, help: .hidden)
+    var validateRepositoriesOnly = false
+
     mutating func validate() throws {
         guard repositories.count <= RunnerPool.maximumSlots else {
             throw ValidationError("The local agent supports at most \(RunnerPool.maximumSlots) runner slots.")
         }
+        _ = try repositories.map(GitHubRepository.init)
     }
 
     mutating func run() throws {
+        guard !validateRepositoriesOnly else {
+            return
+        }
+
         let locator = ExecutableLocator()
         let configuration = try AgentConfiguration(
             repositories: repositories.map(GitHubRepository.init),

@@ -139,6 +139,26 @@ func agentInstallCommandRejectsTooManySlots() {
     }
 }
 
+@Test
+func agentInstallCommandRejectsInvalidRepository() {
+    var command = AgentInstallCommand()
+    command.repositories = ["not-a-repository"]
+
+    #expect(throws: GitHubRepositoryError.invalidFormat("not-a-repository")) {
+        try command.validate()
+    }
+}
+
+@Test
+func agentInstallCanValidateRepositoriesWithoutAPackagedApplication() throws {
+    var command = try AgentInstallCommand.parse([
+        "--validate-repositories-only",
+        "owner/repository",
+    ])
+
+    try command.run()
+}
+
 enum InvalidStoredConfiguration: CaseIterable, CustomTestStringConvertible {
     case emptyRepositories
     case tooManyRepositories

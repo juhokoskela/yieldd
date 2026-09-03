@@ -58,6 +58,8 @@ wait_for_agent_exit() {
 
 ditto "$source_application" "$staged_application"
 codesign --verify --strict "$staged_application"
+"$staged_application/Contents/MacOS/yieldd" agent install \
+    --validate-repositories-only "$@"
 
 legacy_installation=false
 if [ -e "$installed_application" ]; then
