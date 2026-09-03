@@ -13,8 +13,48 @@ struct AgentCommand: ParsableCommand {
             AgentStatusCommand.self,
             AgentUninstallCommand.self,
             AgentRunCommand.self,
+            AgentVirtualizationProbeCommand.self,
         ]
     )
+}
+
+struct AgentVirtualizationProbeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "virtualization-probe",
+        abstract: "Run the packaged macOS virtualization probe.",
+        shouldDisplay: false
+    )
+
+    @Argument(help: "macOS VM template bundle. The probe boots a disposable copy-on-write clone.")
+    var bundlePath: String
+
+    mutating func run() throws {
+        try withRunnerOwnership { leaseStore in
+            let signalMonitor = try SignalMonitor()
+            let memoryAdmission = RunnerMemoryAdmission(
+                reservationBytes: MacOSVirtualizationProbe.memoryBytes
+            )
+            let reservation = try memoryAdmission.acquire(
+                checkCancellation: signalMonitor.check,
+                onBlocked: {
+                    print("Virtualization probe is waiting for available host memory.")
+                }
+            )
+            defer { memoryAdmission.release(reservation) }
+
+            try MacOSVirtualizationProbe().run(
+                templateURL: URL(fileURLWithPath: bundlePath).standardizedFileURL,
+                cloneRootURL: leaseStore.fileURL.deletingLastPathComponent()
+                    .appendingPathComponent("macos-probes", isDirectory: true),
+                checkCancellation: signalMonitor.check,
+                wait: signalMonitor.wait,
+                started: {
+                    print("macOS virtual machine started without a window.")
+                }
+            )
+            print("macOS virtualization probe passed and the VM was force-stopped.")
+        }
+    }
 }
 
 struct AgentInstallCommand: ParsableCommand {
