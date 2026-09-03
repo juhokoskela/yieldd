@@ -27,7 +27,7 @@ struct AgentInstallCommand: ParsableCommand {
     var repositories: [String]
 
     @Flag(name: .long, help: .hidden)
-    var validateRepositoriesOnly = false
+    var preflightOnly = false
 
     mutating func validate() throws {
         guard repositories.count <= RunnerPool.maximumSlots else {
@@ -37,16 +37,20 @@ struct AgentInstallCommand: ParsableCommand {
     }
 
     mutating func run() throws {
-        guard !validateRepositoriesOnly else {
+        let locator = ExecutableLocator()
+        try run(locateExecutable: locator.locate)
+    }
+
+    func run(locateExecutable: (String) throws -> URL) throws {
+        let configuration = try AgentConfiguration(
+            repositories: repositories.map(GitHubRepository.init),
+            containerURL: locateExecutable("container"),
+            ghURL: locateExecutable("gh")
+        )
+        guard !preflightOnly else {
             return
         }
 
-        let locator = ExecutableLocator()
-        let configuration = try AgentConfiguration(
-            repositories: repositories.map(GitHubRepository.init),
-            containerURL: locator.locate("container"),
-            ghURL: locator.locate("gh")
-        )
         let service = try localAgentService()
         try installAgent(
             configuration: configuration,

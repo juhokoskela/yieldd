@@ -150,13 +150,33 @@ func agentInstallCommandRejectsInvalidRepository() {
 }
 
 @Test
-func agentInstallCanValidateRepositoriesWithoutAPackagedApplication() throws {
-    var command = try AgentInstallCommand.parse([
-        "--validate-repositories-only",
-        "owner/repository",
-    ])
+func agentInstallPreflightResolvesToolsWithoutAPackagedApplication() throws {
+    var command = AgentInstallCommand()
+    command.repositories = ["owner/repository"]
+    command.preflightOnly = true
+    var resolvedTools: [String] = []
 
-    try command.run()
+    try command.run { name in
+        resolvedTools.append(name)
+        return URL(fileURLWithPath: "/usr/bin/\(name)")
+    }
+
+    #expect(resolvedTools == ["container", "gh"])
+}
+
+@Test
+func agentInstallPreflightReportsMissingTool() {
+    var command = AgentInstallCommand()
+    command.repositories = ["owner/repository"]
+    command.preflightOnly = true
+    let expectedError = ExecutableLocatorError.notFound(
+        name: "container",
+        searchedDirectories: ["/usr/bin"]
+    )
+
+    #expect(throws: expectedError) {
+        try command.run { _ in throw expectedError }
+    }
 }
 
 enum InvalidStoredConfiguration: CaseIterable, CustomTestStringConvertible {
