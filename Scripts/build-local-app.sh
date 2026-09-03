@@ -14,16 +14,12 @@ plutil -lint Packaging/Info.plist Packaging/dev.yieldd.agent.plist >/dev/null
 rm -rf "$application"
 mkdir -p \
     "$application/Contents/MacOS" \
-    "$application/Contents/Resources" \
     "$application/Contents/Library/LaunchAgents"
 cp Packaging/Info.plist "$application/Contents/Info.plist"
 cp Packaging/dev.yieldd.agent.plist "$application/Contents/Library/LaunchAgents/"
 cp "$executable" "$application/Contents/MacOS/yieldd"
-cp "$executable" "$application/Contents/Resources/yieldd-agent"
 
-codesign --force --sign - --identifier dev.yieldd.agent \
-    "$application/Contents/Resources/yieldd-agent"
 codesign --force --sign - --identifier dev.yieldd "$application"
-codesign --verify --deep --strict "$application"
+codesign --verify --strict "$application"
 
 echo "Built $application"
