@@ -5,16 +5,31 @@ import Testing
 
 private let machineTestID = RunnerID(value: "yieldd-test-machine")
 
+private func machineTestMemoryAdmission() -> RunnerMemoryAdmission {
+    RunnerMemoryAdmission(
+        physicalMemoryBytes: 4,
+        reservationBytes: 1,
+        readMemoryPressure: { .normal }
+    )
+}
+
+private func machineTestRunner(backend: any RunnerBackend) -> MachineTestRunner {
+    MachineTestRunner(
+        backend: backend,
+        memoryAdmission: machineTestMemoryAdmission()
+    )
+}
+
 @Test
 func machineTestRunsChecksAndCleanupInOrder() throws {
     let backend = RecordingRunnerBackend(
-        execOutcomes: [.success(processResult(stdout: "hello world"))]
+        execOutcomes: [.success(())]
     )
 
-    try MachineTestRunner(backend: backend).run(id: machineTestID)
+    try machineTestRunner(backend: backend).run(id: machineTestID)
 
     #expect(backend.calls == [
-        .create(machineTestID, .constrained),
+        .create(machineTestID, .full),
         .exec(machineTestID, ["docker", "run", "--rm", "hello-world"]),
         .destroy(machineTestID),
     ])
@@ -27,7 +42,7 @@ func failedHelloWorldStillCleansUp() {
     ])
 
     #expect(throws: TestFailure.helloWorld) {
-        try MachineTestRunner(backend: backend).run(id: machineTestID)
+        try machineTestRunner(backend: backend).run(id: machineTestID)
     }
     #expect(backend.calls.last == .destroy(machineTestID))
     #expect(backend.calls.filter { $0 == .destroy(machineTestID) }.count == 1)
@@ -38,10 +53,10 @@ func failedCreateStillAttemptsCleanup() {
     let backend = RecordingRunnerBackend(createError: TestFailure.create)
 
     #expect(throws: TestFailure.create) {
-        try MachineTestRunner(backend: backend).run(id: machineTestID)
+        try machineTestRunner(backend: backend).run(id: machineTestID)
     }
     #expect(backend.calls == [
-        .create(machineTestID, .constrained),
+        .create(machineTestID, .full),
         .destroy(machineTestID),
     ])
 }
@@ -49,12 +64,12 @@ func failedCreateStillAttemptsCleanup() {
 @Test
 func cleanupFailureAfterSuccessfulChecksIsReported() {
     let backend = RecordingRunnerBackend(
-        execOutcomes: [.success(processResult())],
+        execOutcomes: [.success(())],
         destroyError: TestFailure.cleanup
     )
 
     #expect(throws: TestFailure.cleanup) {
-        try MachineTestRunner(backend: backend).run(id: machineTestID)
+        try machineTestRunner(backend: backend).run(id: machineTestID)
     }
 }
 
@@ -66,7 +81,7 @@ func operationAndCleanupFailuresAreBothRetained() {
     )
 
     do {
-        try MachineTestRunner(backend: backend).run(id: machineTestID)
+        try machineTestRunner(backend: backend).run(id: machineTestID)
         Issue.record("Expected operation and cleanup to fail")
     } catch let MachineTestError.operationAndCleanupFailed(operation, cleanup) {
         #expect(operation as? TestFailure == .create)
@@ -83,9 +98,10 @@ func interruptionAfterCreateCleansUpWithoutRunningChecks() {
     var checks = 0
     let runner = MachineTestRunner(
         backend: backend,
+        memoryAdmission: machineTestMemoryAdmission(),
         checkCancellation: {
             checks += 1
-            if checks == 2 {
+            if checks == 3 {
                 throw SignalInterruption(signal: SIGTERM)
             }
         }
@@ -95,24 +111,20 @@ func interruptionAfterCreateCleansUpWithoutRunningChecks() {
         try runner.run(id: machineTestID)
     }
     #expect(backend.calls == [
-        .create(machineTestID, .constrained),
+        .create(machineTestID, .full),
         .destroy(machineTestID),
     ])
 }
 
 private final class RecordingRunnerBackend: RunnerBackend {
-    let memoryRequirements = RunnerMemoryRequirements(
-        constrainedBytes: 1,
-        fullBytes: 1
-    )
     private(set) var calls: [RunnerBackendCall] = []
     private let createError: (any Error)?
-    private var execOutcomes: [Result<ProcessResult, any Error>]
+    private var execOutcomes: [Result<Void, any Error>]
     private let destroyError: (any Error)?
 
     init(
         createError: (any Error)? = nil,
-        execOutcomes: [Result<ProcessResult, any Error>] = [],
+        execOutcomes: [Result<Void, any Error>] = [],
         destroyError: (any Error)? = nil
     ) {
         self.createError = createError
@@ -134,7 +146,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws -> ProcessResult {
+    ) throws {
         #expect(standardInput == nil)
         #expect(outputCapture == .all)
         #expect(user == .runner)
@@ -143,7 +155,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall
         }
-        return try execOutcomes.removeFirst().get()
+        try execOutcomes.removeFirst().get()
     }
 
     func destroy(_ id: RunnerID) throws {

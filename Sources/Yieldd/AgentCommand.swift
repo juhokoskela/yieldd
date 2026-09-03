@@ -169,7 +169,7 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
                     writeToStandardError(
                         "Warning: Could not clear runner lease for \(id.value): \(reason)\n"
                     )
-                case .preparing, .waitingForJob, .cleaningUp:
+                case .preparing, .waitingForMemory, .waitingForJob, .cleaningUp:
                     break
                 }
             }

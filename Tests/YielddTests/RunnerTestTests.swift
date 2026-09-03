@@ -6,23 +6,22 @@ import Testing
 
 private let runnerTestID = RunnerID(value: "yieldd-test-runner")
 private let runnerTestRepository = try! GitHubRepository("owner/repository")
-private let runnerTestMemoryRequirements = RunnerMemoryRequirements(
-    constrainedBytes: 1_024,
-    fullBytes: 1_024
-)
+private let runnerTestMemoryBytes: UInt64 = 1_024
 
 private func runnerTestMemoryAdmission(
     pressure: HostMemoryPressure = .normal
 ) -> RunnerMemoryAdmission {
     RunnerMemoryAdmission(
         physicalMemoryBytes: 4_096,
+        reservationBytes: runnerTestMemoryBytes,
         readMemoryPressure: { pressure }
     )
 }
 
 private func singleRunnerMemoryAdmission() -> RunnerMemoryAdmission {
     RunnerMemoryAdmission(
-        physicalMemoryBytes: 1_366,
+        physicalMemoryBytes: runnerTestMemoryBytes * 4 / 3 + 1,
+        reservationBytes: runnerTestMemoryBytes,
         readMemoryPressure: { .normal }
     )
 }
@@ -47,8 +46,8 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult(stdout: "configured")),
-            .success(processResult(stdout: "job complete")),
+            .success(()),
+            .success(()),
         ]
     )
     let github = RunnerTestGitHub(events: events)
@@ -91,9 +90,7 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
     ])
     #expect(!events.values.description.contains("registration-token"))
     #expect(try leaseStore.load().isEmpty)
-    let nextReservation = try memoryAdmission.acquire(
-        requirements: runnerTestMemoryRequirements
-    )
+    let nextReservation = try memoryAdmission.acquire()
     memoryAdmission.release(nextReservation)
 }
 
@@ -104,7 +101,7 @@ func successfulJobWaitsUntilGitHubReleasesItsBusyRunner() throws {
     let events = RunnerTestEventRecorder()
     let backend = RunnerTestBackend(
         events: events,
-        execOutcomes: Array(repeating: .success(processResult()), count: 2)
+        execOutcomes: Array(repeating: .success(()), count: 2)
     )
     let github = RunnerTestGitHub(
         events: events,
@@ -151,7 +148,7 @@ func leaseClearFailureAfterSuccessfulCleanupIsAWarning() throws {
     let events = RunnerTestEventRecorder()
     let backend = RunnerTestBackend(
         events: events,
-        execOutcomes: Array(repeating: .success(processResult()), count: 2)
+        execOutcomes: Array(repeating: .success(()), count: 2)
     )
     var states: [RunnerSessionState] = []
     var madeDirectoryReadOnly = false
@@ -407,11 +404,20 @@ func failedRecoveryKeepsTheLease() throws {
 }
 
 @Test
-func sessionCleanupFailureKeepsTheLease() throws {
+func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
     let events = RunnerTestEventRecorder()
-    let memoryAdmission = singleRunnerMemoryAdmission()
+    var waitedForCapacity = false
+    let memoryAdmission = RunnerMemoryAdmission(
+        physicalMemoryBytes: runnerTestMemoryBytes * 4 / 3 + 1,
+        reservationBytes: runnerTestMemoryBytes,
+        readMemoryPressure: { .normal },
+        wait: { _, reason in
+            #expect(reason == .capacity)
+            waitedForCapacity = true
+        }
+    )
     let session = EphemeralRunnerSession(
         backend: RunnerTestBackend(
             events: events,
@@ -431,17 +437,12 @@ func sessionCleanupFailureKeepsTheLease() throws {
         runnerID: runnerTestID,
         repository: runnerTestRepository
     )])
-    var checks = 0
     #expect(throws: CancellationError.self) {
-        try memoryAdmission.acquire(
-            requirements: runnerTestMemoryRequirements,
-            checkCancellation: {
-                checks += 1
-                if checks == 2 {
-                    throw CancellationError()
-                }
+        try memoryAdmission.acquire(checkCancellation: {
+            if waitedForCapacity {
+                throw CancellationError()
             }
-        )
+        })
     }
 }
 
@@ -457,7 +458,7 @@ func runnerTimeoutStillRemovesRegistrationAndMachine() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
+            .success(()),
             .failure(ProcessExecutionError.timedOut(
                 request: timeoutRequest,
                 result: timeoutResult
@@ -503,7 +504,7 @@ func cancelledRunnerCommandStillRemovesRegistrationAndMachine() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
+            .success(()),
             .failure(ProcessExecutionError.cancelled(
                 request: cancelledRequest,
                 result: cancelledResult,
@@ -556,7 +557,7 @@ func busyGitHubRunnerDefersCleanupAndKeepsLease() throws {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
+            .success(()),
             .failure(cancellation),
         ]
     )
@@ -600,7 +601,7 @@ func runnerFailureStillRemovesRegistrationAndMachine() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
+            .success(()),
             .failure(TestFailure.runnerJob),
         ]
     )
@@ -633,7 +634,7 @@ func failedRunnerStopDestroysMachineBeforeRemovingRegistration() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
+            .success(()),
             .failure(TestFailure.runnerJob),
         ],
         stopError: TestFailure.runnerStop
@@ -661,7 +662,7 @@ func failedRunnerStopAndMachineDestroySkipGitHubCleanup() {
     let backend = RunnerTestBackend(
         events: events,
         execOutcomes: [
-            .success(processResult()),
+            .success(()),
             .failure(TestFailure.runnerJob),
         ],
         stopError: TestFailure.runnerStop,
@@ -728,6 +729,139 @@ func failureBeforeRunnerConfigurationSkipsGitHubCleanup() {
     ])
 }
 
+@Test
+func cancellationWhileWaitingForMemorySkipsMachineCleanupAndLeasePersistence() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let events = RunnerTestEventRecorder()
+    var blocked = false
+    var states: [RunnerSessionState] = []
+    let memoryAdmission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 4,
+        reservationBytes: 3,
+        readMemoryPressure: { .critical },
+        wait: { _, reason in
+            #expect(reason == .pressure)
+            blocked = true
+        }
+    )
+
+    #expect(throws: CancellationError.self) {
+        try EphemeralRunnerSession(
+            backend: RunnerTestBackend(events: events),
+            github: RunnerTestGitHub(events: events),
+            memoryAdmission: memoryAdmission,
+            checkCancellation: {
+                if blocked {
+                    throw CancellationError()
+                }
+            },
+            stateChanged: { states.append($0) },
+            leaseStore: leaseStore
+        ).run(id: runnerTestID, repository: runnerTestRepository)
+    }
+
+    #expect(events.values.isEmpty)
+    #expect(states == [
+        .preparing(runnerTestID),
+        .waitingForMemory(runnerTestID),
+        .cleaningUp(runnerTestID),
+    ])
+    #expect(try leaseStore.load().isEmpty)
+}
+
+@Test
+func insufficientHostMemoryFailsBeforeProvisioning() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let events = RunnerTestEventRecorder()
+    let memoryAdmission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 2,
+        reservationBytes: 3,
+        readMemoryPressure: { .normal }
+    )
+
+    #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
+        requiredBytes: 3,
+        budgetBytes: 2
+    )) {
+        try EphemeralRunnerSession(
+            backend: RunnerTestBackend(events: events),
+            github: RunnerTestGitHub(events: events),
+            memoryAdmission: memoryAdmission,
+            leaseStore: leaseStore
+        ).run(id: runnerTestID, repository: runnerTestRepository)
+    }
+
+    #expect(events.values.isEmpty)
+    #expect(try leaseStore.load().isEmpty)
+}
+
+@Test
+func memoryAdmissionPrecedesRegistrationTokenCreation() {
+    let events = RunnerTestEventRecorder()
+    let memoryAdmission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 4,
+        reservationBytes: 3,
+        readMemoryPressure: {
+            events.values.append(.memoryAdmission)
+            return .normal
+        }
+    )
+
+    #expect(throws: TestFailure.create) {
+        try EphemeralRunnerSession(
+            backend: RunnerTestBackend(events: events, createError: TestFailure.create),
+            github: RunnerTestGitHub(events: events),
+            memoryAdmission: memoryAdmission
+        ).run(id: runnerTestID, repository: runnerTestRepository)
+    }
+
+    #expect(events.values.prefix(2) == [
+        .memoryAdmission,
+        .createRegistrationToken(runnerTestRepository),
+    ])
+}
+
+@Test
+func leaseIsPersistedImmediatelyBeforeMachineCreationAndClearedAfterFailure() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let events = RunnerTestEventRecorder()
+    let lease = RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository)
+    let github = RunnerTestGitHub(
+        events: events,
+        onCreateRegistrationToken: {
+            let leases = try leaseStore.load()
+            #expect(leases.isEmpty)
+        }
+    )
+    let backend = RunnerTestBackend(
+        events: events,
+        createError: TestFailure.create,
+        onCreate: {
+            let leases = try leaseStore.load()
+            #expect(leases == [lease])
+        }
+    )
+
+    #expect(throws: TestFailure.create) {
+        try EphemeralRunnerSession(
+            backend: backend,
+            github: github,
+            memoryAdmission: runnerTestMemoryAdmission(),
+            leaseStore: leaseStore
+        ).run(id: runnerTestID, repository: runnerTestRepository)
+    }
+
+    #expect(events.values == [
+        .createRegistrationToken(runnerTestRepository),
+        .create(runnerTestID, .full),
+        .destroy(runnerTestID),
+    ])
+    #expect(try leaseStore.load().isEmpty)
+}
+
 @Test(arguments: [
     HostMemoryPressure.warning,
     HostMemoryPressure.unknown,
@@ -738,7 +872,7 @@ func elevatedOrUnknownMemoryPressureKeepsConstrainedAllocation(
     let events = RunnerTestEventRecorder()
     let backend = RunnerTestBackend(
         events: events,
-        execOutcomes: Array(repeating: .success(processResult()), count: 2)
+        execOutcomes: Array(repeating: .success(()), count: 2)
     )
     let github = RunnerTestGitHub(events: events)
 
@@ -752,8 +886,9 @@ func elevatedOrUnknownMemoryPressureKeepsConstrainedAllocation(
 }
 
 @Test
-func backendProvisioningFailureSkipsGitHubCleanupAndDestroysMachine() {
+func backendProvisioningFailureReleasesMemoryAfterDestroyingMachine() throws {
     let events = RunnerTestEventRecorder()
+    let memoryAdmission = singleRunnerMemoryAdmission()
     let backend = RunnerTestBackend(
         events: events,
         createError: TestFailure.memoryAllocation
@@ -764,7 +899,7 @@ func backendProvisioningFailureSkipsGitHubCleanupAndDestroysMachine() {
         try EphemeralRunnerSession(
             backend: backend,
             github: github,
-            memoryAdmission: runnerTestMemoryAdmission()
+            memoryAdmission: memoryAdmission
         ).run(id: runnerTestID, repository: runnerTestRepository)
     }
 
@@ -772,6 +907,7 @@ func backendProvisioningFailureSkipsGitHubCleanupAndDestroysMachine() {
         .create(runnerTestID, .full),
         .destroy(runnerTestID),
     ])
+    memoryAdmission.release(try memoryAdmission.acquire())
 }
 
 @Test
@@ -845,36 +981,35 @@ func registrationTokenFailureReleasesReservedMachineCapacity() throws {
 
     #expect(events.values == [
         .createRegistrationToken(runnerTestRepository),
-        .destroy(runnerTestID),
     ])
-    let nextReservation = try memoryAdmission.acquire(
-        requirements: runnerTestMemoryRequirements
-    )
+    let nextReservation = try memoryAdmission.acquire()
     memoryAdmission.release(nextReservation)
 }
 
-private final class RunnerTestEventRecorder {
+private final class RunnerTestEventRecorder: @unchecked Sendable {
     var values: [RunnerTestEvent] = []
 }
 
 private final class RunnerTestBackend: RunnerBackend {
-    let memoryRequirements = runnerTestMemoryRequirements
     private(set) var outputCaptures: [ProcessOutputCapture] = []
     private let events: RunnerTestEventRecorder
     private let createError: (any Error)?
-    private var execOutcomes: [Result<ProcessResult, any Error>]
+    private let onCreate: () throws -> Void
+    private var execOutcomes: [Result<Void, any Error>]
     private let stopError: (any Error)?
     private let destroyError: (any Error)?
 
     init(
         events: RunnerTestEventRecorder,
         createError: (any Error)? = nil,
-        execOutcomes: [Result<ProcessResult, any Error>] = [],
+        onCreate: @escaping () throws -> Void = {},
+        execOutcomes: [Result<Void, any Error>] = [],
         stopError: (any Error)? = nil,
         destroyError: (any Error)? = nil
     ) {
         self.events = events
         self.createError = createError
+        self.onCreate = onCreate
         self.execOutcomes = execOutcomes
         self.stopError = stopError
         self.destroyError = destroyError
@@ -882,6 +1017,7 @@ private final class RunnerTestBackend: RunnerBackend {
 
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
         events.values.append(.create(id, memory))
+        try onCreate()
         if let createError {
             throw createError
         }
@@ -894,13 +1030,13 @@ private final class RunnerTestBackend: RunnerBackend {
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws -> ProcessResult {
+    ) throws {
         outputCaptures.append(outputCapture)
         events.values.append(.exec(id, arguments, standardInput, timeout, user))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall
         }
-        return try execOutcomes.removeFirst().get()
+        try execOutcomes.removeFirst().get()
     }
 
     func destroy(_ id: RunnerID) throws {
@@ -922,22 +1058,26 @@ private final class RunnerTestGitHub: GitHubRunnerManaging {
     private let events: RunnerTestEventRecorder
     private let registrationToken: String
     private let tokenError: (any Error)?
+    private let onCreateRegistrationToken: () throws -> Void
     private var removeOutcomes: [Result<Void, any Error>]
 
     init(
         events: RunnerTestEventRecorder,
         registrationToken: String = "registration-token",
         tokenError: (any Error)? = nil,
+        onCreateRegistrationToken: @escaping () throws -> Void = {},
         removeOutcomes: [Result<Void, any Error>] = []
     ) {
         self.events = events
         self.registrationToken = registrationToken
         self.tokenError = tokenError
+        self.onCreateRegistrationToken = onCreateRegistrationToken
         self.removeOutcomes = removeOutcomes
     }
 
     func createRegistrationToken(for repository: GitHubRepository) throws -> String {
         events.values.append(.createRegistrationToken(repository))
+        try onCreateRegistrationToken()
         if let tokenError {
             throw tokenError
         }
@@ -953,6 +1093,7 @@ private final class RunnerTestGitHub: GitHubRunnerManaging {
 }
 
 private enum RunnerTestEvent: Equatable {
+    case memoryAdmission
     case createRegistrationToken(GitHubRepository)
     case create(RunnerID, RunnerMemoryAllocation)
     case exec(RunnerID, [String], Data?, TimeInterval?, RunnerGuestUser)

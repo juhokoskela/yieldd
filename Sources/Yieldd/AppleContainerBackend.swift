@@ -6,37 +6,20 @@ struct AppleContainerBackend: RunnerBackend {
     static let cleanupTimeout: TimeInterval = 90
     static let runnerStopTimeout: TimeInterval = 30
     static let virtualCPUs = 4
-    static let memory = "12G"
-    static let memoryBytes: UInt64 = 12 * 1_024 * 1_024 * 1_024
     static let image = "local/yieldd-guest:dev"
 
     let containerURL: URL
     let executor: any ProcessExecuting
     let dockerReadiness: DockerReadiness
 
-    var memoryRequirements: RunnerMemoryRequirements {
-        RunnerMemoryRequirements(
-            constrainedBytes: Self.memoryBytes,
-            fullBytes: Self.memoryBytes
-        )
-    }
-
     init(
         containerURL: URL,
         executor: any ProcessExecuting,
-        dockerInfoAttempts: Int = 30,
-        retryDelay: TimeInterval = 1,
-        wait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
-        checkCancellation: @escaping () throws -> Void = {}
+        dockerReadiness: DockerReadiness = DockerReadiness()
     ) {
         self.containerURL = containerURL
         self.executor = executor
-        dockerReadiness = DockerReadiness(
-            attempts: dockerInfoAttempts,
-            retryDelay: retryDelay,
-            wait: wait,
-            checkCancellation: checkCancellation
-        )
+        self.dockerReadiness = dockerReadiness
     }
 
     func create(id: RunnerID, memory allocation: RunnerMemoryAllocation) throws {
@@ -45,17 +28,17 @@ struct AppleContainerBackend: RunnerBackend {
             "--name", id.value,
             "--home-mount", "none",
             "--cpus", String(Self.virtualCPUs),
-            "--memory", Self.memory,
+            "--memory", RunnerMemoryAdmission.machineMemoryArgument,
             Self.image,
         ], timeout: Self.creationTimeout)
         try dockerReadiness.wait {
-            _ = try exec(
+            try exec(
                 ["docker", "info"],
                 timeout: DockerReadiness.probeTimeout,
                 on: id
             )
         }
-        _ = try exec(
+        try exec(
             ["yieldd-runner-control", "memory", allocation.rawValue],
             timeout: Self.memoryConfigurationTimeout,
             outputCapture: .all,
@@ -71,7 +54,7 @@ struct AppleContainerBackend: RunnerBackend {
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws -> ProcessResult {
+    ) throws {
         guard !arguments.isEmpty else {
             throw RunnerBackendError.emptyCommand
         }
@@ -86,7 +69,7 @@ struct AppleContainerBackend: RunnerBackend {
         containerArguments.append("--")
         containerArguments.append(contentsOf: arguments)
 
-        return try run(
+        _ = try run(
             containerArguments,
             standardInput: standardInput,
             timeout: timeout,

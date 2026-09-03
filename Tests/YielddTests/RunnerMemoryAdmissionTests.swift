@@ -6,19 +6,15 @@ import Testing
 private let gibibyte: UInt64 = 1_024 * 1_024 * 1_024
 
 @Test
-func normalPressureUsesFullMemoryWhenItFits() throws {
+func normalPressureUsesFullMemory() throws {
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 16 * gibibyte,
         readMemoryPressure: { .normal }
     )
 
-    let reservation = try admission.acquire(requirements: RunnerMemoryRequirements(
-        constrainedBytes: 8 * gibibyte,
-        fullBytes: 12 * gibibyte
-    ))
+    let reservation = try admission.acquire()
 
     #expect(reservation.allocation == .full)
-    #expect(reservation.byteCount == 12 * gibibyte)
 }
 
 @Test(arguments: [HostMemoryPressure.warning, HostMemoryPressure.unknown])
@@ -28,105 +24,122 @@ func uncertainPressureUsesConstrainedMemory(_ pressure: HostMemoryPressure) thro
         readMemoryPressure: { pressure }
     )
 
-    let reservation = try admission.acquire(requirements: RunnerMemoryRequirements(
-        constrainedBytes: 8 * gibibyte,
-        fullBytes: 12 * gibibyte
-    ))
+    let reservation = try admission.acquire()
 
     #expect(reservation.allocation == .constrained)
-    #expect(reservation.byteCount == 8 * gibibyte)
 }
 
 @Test
-func existingReservationCanReduceTheNextAllocation() throws {
-    let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 24 * gibibyte,
-        readMemoryPressure: { .normal }
-    )
-    let requirements = RunnerMemoryRequirements(
-        constrainedBytes: 6 * gibibyte,
-        fullBytes: 12 * gibibyte
-    )
-
-    let first = try admission.acquire(requirements: requirements)
-    let second = try admission.acquire(requirements: requirements)
-
-    #expect(first.allocation == .full)
-    #expect(second.allocation == .constrained)
-}
-
-@Test
-func concurrentAdmissionWaitsForAnExistingReservation() throws {
-    let pressureRead = DispatchSemaphore(value: 0)
-    let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 16 * gibibyte,
-        readMemoryPressure: {
-            pressureRead.signal()
-            return .normal
-        }
-    )
-    let requirements = RunnerMemoryRequirements(
-        constrainedBytes: 12 * gibibyte,
-        fullBytes: 12 * gibibyte
-    )
-    let first = try admission.acquire(requirements: requirements)
-    #expect(pressureRead.wait(timeout: .now() + 1) == .success)
+func concurrentAdmissionWaitsForReleaseWithoutPolling() throws {
+    let blocked = DispatchSemaphore(value: 0)
     let finished = DispatchSemaphore(value: 0)
     let result = MemoryReservationResult()
+    let admission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 4,
+        reservationBytes: 3,
+        readMemoryPressure: { .normal },
+        wait: { condition, reason in
+            #expect(reason == .capacity)
+            blocked.signal()
+            condition.wait()
+        }
+    )
+    let first = try admission.acquire()
 
     DispatchQueue.global().async {
-        result.store(Result { try admission.acquire(requirements: requirements) })
+        result.store(Result { try admission.acquire() })
         finished.signal()
     }
 
-    #expect(pressureRead.wait(timeout: .now() + 1) == .success)
-    #expect(finished.wait(timeout: .now()) == .timedOut)
+    #expect(blocked.wait(timeout: .now() + 1) == .success)
     admission.release(first)
     #expect(finished.wait(timeout: .now() + 1) == .success)
-    let second = try result.value.get()
-    admission.release(second)
+    admission.release(try result.value.get())
 }
 
 @Test
-func criticalPressureWaitsUntilCancelled() {
+func criticalPressureRetriesUntilItReturnsToNormal() throws {
+    let pressure = LockedMemoryPressure(.critical)
+    var waits: [RunnerMemoryWaitReason] = []
     let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 16 * gibibyte,
-        readMemoryPressure: { .critical }
+        physicalMemoryBytes: 4,
+        reservationBytes: 3,
+        readMemoryPressure: pressure.read,
+        wait: { _, reason in
+            waits.append(reason)
+            pressure.set(.normal)
+        }
     )
-    var checks = 0
+
+    let reservation = try admission.acquire()
+
+    #expect(reservation.allocation == .full)
+    #expect(waits == [.pressure])
+}
+
+@Test
+func blockedNotificationIsEmittedOnlyOnce() throws {
+    let pressure = LockedMemoryPressure(.critical)
+    var waits = 0
+    var notifications = 0
+    let admission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 4,
+        reservationBytes: 3,
+        readMemoryPressure: pressure.read,
+        wait: { _, reason in
+            #expect(reason == .pressure)
+            waits += 1
+            if waits == 2 {
+                pressure.set(.normal)
+            }
+        }
+    )
+
+    _ = try admission.acquire(onBlocked: { notifications += 1 })
+
+    #expect(waits == 2)
+    #expect(notifications == 1)
+}
+
+@Test
+func criticalPressureWaitCanBeCancelledDeterministically() {
+    let cancelled = LockedBoolean()
+    let admission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 4,
+        reservationBytes: 3,
+        readMemoryPressure: { .critical },
+        wait: { _, reason in
+            #expect(reason == .pressure)
+            cancelled.set()
+        }
+    )
 
     #expect(throws: CancellationError.self) {
-        try admission.acquire(
-            requirements: RunnerMemoryRequirements(
-                constrainedBytes: 8 * gibibyte,
-                fullBytes: 12 * gibibyte
-            ),
-            checkCancellation: {
-                checks += 1
-                if checks == 2 {
-                    throw CancellationError()
-                }
+        try admission.acquire(checkCancellation: {
+            if cancelled.value {
+                throw CancellationError()
             }
-        )
+        })
     }
-    #expect(checks == 2)
 }
 
 @Test
 func impossibleReservationFailsImmediately() {
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 12 * gibibyte,
+        reservationBytes: 10 * gibibyte,
         readMemoryPressure: { .normal }
     )
-
-    #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
+    let expected = RunnerMemoryAdmissionError.insufficientHostMemory(
         requiredBytes: 10 * gibibyte,
         budgetBytes: 9 * gibibyte
-    )) {
-        try admission.acquire(requirements: RunnerMemoryRequirements(
-            constrainedBytes: 10 * gibibyte,
-            fullBytes: 12 * gibibyte
-        ))
+    )
+
+    #expect(throws: expected) {
+        try admission.validateCapacity()
+    }
+    #expect(throws: expected) {
+        try admission.acquire()
     }
 }
 
@@ -140,5 +153,35 @@ private final class MemoryReservationResult: @unchecked Sendable {
 
     func store(_ result: Result<RunnerMemoryReservation, any Error>) {
         lock.withLock { stored = result }
+    }
+}
+
+private final class LockedMemoryPressure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pressure: HostMemoryPressure
+
+    init(_ pressure: HostMemoryPressure) {
+        self.pressure = pressure
+    }
+
+    func read() -> HostMemoryPressure {
+        lock.withLock { pressure }
+    }
+
+    func set(_ pressure: HostMemoryPressure) {
+        lock.withLock { self.pressure = pressure }
+    }
+}
+
+private final class LockedBoolean: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+
+    var value: Bool {
+        lock.withLock { stored }
+    }
+
+    func set() {
+        lock.withLock { stored = true }
     }
 }

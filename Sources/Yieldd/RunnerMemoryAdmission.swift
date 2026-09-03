@@ -1,108 +1,122 @@
 import Foundation
 
-struct RunnerMemoryRequirements: Equatable, Sendable {
-    let constrainedBytes: UInt64
-    let fullBytes: UInt64
-
-    init(constrainedBytes: UInt64, fullBytes: UInt64) {
-        precondition(constrainedBytes > 0)
-        precondition(fullBytes >= constrainedBytes)
-        self.constrainedBytes = constrainedBytes
-        self.fullBytes = fullBytes
-    }
-
-    func bytes(for allocation: RunnerMemoryAllocation) -> UInt64 {
-        switch allocation {
-        case .constrained:
-            constrainedBytes
-        case .full:
-            fullBytes
-        }
-    }
-}
-
 struct RunnerMemoryReservation: Equatable, Sendable {
     let allocation: RunnerMemoryAllocation
-    let byteCount: UInt64
+}
+
+enum RunnerMemoryWaitReason: Equatable {
+    case capacity
+    case pressure
 }
 
 final class RunnerMemoryAdmission: @unchecked Sendable {
-    private static let checkInterval: TimeInterval = 0.1
+    static let slotGibibytes: UInt64 = 12
+    static let slotBytes = slotGibibytes * 1_024 * 1_024 * 1_024
+    static let machineMemoryArgument = "\(slotGibibytes)G"
+
+    private static let pressureCheckInterval: TimeInterval = 0.1
 
     private let condition = NSCondition()
+    private let reservationBytes: UInt64
     private let budgetBytes: UInt64
     private let readMemoryPressure: @Sendable () -> HostMemoryPressure
+    private let wait: (NSCondition, RunnerMemoryWaitReason) -> Void
     private var reservedBytes: UInt64 = 0
 
     init(
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
-        readMemoryPressure: @escaping @Sendable () -> HostMemoryPressure = HostMemoryPressure.current
+        reservationBytes: UInt64 = RunnerMemoryAdmission.slotBytes,
+        readMemoryPressure: @escaping @Sendable () -> HostMemoryPressure = HostMemoryPressure.current,
+        wait: @escaping (NSCondition, RunnerMemoryWaitReason) -> Void = RunnerMemoryAdmission.wait
     ) {
+        precondition(reservationBytes > 0)
+        self.reservationBytes = reservationBytes
         budgetBytes = physicalMemoryBytes - physicalMemoryBytes / 4
         self.readMemoryPressure = readMemoryPressure
+        self.wait = wait
     }
 
-    func acquire(
-        requirements: RunnerMemoryRequirements,
-        checkCancellation: () throws -> Void = {}
-    ) throws -> RunnerMemoryReservation {
-        guard requirements.constrainedBytes <= budgetBytes else {
+    func validateCapacity() throws {
+        guard reservationBytes <= budgetBytes else {
             throw RunnerMemoryAdmissionError.insufficientHostMemory(
-                requiredBytes: requirements.constrainedBytes,
+                requiredBytes: reservationBytes,
                 budgetBytes: budgetBytes
             )
         }
+    }
 
-        while true {
-            try checkCancellation()
-            condition.lock()
-            if let allocation = availableAllocation(requirements: requirements) {
-                let byteCount = requirements.bytes(for: allocation)
-                let reservation = RunnerMemoryReservation(
-                    allocation: allocation,
-                    byteCount: byteCount
-                )
-                reservedBytes += byteCount
-                condition.unlock()
-                return reservation
+    func acquire(
+        checkCancellation: () throws -> Void = {},
+        onBlocked: () -> Void = {}
+    ) throws -> RunnerMemoryReservation {
+        try validateCapacity()
+
+        return try condition.withLock {
+            var reportedBlocked = false
+            while true {
+                try checkCancellation()
+                switch admissionDecision() {
+                case let .admit(allocation):
+                    reservedBytes += reservationBytes
+                    return RunnerMemoryReservation(allocation: allocation)
+                case let .wait(reason):
+                    if !reportedBlocked {
+                        onBlocked()
+                        reportedBlocked = true
+                    }
+                    wait(condition, reason)
+                }
             }
-            _ = condition.wait(until: Date(timeIntervalSinceNow: Self.checkInterval))
-            condition.unlock()
         }
     }
 
-    func release(_ reservation: RunnerMemoryReservation) {
+    func release(_: RunnerMemoryReservation) {
         condition.withLock {
-            precondition(reservation.byteCount <= reservedBytes)
-            reservedBytes -= reservation.byteCount
+            precondition(reservationBytes <= reservedBytes)
+            reservedBytes -= reservationBytes
             condition.broadcast()
         }
     }
 
-    private func availableAllocation(
-        requirements: RunnerMemoryRequirements
-    ) -> RunnerMemoryAllocation? {
-        switch readMemoryPressure() {
-        case .normal:
-            if canReserve(requirements.fullBytes) {
-                return .full
-            }
-            if canReserve(requirements.constrainedBytes) {
-                return .constrained
-            }
-        case .warning, .unknown:
-            if canReserve(requirements.constrainedBytes) {
-                return .constrained
-            }
-        case .critical:
-            break
+    func wakeWaiters() {
+        condition.withLock {
+            condition.broadcast()
         }
-        return nil
     }
 
-    private func canReserve(_ byteCount: UInt64) -> Bool {
-        byteCount <= budgetBytes - reservedBytes
+    private func admissionDecision() -> AdmissionDecision {
+        guard reservationBytes <= budgetBytes - reservedBytes else {
+            return .wait(.capacity)
+        }
+
+        switch readMemoryPressure() {
+        case .normal:
+            return .admit(.full)
+        case .warning, .unknown:
+            return .admit(.constrained)
+        case .critical:
+            return .wait(.pressure)
+        }
     }
+
+    private static func wait(
+        condition: NSCondition,
+        reason: RunnerMemoryWaitReason
+    ) {
+        switch reason {
+        case .capacity:
+            condition.wait()
+        case .pressure:
+            _ = condition.wait(
+                until: Date(timeIntervalSinceNow: pressureCheckInterval)
+            )
+        }
+    }
+}
+
+private enum AdmissionDecision {
+    case admit(RunnerMemoryAllocation)
+    case wait(RunnerMemoryWaitReason)
 }
 
 enum RunnerMemoryAdmissionError: Error, Equatable, LocalizedError {

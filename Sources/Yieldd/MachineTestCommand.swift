@@ -8,21 +8,29 @@ struct MachineTestCommand: ParsableCommand {
     )
 
     mutating func run() throws {
-        let signalMonitor = try SignalMonitor()
-        let containerURL = try ExecutableLocator().locate("container")
-        let backend = AppleContainerBackend(
-            containerURL: containerURL,
-            executor: ProcessExecutor(checkCancellation: signalMonitor.check),
-            wait: signalMonitor.wait,
-            checkCancellation: signalMonitor.check
-        )
-        let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
+        try withRunnerOwnership { _ in
+            let signalMonitor = try SignalMonitor()
+            let containerURL = try ExecutableLocator().locate("container")
+            let backend = AppleContainerBackend(
+                containerURL: containerURL,
+                executor: ProcessExecutor(checkCancellation: signalMonitor.check),
+                dockerReadiness: DockerReadiness(
+                    wait: signalMonitor.wait,
+                    checkCancellation: signalMonitor.check
+                )
+            )
+            let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
 
-        try MachineTestRunner(
-            backend: backend,
-            checkCancellation: signalMonitor.check
-        ).run(id: id)
-        print("Machine test passed.")
+            try MachineTestRunner(
+                backend: backend,
+                memoryAdmission: RunnerMemoryAdmission(),
+                checkCancellation: signalMonitor.check,
+                waitingForMemory: {
+                    print("Machine test is waiting for available host memory.")
+                }
+            ).run(id: id)
+            print("Machine test passed.")
+        }
     }
 }
 
@@ -30,30 +38,45 @@ struct MachineTestRunner {
     static let helloWorldTimeout: TimeInterval = 2 * 60
 
     let backend: any RunnerBackend
+    private let memoryAdmission: RunnerMemoryAdmission
     private let checkCancellation: () throws -> Void
+    private let waitingForMemory: () -> Void
 
     init(
         backend: any RunnerBackend,
-        checkCancellation: @escaping () throws -> Void = {}
+        memoryAdmission: RunnerMemoryAdmission,
+        checkCancellation: @escaping () throws -> Void = {},
+        waitingForMemory: @escaping () -> Void = {}
     ) {
         self.backend = backend
+        self.memoryAdmission = memoryAdmission
         self.checkCancellation = checkCancellation
+        self.waitingForMemory = waitingForMemory
     }
 
     func run(id: RunnerID) throws {
+        let reservation = try memoryAdmission.acquire(
+            checkCancellation: checkCancellation,
+            onBlocked: waitingForMemory
+        )
+        var machineMayExist = false
         let operation = Result<Void, any Error> {
             try checkCancellation()
-            try backend.create(id: id, memory: .constrained)
+            machineMayExist = true
+            try backend.create(id: id, memory: reservation.allocation)
             try checkCancellation()
-            _ = try backend.exec(
+            try backend.exec(
                 ["docker", "run", "--rm", "hello-world"],
                 timeout: Self.helloWorldTimeout,
                 on: id
             )
         }
 
-        let cleanup = Result<Void, any Error> {
-            try backend.destroy(id)
+        let cleanup = machineMayExist
+            ? Result<Void, any Error> { try backend.destroy(id) }
+            : .success(())
+        if case .success = cleanup {
+            memoryAdmission.release(reservation)
         }
 
         switch (operation, cleanup) {

@@ -56,14 +56,12 @@ func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
 
 @Test
 func constructsExecCommandWithoutInterpretingArguments() throws {
-    let expected = processResult(stdout: "ok")
-    let executor = RecordingProcessExecutor(outcomes: [.success(expected)])
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "ok"))])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
     let arguments = ["printf", "%s", "value with spaces; $(whoami)"]
 
-    let result = try backend.exec(arguments, on: runnerID)
+    try backend.exec(arguments, on: runnerID)
 
-    #expect(result == expected)
     #expect(executor.requests == [ProcessRequest(
         executableURL: containerURL,
         arguments: [
@@ -102,9 +100,11 @@ func createRetriesDockerReadinessBeforeApplyingMemory() throws {
     let backend = AppleContainerBackend(
         containerURL: containerURL,
         executor: executor,
-        dockerInfoAttempts: 2,
-        retryDelay: 0.25,
-        wait: { waits.append($0) }
+        dockerReadiness: DockerReadiness(
+            attempts: 2,
+            retryDelay: 0.25,
+            wait: { waits.append($0) }
+        )
     )
 
     try backend.create(id: runnerID, memory: .full)
@@ -116,6 +116,34 @@ func createRetriesDockerReadinessBeforeApplyingMemory() throws {
     #expect(executor.requests.last?.arguments.suffix(3) == [
         "yieldd-runner-control", "memory", "full",
     ])
+}
+
+@Test
+func createReportsFinalDockerReadinessFailureWithoutConfiguringMemory() {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .failure(TestFailure.dockerInfo),
+        .failure(TestFailure.cleanup),
+    ])
+    let backend = AppleContainerBackend(
+        containerURL: containerURL,
+        executor: executor,
+        dockerReadiness: DockerReadiness(
+            attempts: 2,
+            retryDelay: 0,
+            wait: { _ in }
+        )
+    )
+
+    #expect(throws: TestFailure.cleanup) {
+        try backend.create(id: runnerID, memory: .full)
+    }
+    #expect(executor.requests.map(\.arguments).filter {
+        $0.suffix(2) == ["docker", "info"]
+    }.count == 2)
+    #expect(!executor.requests.contains {
+        $0.arguments.contains("memory")
+    })
 }
 
 @Test
@@ -135,7 +163,7 @@ func createDoesNotRetryDockerLaunchFailure() {
     let backend = AppleContainerBackend(
         containerURL: containerURL,
         executor: executor,
-        wait: { waits.append($0) }
+        dockerReadiness: DockerReadiness(wait: { waits.append($0) })
     )
 
     do {
@@ -161,13 +189,15 @@ func cancellationDuringDockerReadinessStopsRetries() {
     let backend = AppleContainerBackend(
         containerURL: containerURL,
         executor: executor,
-        wait: { _ in Issue.record("Cancelled readiness must not wait") },
-        checkCancellation: {
-            cancellationChecks += 1
-            if cancellationChecks == 2 {
-                throw SignalInterruption(signal: SIGINT)
+        dockerReadiness: DockerReadiness(
+            wait: { _ in Issue.record("Cancelled readiness must not wait") },
+            checkCancellation: {
+                cancellationChecks += 1
+                if cancellationChecks == 2 {
+                    throw SignalInterruption(signal: SIGINT)
+                }
             }
-        }
+        )
     )
 
     #expect(throws: SignalInterruption(signal: SIGINT)) {
@@ -214,7 +244,7 @@ func passesStandardInputWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.exec(
+    try backend.exec(
         ["yieldd-configure-runner", "owner/repository", runnerID.value],
         standardInput: standardInput,
         on: runnerID
@@ -240,7 +270,7 @@ func passesTimeoutWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.exec(
+    try backend.exec(
         ["/opt/actions-runner/run.sh"],
         timeout: 90,
         on: runnerID
@@ -264,7 +294,7 @@ func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.exec(
+    try backend.exec(
         ["yieldd-runner-control", "run"],
         timeout: nil,
         outputCapture: .tail(maxBytes: 1_024),

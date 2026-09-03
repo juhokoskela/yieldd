@@ -55,13 +55,16 @@ func runRunnerService(
     containerURL: URL,
     ghURL: URL,
     stop: RunnerPoolStop,
-    output: RunnerServiceOutput
+    output: RunnerServiceOutput,
+    memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
 ) throws {
-    let memoryAdmission = RunnerMemoryAdmission()
+    stop.whenRequested(memoryAdmission.wakeWaiters)
     let sessionStateChanged: @Sendable (RunnerSessionState) -> Void = { state in
         switch state {
         case let .preparing(id):
             output.info("Preparing ephemeral runner \(id.value).")
+        case let .waitingForMemory(id):
+            output.info("Runner \(id.value) is waiting for available host memory.")
         case let .waitingForJob(id):
             output.info("Runner \(id.value) is waiting for one job labeled 'yieldd'.")
         case let .waitingForGitHubCleanup(id, retryDelay):
@@ -93,6 +96,8 @@ func runRunnerService(
         }
         return
     }
+
+    try memoryAdmission.validateCapacity()
 
     let slot = repositories.count == 1 ? "slot" : "slots"
     let names = repositories.map(\.fullName).joined(separator: ", ")
@@ -140,8 +145,10 @@ func makeRunnerSession(
         backend: AppleContainerBackend(
             containerURL: containerURL,
             executor: executor,
-            wait: stop.wait,
-            checkCancellation: stop.check
+            dockerReadiness: DockerReadiness(
+                wait: stop.wait,
+                checkCancellation: stop.check
+            )
         ),
         github: GitHubRunnerClient(
             ghURL: ghURL,
