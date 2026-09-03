@@ -70,7 +70,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner
 
 The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
 
-`runner-test` and `serve` cannot run at the same time. They record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next command cleans up those exact runners before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps its lease and the next command waits with exponential backoff until GitHub releases it.
+`runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock and record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next runner command cleans up those exact runners before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps its lease and the next command waits with exponential backoff until GitHub releases it.
 
 ## Foreground runner service
 
@@ -94,12 +94,14 @@ Install one or more runner slots from the repository root:
 Scripts/install-local-agent.sh OWNER/REPOSITORY [OWNER/REPOSITORY ...]
 ```
 
-The script creates an ad-hoc-signed local build at `~/Applications/yieldd.app`, stores the repository slots plus the resolved absolute paths to `container` and `gh`, and registers a per-user LaunchAgent through `SMAppService`. The agent starts Apple Container without interactive kernel installation, recovers abandoned runners, and then serves the configured repositories. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
+The script builds and verifies an ad-hoc-signed application before replacing any existing installation at `~/Applications/yieldd.app`. It waits for the previous agent to stop and recover active runners, installs the new application, stores the repository slots plus the resolved absolute paths to `container` and `gh`, and registers a per-user LaunchAgent through `SMAppService`. The agent starts Apple Container without interactive kernel installation, recovers abandoned runners, and then serves the configured repositories. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
+
+launchd gives the agent 60 seconds to stop. `yieldd` uses a 50-second shutdown budget for its runner processes and cleanup commands so launchd does not kill it halfway through cleanup. Any lease that cannot be cleared within that budget remains available for recovery on the next launch.
 
 Check the registration, configured slots, and active runner leases with:
 
 ```sh
-~/Applications/yieldd.app/Contents/MacOS/yieldd service status
+~/Applications/yieldd.app/Contents/MacOS/yieldd agent status
 ```
 
 If macOS reports that approval is required, enable `yieldd` under System Settings > General > Login Items & Extensions. Agent logs are available through unified logging:
@@ -108,10 +110,10 @@ If macOS reports that approval is required, enable `yieldd` under System Setting
 log stream --style compact --predicate 'subsystem == "dev.yieldd" && category == "agent"'
 ```
 
-To change the repository slots, uninstall and then install the new configuration with the packaged command. To remove the agent configuration and stop launching it at login:
+Rerun `Scripts/install-local-agent.sh` to upgrade the application or change its repository slots. To remove the agent configuration and stop launching it at login:
 
 ```sh
-~/Applications/yieldd.app/Contents/MacOS/yieldd service uninstall
+~/Applications/yieldd.app/Contents/MacOS/yieldd agent uninstall
 ```
 
-The application remains in `~/Applications` after unregistering so an active process can finish stopping safely. Move it to the Trash only after uninstalling it.
+Uninstall waits for the agent to stop, recovers any remaining runner leases, and removes its configuration. After the command returns successfully, the application can be moved to the Trash.
