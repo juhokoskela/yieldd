@@ -68,7 +68,11 @@ final class RunnerPoolStop: @unchecked Sendable {
 
     func request() {
         condition.withLock {
-            if !requested, let shutdownTimeout {
+            guard !requested else {
+                condition.broadcast()
+                return
+            }
+            if let shutdownTimeout {
                 stopDeadline = DispatchTime.now() + .milliseconds(
                     Int((shutdownTimeout * 1_000).rounded(.up))
                 )

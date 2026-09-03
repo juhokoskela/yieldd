@@ -1,4 +1,5 @@
 import ArgumentParser
+import Dispatch
 import Foundation
 import Testing
 @testable import Yieldd
@@ -72,6 +73,38 @@ func poolStopStartsOneShutdownDeadline() throws {
 }
 
 @Test
+func capacityWaitObservesPoolStop() throws {
+    let blocked = DispatchSemaphore(value: 0)
+    let cancelled = DispatchSemaphore(value: 0)
+    let admission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 4,
+        reservationBytes: 3,
+        readMemoryPressure: { .normal }
+    )
+    let reservation = try admission.acquire()
+    let stop = RunnerPoolStop()
+
+    DispatchQueue.global().async {
+        do {
+            _ = try admission.acquire(
+                checkCancellation: stop.check,
+                onBlocked: { blocked.signal() }
+            )
+            Issue.record("Stopped admission must not succeed")
+        } catch is CancellationError {
+            cancelled.signal()
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    #expect(blocked.wait(timeout: .now() + 1) == .success)
+    stop.request()
+    #expect(cancelled.wait(timeout: .now() + 1) == .success)
+    admission.release(reservation)
+}
+
+@Test
 func serviceCommandPreservesRepeatedRepositories() throws {
     let command = try RunnerServiceCommand.parse([
         firstPoolRepository.fullName,
@@ -109,6 +142,37 @@ func serviceCommandAcceptsMaximumRunnerSlots() throws {
     )
 
     _ = try RunnerServiceCommand.parse(arguments)
+}
+
+@Test
+func serviceRejectsImpossibleMemoryBudgetBeforeStartingPool() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yieldd-service-memory-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let memoryAdmission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
+        readMemoryPressure: { .normal }
+    )
+    let output = RunnerServiceOutput(
+        info: { _ in Issue.record("The runner pool must not start") },
+        warning: { _ in },
+        error: { _ in }
+    )
+
+    #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
+        requiredBytes: AppleContainerBackend.memoryBytes,
+        budgetBytes: 6 * 1_024 * 1_024 * 1_024
+    )) {
+        try runRunnerService(
+            repositories: [firstPoolRepository],
+            leaseStore: RunnerLeaseStore(directory: directory),
+            containerURL: URL(fileURLWithPath: "/missing/container"),
+            ghURL: URL(fileURLWithPath: "/missing/gh"),
+            stop: RunnerPoolStop(),
+            output: output,
+            memoryAdmission: memoryAdmission
+        )
+    }
 }
 
 private final class ConcurrentSlotGate: @unchecked Sendable {

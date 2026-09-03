@@ -15,13 +15,3 @@ func decodesDispatchMemoryPressureValues() {
     ) == .critical)
     #expect(HostMemoryPressure(dispatchSourceRawValue: 0) == .unknown)
 }
-
-@Test(arguments: [
-    HostMemoryPressure.warning,
-    HostMemoryPressure.critical,
-    HostMemoryPressure.unknown,
-])
-func onlyNormalPressurePermitsFullRunnerMemory(_ pressure: HostMemoryPressure) {
-    #expect(!pressure.permitsFullRunnerMemory)
-    #expect(HostMemoryPressure.normal.permitsFullRunnerMemory)
-}

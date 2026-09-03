@@ -39,8 +39,4 @@ enum HostMemoryPressure: Equatable, Sendable {
         }
         return HostMemoryPressure(dispatchSourceRawValue: rawValue)
     }
-
-    var permitsFullRunnerMemory: Bool {
-        self == .normal
-    }
 }

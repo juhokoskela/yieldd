@@ -15,7 +15,7 @@ enum RunnerMemoryAllocation: String, Equatable, Sendable {
 }
 
 protocol RunnerBackend {
-    func create(id: RunnerID, image: String) throws
+    func create(id: RunnerID, memory: RunnerMemoryAllocation) throws
     func exec(
         _ arguments: [String],
         standardInput: Data?,
@@ -23,7 +23,7 @@ protocol RunnerBackend {
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws -> ProcessResult
+    ) throws
     func stopRunner(on id: RunnerID) throws
     func destroy(_ id: RunnerID) throws
 }
@@ -34,7 +34,7 @@ extension RunnerBackend {
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
         on id: RunnerID
-    ) throws -> ProcessResult {
+    ) throws {
         try exec(
             arguments,
             standardInput: standardInput,
@@ -51,29 +51,13 @@ extension RunnerBackend {
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws -> ProcessResult {
+    ) throws {
         try exec(
             arguments,
             standardInput: nil,
             timeout: timeout,
             outputCapture: outputCapture,
             as: user,
-            on: id
-        )
-    }
-
-    @discardableResult
-    func setMemoryAllocation(
-        _ allocation: RunnerMemoryAllocation,
-        timeout: TimeInterval,
-        on id: RunnerID
-    ) throws -> ProcessResult {
-        try exec(
-            ["yieldd-runner-control", "memory", allocation.rawValue],
-            standardInput: nil,
-            timeout: timeout,
-            outputCapture: .all,
-            as: .root,
             on: id
         )
     }

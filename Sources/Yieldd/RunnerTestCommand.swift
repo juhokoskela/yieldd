@@ -37,7 +37,11 @@ struct RunnerTestCommand: ParsableCommand {
         let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
         let backend = AppleContainerBackend(
             containerURL: try locator.locate("container"),
-            executor: executor
+            executor: executor,
+            dockerReadiness: DockerReadiness(
+                wait: signalMonitor.wait,
+                checkCancellation: signalMonitor.check
+            )
         )
         let github = GitHubRunnerClient(
             ghURL: try locator.locate("gh"),
@@ -46,11 +50,14 @@ struct RunnerTestCommand: ParsableCommand {
         let session = EphemeralRunnerSession(
             backend: backend,
             github: github,
+            memoryAdmission: RunnerMemoryAdmission(),
             jobTimeout: TimeInterval(timeout) * 60,
             checkCancellation: signalMonitor.check,
             recoveryWait: signalMonitor.wait,
             stateChanged: { state in
                 switch state {
+                case let .waitingForMemory(id):
+                    print("Runner \(id.value) is waiting for available host memory.")
                 case let .waitingForGitHubCleanup(id, retryDelay):
                     print(githubCleanupRetryMessage(id: id, delay: retryDelay))
                 case let .leaseCleanupFailed(id, reason):

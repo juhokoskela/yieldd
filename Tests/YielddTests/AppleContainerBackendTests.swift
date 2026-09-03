@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import Yieldd
@@ -6,36 +7,61 @@ private let containerURL = URL(fileURLWithPath: "/usr/local/bin/container")
 private let runnerID = RunnerID(value: "yieldd-test-123")
 
 @Test
-func constructsCreateCommand() throws {
-    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
+    let executor = RecordingProcessExecutor(outcomes: Array(
+        repeating: .success(processResult()),
+        count: 3
+    ))
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    try backend.create(id: runnerID, image: "local/yieldd-guest:dev")
+    try backend.create(id: runnerID, memory: .full)
 
-    #expect(executor.requests == [ProcessRequest(
-        executableURL: containerURL,
-        arguments: [
-            "machine", "create",
-            "--name", runnerID.value,
-            "--home-mount", "none",
-            "--cpus", "4",
-            "--memory", "12G",
-            "local/yieldd-guest:dev",
-        ],
-        timeout: AppleContainerBackend.creationTimeout
-    )])
+    #expect(executor.requests == [
+        ProcessRequest(
+            executableURL: containerURL,
+            arguments: [
+                "machine", "create",
+                "--name", runnerID.value,
+                "--home-mount", "none",
+                "--cpus", "4",
+                "--memory", "12G",
+                "local/yieldd-guest:dev",
+            ],
+            timeout: AppleContainerBackend.creationTimeout
+        ),
+        ProcessRequest(
+            executableURL: containerURL,
+            arguments: [
+                "machine", "run",
+                "--name", runnerID.value,
+                "--user", "runner",
+                "--",
+                "docker", "info",
+            ],
+            timeout: DockerReadiness.probeTimeout
+        ),
+        ProcessRequest(
+            executableURL: containerURL,
+            arguments: [
+                "machine", "run",
+                "--name", runnerID.value,
+                "--user", "root",
+                "--",
+                "yieldd-runner-control", "memory", "full",
+            ],
+            timeout: AppleContainerBackend.memoryConfigurationTimeout
+        ),
+    ])
 }
 
 @Test
 func constructsExecCommandWithoutInterpretingArguments() throws {
-    let expected = processResult(stdout: "ok")
-    let executor = RecordingProcessExecutor(outcomes: [.success(expected)])
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "ok"))])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
     let arguments = ["printf", "%s", "value with spaces; $(whoami)"]
 
-    let result = try backend.exec(arguments, on: runnerID)
+    try backend.exec(arguments, on: runnerID)
 
-    #expect(result == expected)
     #expect(executor.requests == [ProcessRequest(
         executableURL: containerURL,
         arguments: [
@@ -48,27 +74,136 @@ func constructsExecCommandWithoutInterpretingArguments() throws {
 }
 
 @Test
-func constructsRootCommandForMemoryAllocation() throws {
-    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+func createAppliesConstrainedMemoryAllocation() throws {
+    let executor = RecordingProcessExecutor(outcomes: Array(
+        repeating: .success(processResult()),
+        count: 3
+    ))
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.setMemoryAllocation(
-        .constrained,
-        timeout: EphemeralRunnerSession.memoryConfigurationTimeout,
-        on: runnerID
+    try backend.create(id: runnerID, memory: .constrained)
+
+    #expect(executor.requests.last?.arguments.suffix(3) == [
+        "yieldd-runner-control", "memory", "constrained",
+    ])
+}
+
+@Test
+func createRetriesDockerReadinessBeforeApplyingMemory() throws {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .failure(TestFailure.dockerInfo),
+        .success(processResult()),
+        .success(processResult()),
+    ])
+    var waits: [TimeInterval] = []
+    let backend = AppleContainerBackend(
+        containerURL: containerURL,
+        executor: executor,
+        dockerReadiness: DockerReadiness(
+            attempts: 2,
+            retryDelay: 0.25,
+            wait: { waits.append($0) }
+        )
     )
 
-    #expect(executor.requests == [ProcessRequest(
+    try backend.create(id: runnerID, memory: .full)
+
+    #expect(waits == [0.25])
+    #expect(executor.requests.map(\.arguments).filter {
+        $0.suffix(2) == ["docker", "info"]
+    }.count == 2)
+    #expect(executor.requests.last?.arguments.suffix(3) == [
+        "yieldd-runner-control", "memory", "full",
+    ])
+}
+
+@Test
+func createReportsFinalDockerReadinessFailureWithoutConfiguringMemory() {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .failure(TestFailure.dockerInfo),
+        .failure(TestFailure.cleanup),
+    ])
+    let backend = AppleContainerBackend(
+        containerURL: containerURL,
+        executor: executor,
+        dockerReadiness: DockerReadiness(
+            attempts: 2,
+            retryDelay: 0,
+            wait: { _ in }
+        )
+    )
+
+    #expect(throws: TestFailure.cleanup) {
+        try backend.create(id: runnerID, memory: .full)
+    }
+    #expect(executor.requests.map(\.arguments).filter {
+        $0.suffix(2) == ["docker", "info"]
+    }.count == 2)
+    #expect(!executor.requests.contains {
+        $0.arguments.contains("memory")
+    })
+}
+
+@Test
+func createDoesNotRetryDockerLaunchFailure() {
+    let request = ProcessRequest(
         executableURL: containerURL,
-        arguments: [
-            "machine", "run",
-            "--name", runnerID.value,
-            "--user", "root",
-            "--",
-            "yieldd-runner-control", "memory", "constrained",
-        ],
-        timeout: EphemeralRunnerSession.memoryConfigurationTimeout
-    )])
+        arguments: ["machine", "run"]
+    )
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .failure(ProcessExecutionError.launchFailed(
+            request: request,
+            underlying: TestFailure.dockerInfo
+        )),
+    ])
+    var waits: [TimeInterval] = []
+    let backend = AppleContainerBackend(
+        containerURL: containerURL,
+        executor: executor,
+        dockerReadiness: DockerReadiness(wait: { waits.append($0) })
+    )
+
+    do {
+        try backend.create(id: runnerID, memory: .full)
+        Issue.record("Expected process launch to fail")
+    } catch let ProcessExecutionError.launchFailed(actualRequest, _) {
+        #expect(actualRequest == request)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    #expect(waits.isEmpty)
+    #expect(executor.requests.count == 2)
+}
+
+@Test
+func cancellationDuringDockerReadinessStopsRetries() {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .failure(TestFailure.dockerInfo),
+    ])
+    var cancellationChecks = 0
+    let backend = AppleContainerBackend(
+        containerURL: containerURL,
+        executor: executor,
+        dockerReadiness: DockerReadiness(
+            wait: { _ in Issue.record("Cancelled readiness must not wait") },
+            checkCancellation: {
+                cancellationChecks += 1
+                if cancellationChecks == 2 {
+                    throw SignalInterruption(signal: SIGINT)
+                }
+            }
+        )
+    )
+
+    #expect(throws: SignalInterruption(signal: SIGINT)) {
+        try backend.create(id: runnerID, memory: .full)
+    }
+    #expect(executor.requests.count == 2)
 }
 
 @Test
@@ -109,7 +244,7 @@ func passesStandardInputWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.exec(
+    try backend.exec(
         ["yieldd-configure-runner", "owner/repository", runnerID.value],
         standardInput: standardInput,
         on: runnerID
@@ -135,7 +270,7 @@ func passesTimeoutWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.exec(
+    try backend.exec(
         ["/opt/actions-runner/run.sh"],
         timeout: 90,
         on: runnerID
@@ -159,7 +294,7 @@ func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
-    _ = try backend.exec(
+    try backend.exec(
         ["yieldd-runner-control", "run"],
         timeout: nil,
         outputCapture: .tail(maxBytes: 1_024),
@@ -269,7 +404,7 @@ func backendPreservesProcessFailureResult() {
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
 
     do {
-        try backend.create(id: runnerID, image: "local/yieldd-guest:dev")
+        try backend.create(id: runnerID, memory: .full)
         Issue.record("Expected create to fail")
     } catch let ProcessExecutionError.nonZeroExit(request, result) {
         #expect(request == executor.requests[0])

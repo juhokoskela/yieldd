@@ -55,12 +55,15 @@ func runRunnerService(
     containerURL: URL,
     ghURL: URL,
     stop: RunnerPoolStop,
-    output: RunnerServiceOutput
+    output: RunnerServiceOutput,
+    memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
 ) throws {
     let sessionStateChanged: @Sendable (RunnerSessionState) -> Void = { state in
         switch state {
         case let .preparing(id):
             output.info("Preparing ephemeral runner \(id.value).")
+        case let .waitingForMemory(id):
+            output.info("Runner \(id.value) is waiting for available host memory.")
         case let .waitingForJob(id):
             output.info("Runner \(id.value) is waiting for one job labeled 'yieldd'.")
         case let .waitingForGitHubCleanup(id, retryDelay):
@@ -77,6 +80,7 @@ func runRunnerService(
             containerURL: containerURL,
             ghURL: ghURL,
             stop: stop,
+            memoryAdmission: memoryAdmission,
             stateChanged: sessionStateChanged
         )
     }
@@ -91,6 +95,8 @@ func runRunnerService(
         }
         return
     }
+
+    try memoryAdmission.validateCapacity()
 
     let slot = repositories.count == 1 ? "slot" : "slots"
     let names = repositories.map(\.fullName).joined(separator: ", ")
@@ -127,6 +133,7 @@ func makeRunnerSession(
     containerURL: URL,
     ghURL: URL,
     stop: RunnerPoolStop,
+    memoryAdmission: RunnerMemoryAdmission,
     stateChanged: @escaping (RunnerSessionState) -> Void
 ) -> EphemeralRunnerSession {
     let executor = ProcessExecutor(
@@ -136,12 +143,17 @@ func makeRunnerSession(
     return EphemeralRunnerSession(
         backend: AppleContainerBackend(
             containerURL: containerURL,
-            executor: executor
+            executor: executor,
+            dockerReadiness: DockerReadiness(
+                wait: stop.wait,
+                checkCancellation: stop.check
+            )
         ),
         github: GitHubRunnerClient(
             ghURL: ghURL,
             executor: executor
         ),
+        memoryAdmission: memoryAdmission,
         checkCancellation: stop.check,
         recoveryWait: stop.wait,
         stateChanged: stateChanged,
