@@ -6,6 +6,9 @@ struct AppleContainerBackend: RunnerBackend {
     static let cleanupTimeout: TimeInterval = 90
     static let runnerStopTimeout: TimeInterval = 30
     static let virtualCPUs = 4
+    static let memoryGibibytes: UInt64 = 12
+    static let memoryBytes = memoryGibibytes * 1_024 * 1_024 * 1_024
+    static let memoryArgument = "\(memoryGibibytes)G"
     static let image = "local/yieldd-guest:dev"
 
     let containerURL: URL
@@ -28,7 +31,7 @@ struct AppleContainerBackend: RunnerBackend {
             "--name", id.value,
             "--home-mount", "none",
             "--cpus", String(Self.virtualCPUs),
-            "--memory", RunnerMemoryAdmission.machineMemoryArgument,
+            "--memory", Self.memoryArgument,
             Self.image,
         ], timeout: Self.creationTimeout)
         try dockerReadiness.wait {

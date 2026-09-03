@@ -45,21 +45,22 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         stateChanged(.preparing(id))
         try checkCancellation()
 
-        var lifecycle: RunnerLifecycle?
+        var reservation: RunnerMemoryReservation?
+        var lifecycle: RunnerCleanupLifecycle?
         var operationFailure: (any Error)?
         do {
-            let reservation = try memoryAdmission.acquire(
+            let acquiredReservation = try memoryAdmission.acquire(
                 checkCancellation: checkCancellation,
                 onBlocked: { stateChanged(.waitingForMemory(id)) }
             )
-            lifecycle = .beforeMachine(reservation)
+            reservation = acquiredReservation
             let registrationToken = try github.createRegistrationToken(for: repository)
             try checkCancellation()
             try leaseStore?.save(RunnerLease(runnerID: id, repository: repository))
-            lifecycle = .machineMayExist(reservation)
-            try backend.create(id: id, memory: reservation.allocation)
+            lifecycle = .machineMayExist
+            try backend.create(id: id, memory: acquiredReservation.allocation)
             try checkCancellation()
-            lifecycle = .runnerRegistrationMayExist(reservation)
+            lifecycle = .runnerRegistrationMayExist
             try backend.exec(
                 ["yieldd-configure-runner", repository.fullName, id.value],
                 standardInput: Data("\(registrationToken)\n".utf8),
@@ -68,7 +69,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             )
             try checkCancellation()
             stateChanged(.waitingForJob(id))
-            lifecycle = .runnerMayBeRunning(reservation)
+            lifecycle = .runnerMayBeRunning
             try backend.exec(
                 ["yieldd-runner-control", "run"],
                 timeout: jobTimeout,
@@ -76,23 +77,23 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
                 as: .root,
                 on: id
             )
-            lifecycle = .runnerRegistrationMayExist(reservation)
+            lifecycle = .runnerRegistrationMayExist
         } catch {
             operationFailure = error
         }
 
-        stateChanged(.cleaningUp(id))
         var cleanupFailures: [RunnerSessionCleanupFailure] = []
-        if let cleanupLifecycle = lifecycle?.cleanupLifecycle {
+        if let lifecycle {
+            stateChanged(.cleaningUp(id))
             cleanupFailures = cleanup(
-                lifecycle: cleanupLifecycle,
+                lifecycle: lifecycle,
                 id: id,
                 repository: repository
             )
         }
-        if let lifecycle,
+        if let reservation,
            !cleanupFailures.contains(where: { $0.step == .machine }) {
-            memoryAdmission.release(lifecycle.reservation)
+            memoryAdmission.release(reservation)
         }
         if operationFailure == nil, isDeferredGitHubCleanup(cleanupFailures) {
             cleanupFailures = try retryDeferredGitHubCleanup(
@@ -102,7 +103,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             )
         }
 
-        if lifecycle?.leaseExists == true, cleanupFailures.isEmpty {
+        if lifecycle != nil, cleanupFailures.isEmpty {
             clearLeaseAfterCleanup(id: id)
         }
         if leaseStore != nil, isDeferredGitHubCleanup(cleanupFailures) {
@@ -141,7 +142,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
 
         for lease in leases {
             let failures = cleanup(
-                lifecycle: RunnerCleanupLifecycle.runnerMayBeRunning,
+                lifecycle: .runnerMayBeRunning,
                 id: lease.runnerID,
                 repository: lease.repository
             )
@@ -263,40 +264,6 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             return false
         }
         return true
-    }
-}
-
-private enum RunnerLifecycle {
-    case beforeMachine(RunnerMemoryReservation)
-    case machineMayExist(RunnerMemoryReservation)
-    case runnerRegistrationMayExist(RunnerMemoryReservation)
-    case runnerMayBeRunning(RunnerMemoryReservation)
-
-    var reservation: RunnerMemoryReservation {
-        switch self {
-        case let .beforeMachine(reservation),
-             let .machineMayExist(reservation),
-             let .runnerRegistrationMayExist(reservation),
-             let .runnerMayBeRunning(reservation):
-            reservation
-        }
-    }
-
-    var cleanupLifecycle: RunnerCleanupLifecycle? {
-        switch self {
-        case .beforeMachine:
-            nil
-        case .machineMayExist:
-            .machineMayExist
-        case .runnerRegistrationMayExist:
-            .runnerRegistrationMayExist
-        case .runnerMayBeRunning:
-            .runnerMayBeRunning
-        }
-    }
-
-    var leaseExists: Bool {
-        cleanupLifecycle != nil
     }
 }
 

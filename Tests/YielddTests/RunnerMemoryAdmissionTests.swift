@@ -30,24 +30,21 @@ func uncertainPressureUsesConstrainedMemory(_ pressure: HostMemoryPressure) thro
 }
 
 @Test
-func concurrentAdmissionWaitsForReleaseWithoutPolling() throws {
+func concurrentAdmissionWaitsForRelease() throws {
     let blocked = DispatchSemaphore(value: 0)
     let finished = DispatchSemaphore(value: 0)
     let result = MemoryReservationResult()
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 4,
         reservationBytes: 3,
-        readMemoryPressure: { .normal },
-        wait: { condition, reason in
-            #expect(reason == .capacity)
-            blocked.signal()
-            condition.wait()
-        }
+        readMemoryPressure: { .normal }
     )
     let first = try admission.acquire()
 
     DispatchQueue.global().async {
-        result.store(Result { try admission.acquire() })
+        result.store(Result {
+            try admission.acquire(onBlocked: { blocked.signal() })
+        })
         finished.signal()
     }
 
@@ -60,58 +57,54 @@ func concurrentAdmissionWaitsForReleaseWithoutPolling() throws {
 @Test
 func criticalPressureRetriesUntilItReturnsToNormal() throws {
     let pressure = LockedMemoryPressure(.critical)
-    var waits: [RunnerMemoryWaitReason] = []
+    let blocked = DispatchSemaphore(value: 0)
+    let finished = DispatchSemaphore(value: 0)
+    let result = MemoryReservationResult()
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 4,
         reservationBytes: 3,
-        readMemoryPressure: pressure.read,
-        wait: { _, reason in
-            waits.append(reason)
-            pressure.set(.normal)
-        }
+        readMemoryPressure: pressure.read
     )
 
-    let reservation = try admission.acquire()
+    DispatchQueue.global().async {
+        result.store(Result {
+            try admission.acquire(onBlocked: { blocked.signal() })
+        })
+        finished.signal()
+    }
 
+    #expect(blocked.wait(timeout: .now() + 1) == .success)
+    pressure.set(.normal)
+    #expect(finished.wait(timeout: .now() + 1) == .success)
+    let reservation = try result.value.get()
     #expect(reservation.allocation == .full)
-    #expect(waits == [.pressure])
 }
 
 @Test
 func blockedNotificationIsEmittedOnlyOnce() throws {
     let pressure = LockedMemoryPressure(.critical)
-    var waits = 0
     var notifications = 0
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 4,
         reservationBytes: 3,
-        readMemoryPressure: pressure.read,
-        wait: { _, reason in
-            #expect(reason == .pressure)
-            waits += 1
-            if waits == 2 {
-                pressure.set(.normal)
-            }
-        }
+        readMemoryPressure: pressure.read
     )
 
-    _ = try admission.acquire(onBlocked: { notifications += 1 })
+    _ = try admission.acquire(onBlocked: {
+        notifications += 1
+        pressure.set(.normal)
+    })
 
-    #expect(waits == 2)
     #expect(notifications == 1)
 }
 
 @Test
-func criticalPressureWaitCanBeCancelledDeterministically() {
+func criticalPressureWaitCanBeCancelled() {
     let cancelled = LockedBoolean()
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 4,
         reservationBytes: 3,
-        readMemoryPressure: { .critical },
-        wait: { _, reason in
-            #expect(reason == .pressure)
-            cancelled.set()
-        }
+        readMemoryPressure: { .critical }
     )
 
     #expect(throws: CancellationError.self) {
@@ -119,7 +112,7 @@ func criticalPressureWaitCanBeCancelledDeterministically() {
             if cancelled.value {
                 throw CancellationError()
             }
-        })
+        }, onBlocked: cancelled.set)
     }
 }
 

@@ -412,11 +412,7 @@ func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
     let memoryAdmission = RunnerMemoryAdmission(
         physicalMemoryBytes: runnerTestMemoryBytes * 4 / 3 + 1,
         reservationBytes: runnerTestMemoryBytes,
-        readMemoryPressure: { .normal },
-        wait: { _, reason in
-            #expect(reason == .capacity)
-            waitedForCapacity = true
-        }
+        readMemoryPressure: { .normal }
     )
     let session = EphemeralRunnerSession(
         backend: RunnerTestBackend(
@@ -442,7 +438,7 @@ func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
             if waitedForCapacity {
                 throw CancellationError()
             }
-        })
+        }, onBlocked: { waitedForCapacity = true })
     }
 }
 
@@ -739,11 +735,7 @@ func cancellationWhileWaitingForMemorySkipsMachineCleanupAndLeasePersistence() t
     let memoryAdmission = RunnerMemoryAdmission(
         physicalMemoryBytes: 4,
         reservationBytes: 3,
-        readMemoryPressure: { .critical },
-        wait: { _, reason in
-            #expect(reason == .pressure)
-            blocked = true
-        }
+        readMemoryPressure: { .critical }
     )
 
     #expect(throws: CancellationError.self) {
@@ -756,7 +748,12 @@ func cancellationWhileWaitingForMemorySkipsMachineCleanupAndLeasePersistence() t
                     throw CancellationError()
                 }
             },
-            stateChanged: { states.append($0) },
+            stateChanged: { state in
+                states.append(state)
+                if case .waitingForMemory = state {
+                    blocked = true
+                }
+            },
             leaseStore: leaseStore
         ).run(id: runnerTestID, repository: runnerTestRepository)
     }
@@ -765,7 +762,6 @@ func cancellationWhileWaitingForMemorySkipsMachineCleanupAndLeasePersistence() t
     #expect(states == [
         .preparing(runnerTestID),
         .waitingForMemory(runnerTestID),
-        .cleaningUp(runnerTestID),
     ])
     #expect(try leaseStore.load().isEmpty)
 }

@@ -73,26 +73,23 @@ func poolStopStartsOneShutdownDeadline() throws {
 }
 
 @Test
-func poolStopWakesCapacityBlockedMemoryAdmission() throws {
+func capacityWaitObservesPoolStop() throws {
     let blocked = DispatchSemaphore(value: 0)
     let cancelled = DispatchSemaphore(value: 0)
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 4,
         reservationBytes: 3,
-        readMemoryPressure: { .normal },
-        wait: { condition, reason in
-            #expect(reason == .capacity)
-            blocked.signal()
-            condition.wait()
-        }
+        readMemoryPressure: { .normal }
     )
     let reservation = try admission.acquire()
     let stop = RunnerPoolStop()
-    stop.whenRequested(admission.wakeWaiters)
 
     DispatchQueue.global().async {
         do {
-            _ = try admission.acquire(checkCancellation: stop.check)
+            _ = try admission.acquire(
+                checkCancellation: stop.check,
+                onBlocked: { blocked.signal() }
+            )
             Issue.record("Stopped admission must not succeed")
         } catch is CancellationError {
             cancelled.signal()
@@ -163,7 +160,7 @@ func serviceRejectsImpossibleMemoryBudgetBeforeStartingPool() throws {
     )
 
     #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
-        requiredBytes: RunnerMemoryAdmission.slotBytes,
+        requiredBytes: AppleContainerBackend.memoryBytes,
         budgetBytes: 6 * 1_024 * 1_024 * 1_024
     )) {
         try runRunnerService(

@@ -48,7 +48,6 @@ final class RunnerPoolStop: @unchecked Sendable {
     private var requested = false
     private var stopDeadline: DispatchTime?
     private var signalMonitor: SignalMonitor?
-    private var requestHandlers: [@Sendable () -> Void] = []
 
     init(shutdownTimeout: TimeInterval? = nil) {
         if let shutdownTimeout {
@@ -68,10 +67,10 @@ final class RunnerPoolStop: @unchecked Sendable {
     }
 
     func request() {
-        let handlers = condition.withLock {
+        condition.withLock {
             guard !requested else {
                 condition.broadcast()
-                return [@Sendable () -> Void]()
+                return
             }
             if let shutdownTimeout {
                 stopDeadline = DispatchTime.now() + .milliseconds(
@@ -80,23 +79,6 @@ final class RunnerPoolStop: @unchecked Sendable {
             }
             requested = true
             condition.broadcast()
-            let handlers = requestHandlers
-            requestHandlers.removeAll()
-            return handlers
-        }
-        handlers.forEach { $0() }
-    }
-
-    func whenRequested(_ operation: @escaping @Sendable () -> Void) {
-        let callImmediately = condition.withLock {
-            if requested {
-                return true
-            }
-            requestHandlers.append(operation)
-            return false
-        }
-        if callImmediately {
-            operation()
         }
     }
 

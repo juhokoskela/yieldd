@@ -58,7 +58,6 @@ func runRunnerService(
     output: RunnerServiceOutput,
     memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
 ) throws {
-    stop.whenRequested(memoryAdmission.wakeWaiters)
     let sessionStateChanged: @Sendable (RunnerSessionState) -> Void = { state in
         switch state {
         case let .preparing(id):
