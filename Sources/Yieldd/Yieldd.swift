@@ -10,6 +10,8 @@ struct Yieldd: ParsableCommand {
             MachineTestCommand.self,
             RunnerTestCommand.self,
             RunnerServiceCommand.self,
+            AgentCommand.self,
+            AgentServiceCommand.self,
         ]
     )
 }
