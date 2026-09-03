@@ -144,12 +144,7 @@ func withRunnerOwnership(
     in directory: URL? = nil,
     operation: (RunnerLeaseStore) throws -> Void
 ) throws {
-    let stateDirectory = try directory ?? FileManager.default.url(
-        for: .applicationSupportDirectory,
-        in: .userDomainMask,
-        appropriateFor: nil,
-        create: true
-    ).appendingPathComponent("yieldd", isDirectory: true)
+    let stateDirectory = try directory ?? yielddApplicationSupportDirectory()
 
     let store = try RunnerLeaseStore(directory: stateDirectory)
     let lockURL = stateDirectory.appendingPathComponent("runner.lock", isDirectory: false)
@@ -170,6 +165,15 @@ func withRunnerOwnership(
     defer { _ = Darwin.close(descriptor) }
 
     try operation(store)
+}
+
+func yielddApplicationSupportDirectory() throws -> URL {
+    try FileManager.default.url(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask,
+        appropriateFor: nil,
+        create: true
+    ).appendingPathComponent("yieldd", isDirectory: true)
 }
 
 enum RunnerLeaseError: Error, Equatable, LocalizedError {
