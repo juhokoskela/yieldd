@@ -24,5 +24,10 @@ codesign --force --sign - --identifier dev.yieldd \
     --entitlements "$entitlements" \
     "$application"
 codesign --verify --strict "$application"
+virtualization_entitlement=$(
+    codesign --display --entitlements - --xml "$application" 2>/dev/null |
+        plutil -extract 'com\.apple\.security\.virtualization' raw -
+)
+[ "$virtualization_entitlement" = true ]
 
 echo "Built $application"

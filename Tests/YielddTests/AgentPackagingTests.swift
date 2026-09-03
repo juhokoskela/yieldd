@@ -20,7 +20,7 @@ func localAgentPlistRunsTheMainExecutableWithBoundedShutdown() throws {
 }
 
 @Test
-func localAgentBuildEnablesVirtualization() throws {
+func localAgentEntitlementsEnableVirtualization() throws {
     let entitlementsURL = repositoryRoot
         .appendingPathComponent("Packaging/yieldd.entitlements", isDirectory: false)
     let data = try Data(contentsOf: entitlementsURL)
@@ -29,11 +29,6 @@ func localAgentBuildEnablesVirtualization() throws {
             as? [String: Any]
     )
     #expect(entitlements["com.apple.security.virtualization"] as? Bool == true)
-
-    let buildScriptURL = repositoryRoot
-        .appendingPathComponent("Scripts/build-local-app.sh", isDirectory: false)
-    let buildScript = try String(contentsOf: buildScriptURL, encoding: .utf8)
-    #expect(buildScript.contains("--entitlements \"$entitlements\""))
 }
 
 private let repositoryRoot = URL(fileURLWithPath: #filePath)
