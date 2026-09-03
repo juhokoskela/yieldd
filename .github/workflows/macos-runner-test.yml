@@ -1,0 +1,24 @@
+name: macOS runner test
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  macos:
+    runs-on: yieldd-macos
+    timeout-minutes: 10
+    steps:
+      - name: Check macOS and Xcode
+        run: |
+          sw_vers
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          swift --version
+
+      - name: Check GUI session
+        run: |
+          test "$(stat -f %Su /dev/console)" = "$(id -un)"
+          launchctl print "gui/$(id -u)" >/dev/null
+          xcrun simctl list runtimes
