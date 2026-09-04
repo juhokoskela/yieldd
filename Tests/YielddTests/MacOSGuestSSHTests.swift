@@ -298,10 +298,10 @@ func guestConnectionCancellationStopsDHCPPolling() throws {
     #expect(clock.waits == [0.5])
 }
 
-@Test
-func macOSGuestReadyScriptIsExecutableAndParsesAsBash() throws {
+@Test(arguments: ["configure-runner", "runner-control"])
+func macOSGuestScriptsAreExecutableAndParseAsBash(filename: String) throws {
     let scriptURL = repositoryRoot
-        .appendingPathComponent("Guest/macOS/runner-control", isDirectory: false)
+        .appendingPathComponent("Guest/macOS/\(filename)", isDirectory: false)
     let attributes = try FileManager.default.attributesOfItem(atPath: scriptURL.path)
     #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o755)
 
@@ -309,7 +309,7 @@ func macOSGuestReadyScriptIsExecutableAndParsesAsBash() throws {
         executableURL: URL(fileURLWithPath: "/bin/bash"),
         arguments: ["-n", scriptURL.path]
     )
-    _ = try ProcessExecutor().execute(request).requireSuccess(for: request)
+    try ProcessExecutor().execute(request).requireSuccess(for: request)
 }
 
 private func sshFailure(status: Int32 = 255) -> ProcessExecutionError {
