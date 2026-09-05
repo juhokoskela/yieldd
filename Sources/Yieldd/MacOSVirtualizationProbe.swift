@@ -403,11 +403,12 @@ struct MacOSVirtualizationProbe {
         templateURL: URL,
         cloneRootURL: URL,
         memory allocation: RunnerMemoryAllocation = .full,
+        hold: Bool = false,
         bootTimeout: TimeInterval = Self.bootTimeout,
         stopTimeout: TimeInterval = Self.stopTimeout,
         checkCancellation: () throws -> Void = {},
         wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
-        waitUntilGuestReady: (String) throws -> Void = { _ in },
+        waitUntilGuestReady: (String, TimeInterval) throws -> Void = { _, _ in },
         started: () -> Void = {}
     ) throws {
         try requireEntitlement()
@@ -432,17 +433,18 @@ struct MacOSVirtualizationProbe {
                 checkCancellation: checkCancellation
             )
             started()
-            try waitUntilGuestReady(clone.macAddress)
-            try wait(Self.runDuration)
-            try checkCancellation()
-            switch createdMachine.state {
-            case .running:
-                break
-            case .failed(let error):
-                throw MacOSVirtualizationProbeError.virtualMachineFailed(error)
-            case .stopped, .stoppable, .transitioning:
-                throw MacOSVirtualizationProbeError.stoppedUnexpectedly
-            }
+            try waitUntilGuestIsReady(
+                machine: createdMachine,
+                macAddress: clone.macAddress,
+                hold: hold,
+                checkCancellation: checkCancellation,
+                attempt: waitUntilGuestReady
+            )
+            repeat {
+                try wait(Self.runDuration)
+                try checkCancellation()
+                try requireRunning(createdMachine)
+            } while hold
         }
         let stopResult = Result<Void, any Error> {
             if let machine {
@@ -476,6 +478,42 @@ struct MacOSVirtualizationProbe {
                 operation: operationError,
                 cleanup: cleanupError
             )
+        }
+    }
+
+    private func waitUntilGuestIsReady(
+        machine: any MacOSVirtualMachineControlling,
+        macAddress: String,
+        hold: Bool,
+        checkCancellation: () throws -> Void,
+        attempt: (String, TimeInterval) throws -> Void
+    ) throws {
+        while true {
+            try checkCancellation()
+            try requireRunning(machine)
+            do {
+                try attempt(
+                    macAddress,
+                    hold ? Self.runDuration : MacOSGuestConnection.readinessTimeout
+                )
+                return
+            } catch is MacOSGuestConnectionError where hold {
+                try checkCancellation()
+                try requireRunning(machine)
+            }
+        }
+    }
+
+    private func requireRunning(
+        _ machine: any MacOSVirtualMachineControlling
+    ) throws {
+        switch machine.state {
+        case .running:
+            break
+        case .failed(let error):
+            throw MacOSVirtualizationProbeError.virtualMachineFailed(error)
+        case .stopped, .stoppable, .transitioning:
+            throw MacOSVirtualizationProbeError.stoppedUnexpectedly
         }
     }
 

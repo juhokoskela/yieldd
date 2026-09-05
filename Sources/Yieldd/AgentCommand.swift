@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import OSLog
 
@@ -25,6 +26,9 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
         shouldDisplay: false
     )
 
+    @Flag(name: .long, help: .hidden)
+    var hold = false
+
     @Argument(help: "macOS VM template bundle. The probe boots a disposable copy-on-write clone.")
     var bundlePath: String
 
@@ -39,7 +43,9 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
     mutating func run() throws {
         try withRunnerOwnership { leaseStore in
-            let signalMonitor = try SignalMonitor()
+            let signalMonitor = try SignalMonitor(
+                signals: [SIGINT, SIGTERM, SIGHUP]
+            )
             let memoryAdmission = RunnerMemoryAdmission(
                 reservationBytes: MacOSVirtualizationProbe.memoryBytes
             )
@@ -62,18 +68,24 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
                 cloneRootURL: leaseStore.directory
                     .appendingPathComponent("macos-probes", isDirectory: true),
                 memory: reservation.allocation,
+                hold: hold,
                 checkCancellation: signalMonitor.check,
                 wait: signalMonitor.wait,
-                waitUntilGuestReady: { macAddress in
+                waitUntilGuestReady: { macAddress, timeout in
                     let address = try guestConnection.waitUntilReady(
                         macAddress: macAddress,
+                        timeout: timeout,
                         checkCancellation: signalMonitor.check,
                         wait: signalMonitor.wait
                     )
                     print("macOS guest \(address) is ready over SSH.")
                 },
                 started: {
-                    print("macOS virtual machine started without a window.")
+                    if hold {
+                        print("macOS virtual machine started without a window. Press Ctrl+C to stop it.")
+                    } else {
+                        print("macOS virtual machine started without a window.")
+                    }
                 }
             )
             print("macOS virtualization probe passed and the VM was force-stopped.")
