@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import OSLog
 
@@ -42,7 +43,9 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
     mutating func run() throws {
         try withRunnerOwnership { leaseStore in
-            let signalMonitor = try SignalMonitor()
+            let signalMonitor = try SignalMonitor(
+                signals: [SIGINT, SIGTERM, SIGHUP]
+            )
             let memoryAdmission = RunnerMemoryAdmission(
                 reservationBytes: MacOSVirtualizationProbe.memoryBytes
             )
@@ -65,26 +68,17 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
                 cloneRootURL: leaseStore.directory
                     .appendingPathComponent("macos-probes", isDirectory: true),
                 memory: reservation.allocation,
+                hold: hold,
                 checkCancellation: signalMonitor.check,
-                wait: { interval in
-                    repeat {
-                        try signalMonitor.wait(for: interval)
-                    } while hold
-                },
-                waitUntilGuestReady: { macAddress in
-                    while true {
-                        do {
-                            let address = try guestConnection.waitUntilReady(
-                                macAddress: macAddress,
-                                checkCancellation: signalMonitor.check,
-                                wait: signalMonitor.wait
-                            )
-                            print("macOS guest \(address) is ready over SSH.")
-                            return
-                        } catch let error as MacOSGuestConnectionError where hold {
-                            print("\(describeError(error)) Retrying while the probe is held.")
-                        }
-                    }
+                wait: signalMonitor.wait,
+                waitUntilGuestReady: { macAddress, timeout in
+                    let address = try guestConnection.waitUntilReady(
+                        macAddress: macAddress,
+                        timeout: timeout,
+                        checkCancellation: signalMonitor.check,
+                        wait: signalMonitor.wait
+                    )
+                    print("macOS guest \(address) is ready over SSH.")
                 },
                 started: {
                     if hold {

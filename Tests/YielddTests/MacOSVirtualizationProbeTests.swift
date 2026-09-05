@@ -192,7 +192,7 @@ func virtualizationProbeStartsAndForceStopsMachine() throws {
         templateURL: fixture.templateURL,
         cloneRootURL: fixture.cloneRootURL,
         wait: { waitedFor = $0 },
-        waitUntilGuestReady: { reportedMACAddress = $0 },
+        waitUntilGuestReady: { macAddress, _ in reportedMACAddress = macAddress },
         started: { reportedStarted = true }
     )
 
@@ -288,9 +288,68 @@ func virtualizationProbeGuestReadinessFailureStillStopsAndDeletesTheClone() thro
         try probe.run(
             templateURL: fixture.templateURL,
             cloneRootURL: fixture.cloneRootURL,
-            waitUntilGuestReady: { _ in throw TestFailure.create }
+            waitUntilGuestReady: { _, _ in throw TestFailure.create }
         )
     }
+    #expect(machine.stopCount == 1)
+    #expect(try fixture.cloneRootContents().isEmpty)
+}
+
+@Test
+func heldVirtualizationProbeChecksMachineStateBetweenReadinessAttempts() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let machine = ProbeVirtualMachine()
+    var attempts = 0
+    let probe = MacOSVirtualizationProbe(
+        requireEntitlement: {},
+        makeMachine: { _, _ in machine }
+    )
+
+    expectStoppedUnexpectedly {
+        try probe.run(
+            templateURL: fixture.templateURL,
+            cloneRootURL: fixture.cloneRootURL,
+            hold: true,
+            waitUntilGuestReady: { macAddress, timeout in
+                attempts += 1
+                #expect(timeout == MacOSVirtualizationProbe.runDuration)
+                if attempts == 2 {
+                    machine.setState(.stopped)
+                }
+                throw MacOSGuestConnectionError.addressTimedOut(macAddress: macAddress)
+            }
+        )
+    }
+    #expect(attempts == 2)
+    #expect(machine.stopCount == 1)
+    #expect(try fixture.cloneRootContents().isEmpty)
+}
+
+@Test
+func heldVirtualizationProbeChecksMachineStateAfterReadiness() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let machine = ProbeVirtualMachine()
+    var waits = 0
+    let probe = MacOSVirtualizationProbe(
+        requireEntitlement: {},
+        makeMachine: { _, _ in machine }
+    )
+
+    expectStoppedUnexpectedly {
+        try probe.run(
+            templateURL: fixture.templateURL,
+            cloneRootURL: fixture.cloneRootURL,
+            hold: true,
+            wait: { interval in
+                #expect(interval == MacOSVirtualizationProbe.runDuration)
+                waits += 1
+                machine.setState(.stopped)
+            }
+        )
+    }
+    #expect(waits == 1)
     #expect(machine.stopCount == 1)
     #expect(try fixture.cloneRootContents().isEmpty)
 }
@@ -769,6 +828,10 @@ private final class ProbeVirtualMachine: @unchecked Sendable,
             }
             return false
         }
+    }
+
+    func setState(_ state: MacOSVirtualMachineState) {
+        lock.withLock { storedState = state }
     }
 
     func start(
