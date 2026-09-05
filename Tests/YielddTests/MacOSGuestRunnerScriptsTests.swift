@@ -176,6 +176,35 @@ func macOSRunnerControlStopsTheActualListenerProcessGroup() throws {
 }
 
 @Test
+func macOSRunnerControlDoesNotSignalACompletedRunsStoredProcessGroup() throws {
+    let fixture = try MacOSGuestRunnerFixture(runScript: """
+        #!/bin/bash
+        printf 'started\n' >> "$HOME/runner-starts"
+        trap 'exit 0' TERM
+        while :; do sleep 1; done
+        """)
+    defer { fixture.remove() }
+
+    try expectTimeout(fixture.controlRequest("run", timeout: 0.25))
+    try waitForFile(
+        fixture.homeURL.appendingPathComponent("runner-starts"),
+        diagnosticsDirectory: fixture.diagnosticsDirectory
+    )
+    let processGroup = try #require(fixture.recordedProcessGroup())
+    defer { _ = Darwin.kill(-processGroup, SIGKILL) }
+    try Data("0\n".utf8).write(
+        to: fixture.diagnosticsDirectory.appendingPathComponent("exit-status"),
+        options: .atomic
+    )
+
+    let stopRequest = fixture.controlRequest("stop", timeout: 5)
+    try ProcessExecutor().execute(stopRequest).requireSuccess(for: stopRequest)
+
+    #expect(processGroupIsRunning(processGroup))
+    #expect(fixture.recordedProcessGroup() == nil)
+}
+
+@Test
 func macOSRunnerControlBoundsRetainedOutput() throws {
     let fixture = try MacOSGuestRunnerFixture(runScript: """
         #!/bin/bash

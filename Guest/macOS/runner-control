@@ -124,6 +124,11 @@ stop_locked() {
     local attempt
     local process_group
 
+    if [[ -f "$status_file" ]]; then
+        rm -f "$process_group_file"
+        return 0
+    fi
+
     process_group="$(read_process_group 2>/dev/null || true)"
     if [[ -z "$process_group" ]] || ! process_group_is_running "$process_group"; then
         rm -f "$process_group_file"
