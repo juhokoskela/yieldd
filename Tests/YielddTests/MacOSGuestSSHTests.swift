@@ -31,6 +31,8 @@ func guestSSHBuildsCompleteTransportAndValidationCommands() throws {
         "-i", template.privateKeyURL.path,
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=5",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=3",
         "-o", "GlobalKnownHostsFile=/dev/null",
         "-o", "HostKeyAlias=yieldd-macos-template",
         "-o", "IdentitiesOnly=yes",
@@ -53,6 +55,43 @@ func guestSSHBuildsCompleteTransportAndValidationCommands() throws {
         request("/usr/bin/true"),
         request("/Users/runner/bin/yieldd-runner-control ready"),
     ])
+}
+
+@Test
+func guestSSHExecPreservesArgumentsAndKeepsSecretsOnStdin() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let ssh = MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), executor: executor)
+    let arguments = ["", "a b", "a'b", "$(touch /never-run)", "`exit 1`", "line\nbreak", "\\", "--flag"]
+    try ssh.execute(
+        ["/usr/bin/printf", "%s\\000"] + arguments,
+        address: "192.168.64.2",
+        standardInput: Data("secret-token\n".utf8),
+        timeout: nil,
+        outputCapture: .tail(maxBytes: 1024),
+        cancellable: false
+    )
+    let request = try #require(executor.requests.first)
+    #expect(request.standardInput == Data("secret-token\n".utf8))
+    #expect(!request.arguments.joined().contains("secret-token"))
+    #expect(request.timeout == nil)
+    #expect(!request.cancellable)
+    #expect(request.outputCapture == .tail(maxBytes: 1024))
+    let command = try #require(request.arguments.last)
+    let result = try ProcessExecutor().execute(ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", command], timeout: 5
+    ))
+    #expect(result.terminationStatus == 0)
+    #expect(result.stdout == Data((arguments.joined(separator: "\0") + "\0").utf8))
+}
+
+@Test
+func guestSSHRejectsNULArgumentsBeforeLaunching() throws {
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let ssh = MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), executor: executor)
+    #expect(throws: MacOSGuestSSHError.invalidCommandArgument) {
+        try ssh.execute(["printf", "a\0b"], address: "192.168.64.2", timeout: 5, outputCapture: .all)
+    }
+    #expect(executor.requests.isEmpty)
 }
 
 @Test
