@@ -384,11 +384,7 @@ protocol MacOSVirtualMachineControlling: Sendable {
 private let macOSVirtualMachineCheckInterval: TimeInterval = 0.1
 
 struct MacOSVirtualizationProbe {
-    static let bootTimeout: TimeInterval = 60
-    static let stopTimeout: TimeInterval = 15
     static let runDuration: TimeInterval = 5
-    static let memoryBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
-    static let constrainedMemoryBytes = memoryBytes * 3 / 4
 
     private let requireEntitlement: () throws -> Void
     private let makeMachine: (URL, UInt64) throws -> any MacOSVirtualMachineControlling
@@ -408,8 +404,8 @@ struct MacOSVirtualizationProbe {
         cloneRootURL: URL,
         memory allocation: RunnerMemoryAllocation = .full,
         hold: Bool = false,
-        bootTimeout: TimeInterval = Self.bootTimeout,
-        stopTimeout: TimeInterval = Self.stopTimeout,
+        bootTimeout: TimeInterval = MacOSVirtualMachineLifecycle.bootTimeout,
+        stopTimeout: TimeInterval = MacOSVirtualMachineLifecycle.stopTimeout,
         checkCancellation: () throws -> Void = {},
         wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         waitUntilGuestReady: (String, TimeInterval) throws -> Void = { _, _ in },
@@ -510,6 +506,11 @@ struct MacOSVirtualizationProbe {
 }
 
 enum MacOSVirtualMachineLifecycle {
+    static let bootTimeout: TimeInterval = 60
+    static let stopTimeout: TimeInterval = 15
+    static let memoryBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
+    static let constrainedMemoryBytes = memoryBytes * 3 / 4
+
     static func requireRunning(
         _ machine: any MacOSVirtualMachineControlling
     ) throws {
@@ -531,14 +532,23 @@ enum MacOSVirtualMachineLifecycle {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
 
         while true {
+            // A terminally failed VM cannot be stopped. Its owner must release it.
+            if case .failed = machine.state { return }
             try checkDeadline()
             let completion = VirtualMachineCompletion<MacOSVirtualMachineStopOutcome>()
             machine.forceStop(completion: completion.complete)
-            switch try completion.wait(
-                operation: "stopping the macOS virtual machine",
-                deadline: deadline,
-                checkCancellation: checkDeadline
-            ) {
+            let outcome: MacOSVirtualMachineStopOutcome
+            do {
+                outcome = try completion.wait(
+                    operation: "stopping the macOS virtual machine",
+                    deadline: deadline,
+                    checkCancellation: checkDeadline
+                )
+            } catch {
+                if case .failed = machine.state { return }
+                throw error
+            }
+            switch outcome {
             case .stopped:
                 return
             case .retry:
@@ -560,9 +570,9 @@ enum MacOSVirtualMachineLifecycle {
     static func memoryBytes(for allocation: RunnerMemoryAllocation) -> UInt64 {
         switch allocation {
         case .constrained:
-            MacOSVirtualizationProbe.constrainedMemoryBytes
+            constrainedMemoryBytes
         case .full:
-            MacOSVirtualizationProbe.memoryBytes
+            memoryBytes
         }
     }
 

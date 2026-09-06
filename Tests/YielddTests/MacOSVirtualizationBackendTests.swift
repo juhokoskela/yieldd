@@ -17,7 +17,7 @@ func macOSBackendCreatesOnceAndDestroysRepeatedly() throws {
         makeMachine: { url, memory in
             #expect(url.lastPathComponent == "yieldd-macos-test.bundle")
             #expect(!FileManager.default.fileExists(atPath: fixture.cloneRootURL.appendingPathComponent("yieldd-macos-test.creating").path))
-            #expect(memory == MacOSVirtualizationProbe.constrainedMemoryBytes)
+            #expect(memory == MacOSVirtualMachineLifecycle.constrainedMemoryBytes)
             return machine
         }
     )
@@ -144,7 +144,7 @@ func macOSBackendRunsThroughTheExistingSession() throws {
     )
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024,
-        reservationBytes: MacOSVirtualizationProbe.memoryBytes, readMemoryPressure: { .normal }
+        reservationBytes: MacOSVirtualMachineLifecycle.memoryBytes, readMemoryPressure: { .normal }
     )
     try EphemeralRunnerSession(
         backend: backend, github: github, memoryAdmission: admission, jobTimeout: 60
@@ -163,6 +163,91 @@ func macOSBackendRunsThroughTheExistingSession() throws {
 private struct BackendAddressResolver: MacOSGuestAddressResolving {
     var addressValue: String? = "192.168.64.2"
     func address(for macAddress: String) throws -> String? { addressValue }
+}
+
+@Test(arguments: [false, true])
+func macOSBackendReleasesTerminallyFailedMachine(replaceDirectly: Bool) throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    weak var firstMachine: ProbeVirtualMachine?
+    var creations = 0
+    let backend = MacOSVirtualizationBackend(
+        templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
+        executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 4)),
+        resolver: BackendAddressResolver(), requireEntitlement: {},
+        makeMachine: { _, _ in
+            let machine = ProbeVirtualMachine()
+            if creations == 0 { firstMachine = machine }
+            creations += 1
+            return machine
+        }
+    )
+    try backend.create(id: macOSBackendID, memory: .full)
+    firstMachine?.setState(.failed(TestFailure.runnerJob))
+    try backend.stopRunner(on: macOSBackendID)
+    if !replaceDirectly {
+        try backend.destroy(macOSBackendID)
+        try backend.destroy(macOSBackendID)
+        #expect(firstMachine == nil)
+        #expect(try fixture.cloneRootContents().isEmpty)
+    }
+    try backend.create(id: macOSBackendID, memory: .full)
+    #expect(firstMachine == nil)
+    #expect(creations == 2)
+    try backend.destroy(macOSBackendID)
+    #expect(try fixture.cloneRootContents().isEmpty)
+}
+
+@Test
+func macOSBackendTerminalFailurePreservesSessionErrorAndReleasesReservation() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let backend = MacOSVirtualizationBackend(
+        templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
+        executor: RecordingProcessExecutor(outcomes: []), requireEntitlement: {},
+        makeMachine: { _, _ in ProbeVirtualMachine(stateAfterStart: .failed(TestFailure.runnerJob)) }
+    )
+    let admission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 12, reservationBytes: 8, readMemoryPressure: { .normal }
+    )
+    do {
+        try EphemeralRunnerSession(
+            backend: backend, github: BackendGitHub(), memoryAdmission: admission, jobTimeout: 60
+        ).run(id: macOSBackendID, repository: GitHubRepository("owner/repo"))
+        Issue.record("Expected the original VM failure")
+    } catch let MacOSVirtualizationProbeError.virtualMachineFailed(error) {
+        #expect(error as? TestFailure == .runnerJob)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+    #expect(try fixture.cloneRootContents().isEmpty)
+    var blocked = false
+    let reservation = try admission.acquire(
+        checkCancellation: { if blocked { throw TestFailure.cancelled } },
+        onBlocked: { blocked = true }
+    )
+    admission.release(reservation)
+}
+
+@Test
+func macOSBackendReleasesMachineThatFailsDuringForcedStop() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    weak var machine: ProbeVirtualMachine?
+    let backend = MacOSVirtualizationBackend(
+        templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
+        executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2)),
+        resolver: BackendAddressResolver(), requireEntitlement: {},
+        makeMachine: { _, _ in
+            let created = ProbeVirtualMachine(onForceStop: { machine?.setState(.failed(TestFailure.cleanup)) })
+            machine = created
+            return created
+        }
+    )
+    try backend.create(id: macOSBackendID, memory: .full)
+    try backend.destroy(macOSBackendID)
+    #expect(machine == nil)
+    #expect(try fixture.cloneRootContents().isEmpty)
 }
 
 @Test

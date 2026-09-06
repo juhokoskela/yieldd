@@ -4,7 +4,7 @@ import Foundation
 final class MacOSVirtualizationBackend: RunnerBackend {
     private struct Guest {
         let machine: any MacOSVirtualMachineControlling
-        var address: String?
+        let address: String?
     }
 
     private let templateURL: URL
@@ -31,8 +31,8 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         checkCancellation: @escaping () throws -> Void = {},
         wait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil },
-        bootTimeout: TimeInterval = MacOSVirtualizationProbe.bootTimeout,
-        stopTimeout: TimeInterval = MacOSVirtualizationProbe.stopTimeout,
+        bootTimeout: TimeInterval = MacOSVirtualMachineLifecycle.bootTimeout,
+        stopTimeout: TimeInterval = MacOSVirtualMachineLifecycle.stopTimeout,
         requireEntitlement: @escaping () throws -> Void = VirtualizationEntitlement.requireCurrentProcess,
         makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
             MacOSVirtualMachineLifecycle.makeMachine
@@ -72,7 +72,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
                     clone.url,
                     MacOSVirtualMachineLifecycle.memoryBytes(for: memory)
                 )
-                guests[id] = Guest(machine: machine)
+                guests[id] = Guest(machine: machine, address: nil)
                 let completion = VirtualMachineCompletion<Void>()
                 machine.start(completion: completion.complete)
                 try completion.wait(
@@ -90,7 +90,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
                     wait: wait
                 )
                 try checkGuest()
-                guests[id]?.address = address
+                guests[id] = Guest(machine: machine, address: address)
             } catch {
                 do {
                     try destroyLocked(id)
@@ -120,14 +120,11 @@ final class MacOSVirtualizationBackend: RunnerBackend {
             try MacOSVirtualMachineLifecycle.requireRunning(guest.machine)
             return address
         }
-        guard let executable = arguments.first, !executable.isEmpty else {
-            throw RunnerBackendError.emptyCommand
-        }
         let command: [String]
-        switch executable {
-        case "yieldd-configure-runner", "yieldd-runner-control":
+        if let executable = arguments.first,
+           executable == "yieldd-configure-runner" || executable == "yieldd-runner-control" {
             command = ["/Users/runner/bin/\(executable)"] + arguments.dropFirst()
-        default:
+        } else {
             command = arguments
         }
         // Both shared session call sites execute as runner; macOS guests have no sudo.
@@ -140,7 +137,10 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     func stopRunner(on id: RunnerID) throws {
         try lock.withLock {
             guard let guest = guests[id] else { return }
-            if case .stopped = guest.machine.state { return }
+            switch guest.machine.state {
+            case .stopped, .failed: return
+            case .running, .stoppable, .transitioning: break
+            }
             guard let address = guest.address else { return }
             try ssh.execute(
                 ["/Users/runner/bin/yieldd-runner-control", "stop"],

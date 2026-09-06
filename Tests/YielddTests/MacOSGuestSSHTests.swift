@@ -94,6 +94,16 @@ func guestSSHRejectsNULArgumentsBeforeLaunching() throws {
     #expect(executor.requests.isEmpty)
 }
 
+@Test(arguments: [[], [""]])
+func guestSSHRejectsEmptyCommandsBeforeLaunching(arguments: [String]) {
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let ssh = MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), executor: executor)
+    #expect(throws: RunnerBackendError.emptyCommand) {
+        try ssh.execute(arguments, address: "192.168.64.2", timeout: 5, outputCapture: .all)
+    }
+    #expect(executor.requests.isEmpty)
+}
+
 @Test
 func guestSSHRejectsSymlinkedTemplateCredentials() throws {
     let template = try GuestSSHTemplateFixture()
