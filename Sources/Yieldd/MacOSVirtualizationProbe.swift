@@ -7,7 +7,7 @@ import Security
 import Virtualization
 #endif
 
-private enum VirtualizationEntitlement {
+enum VirtualizationEntitlement {
     static let name = "com.apple.security.virtualization"
 
     static func requireCurrentProcess() throws {
@@ -56,7 +56,14 @@ struct MacOSVirtualizationProbeClone {
         )
     }
 
-    static func create(templateURL: URL, cloneRootURL: URL) throws -> Self {
+    static func create(
+        templateURL: URL,
+        cloneRootURL: URL,
+        id: RunnerID = RunnerID(value: "yieldd-virtualization-probe-\(UUID().uuidString.lowercased())")
+    ) throws -> Self {
+        let store = MacOSRunnerCloneStore(rootURL: cloneRootURL)
+        let creatingURL = try store.creatingURL(for: id)
+        let publishedURL = try store.bundleURL(for: id)
         let fileManager = FileManager.default
         let machineIdentifier = try machineIdentifierData()
         let macAddress = try macAddressString()
@@ -82,15 +89,10 @@ struct MacOSVirtualizationProbeClone {
         )
 
         let cloneRootURL = cloneRootURL.resolvingSymlinksInPath()
-        let cloneURL = cloneRootURL.appendingPathComponent(
-            "yieldd-virtualization-probe-\(UUID().uuidString.lowercased()).bundle",
-            isDirectory: true
-        )
-        try fileManager.createDirectory(
-            at: cloneURL,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
+        let cloneURL = creatingURL
+        guard Darwin.mkdir(cloneURL.path, 0o700) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
 
         do {
             try fileManager.setAttributes(
@@ -123,7 +125,9 @@ struct MacOSVirtualizationProbeClone {
                 named: "MACAddress",
                 to: cloneURL
             )
-            return Self(url: cloneURL, macAddress: macAddress)
+            // moveItem refuses an existing destination; publish only a complete clone.
+            try fileManager.moveItem(at: cloneURL, to: publishedURL)
+            return Self(url: publishedURL, macAddress: macAddress)
         } catch {
             do {
                 try fileManager.removeItem(at: cloneURL)
@@ -393,7 +397,7 @@ struct MacOSVirtualizationProbe {
         requireEntitlement: @escaping () throws -> Void =
             VirtualizationEntitlement.requireCurrentProcess,
         makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
-            MacOSVirtualizationProbe.makeMachine
+            MacOSVirtualMachineLifecycle.makeMachine
     ) {
         self.requireEntitlement = requireEntitlement
         self.makeMachine = makeMachine
@@ -422,7 +426,7 @@ struct MacOSVirtualizationProbe {
             try checkCancellation()
             let createdMachine = try makeMachine(
                 clone.url,
-                Self.memoryBytes(for: allocation)
+                MacOSVirtualMachineLifecycle.memoryBytes(for: allocation)
             )
             machine = createdMachine
             let completion = VirtualMachineCompletion<Void>()
@@ -443,12 +447,12 @@ struct MacOSVirtualizationProbe {
             repeat {
                 try wait(Self.runDuration)
                 try checkCancellation()
-                try requireRunning(createdMachine)
+                try MacOSVirtualMachineLifecycle.requireRunning(createdMachine)
             } while hold
         }
         let stopResult = Result<Void, any Error> {
             if let machine {
-                try forceStop(machine, timeout: stopTimeout)
+                try MacOSVirtualMachineLifecycle.forceStop(machine, timeout: stopTimeout)
             }
         }
         let removalResult = Result<Void, any Error> {
@@ -490,7 +494,7 @@ struct MacOSVirtualizationProbe {
     ) throws {
         while true {
             try checkCancellation()
-            try requireRunning(machine)
+            try MacOSVirtualMachineLifecycle.requireRunning(machine)
             do {
                 try attempt(
                     macAddress,
@@ -499,12 +503,14 @@ struct MacOSVirtualizationProbe {
                 return
             } catch is MacOSGuestConnectionError where hold {
                 try checkCancellation()
-                try requireRunning(machine)
+                try MacOSVirtualMachineLifecycle.requireRunning(machine)
             }
         }
     }
+}
 
-    private func requireRunning(
+enum MacOSVirtualMachineLifecycle {
+    static func requireRunning(
         _ machine: any MacOSVirtualMachineControlling
     ) throws {
         switch machine.state {
@@ -517,18 +523,21 @@ struct MacOSVirtualizationProbe {
         }
     }
 
-    private func forceStop(
+    static func forceStop(
         _ machine: any MacOSVirtualMachineControlling,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        checkDeadline: () throws -> Void = {}
     ) throws {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
 
         while true {
+            try checkDeadline()
             let completion = VirtualMachineCompletion<MacOSVirtualMachineStopOutcome>()
             machine.forceStop(completion: completion.complete)
             switch try completion.wait(
                 operation: "stopping the macOS virtual machine",
-                deadline: deadline
+                deadline: deadline,
+                checkCancellation: checkDeadline
             ) {
             case .stopped:
                 return
@@ -548,16 +557,16 @@ struct MacOSVirtualizationProbe {
         }
     }
 
-    private static func memoryBytes(for allocation: RunnerMemoryAllocation) -> UInt64 {
+    static func memoryBytes(for allocation: RunnerMemoryAllocation) -> UInt64 {
         switch allocation {
         case .constrained:
-            constrainedMemoryBytes
+            MacOSVirtualizationProbe.constrainedMemoryBytes
         case .full:
-            memoryBytes
+            MacOSVirtualizationProbe.memoryBytes
         }
     }
 
-    private static func makeMachine(
+    static func makeMachine(
         bundleURL: URL,
         memoryBytes: UInt64
     ) throws -> any MacOSVirtualMachineControlling {

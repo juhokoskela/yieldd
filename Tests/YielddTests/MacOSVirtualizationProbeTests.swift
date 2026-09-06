@@ -695,7 +695,7 @@ func virtualizationProbeChecksTheRealEntitlementBeforeFileAccess() throws {
     }
 }
 
-private struct ProbeBundleFixture {
+struct ProbeBundleFixture {
     let rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(
         "yieldd-macos-probe-tests-\(UUID().uuidString)",
         isDirectory: true
@@ -776,7 +776,7 @@ private func expectStoppedUnexpectedly(_ operation: () throws -> Void) {
     }
 }
 
-private final class ProbeVirtualMachine: @unchecked Sendable,
+final class ProbeVirtualMachine: @unchecked Sendable,
     MacOSVirtualMachineControlling
 {
     private let lock = NSLock()
