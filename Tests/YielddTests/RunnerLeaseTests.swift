@@ -125,13 +125,13 @@ func leaseStoreReportsPathForInvalidContents() throws {
     }
 }
 
-@Test
-func leaseStoreRejectsInvalidRunnerID() throws {
+@Test(arguments: ["other-runner", "yieldd-../other", "yieldd-Uppercase", "yieldd-under_score", "yieldd-" + String(repeating: "a", count: 123)])
+func leaseStoreRejectsInvalidRunnerID(value: String) throws {
     let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
 
-    try Data(#"[{"runnerID":"other-runner","repository":"owner/repository"}]"#.utf8)
+    try Data("[{\"runnerID\":\"\(value)\",\"repository\":\"owner/repository\"}]".utf8)
         .write(to: store.fileURL)
     #expect(throws: RunnerLeaseError.invalidRunnerID(path: store.fileURL.path)) {
         try store.load()

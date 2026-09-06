@@ -22,10 +22,7 @@ struct MacOSRunnerCloneStore {
     }
 
     private func url(for id: RunnerID, suffix: String) throws -> URL {
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
-        guard id.value.hasPrefix("yieldd-"), id.value.count <= 128,
-              id.value.unicodeScalars.allSatisfy(allowed.contains)
-        else {
+        guard id.isValid else {
             throw RunnerLeaseError.invalidRunnerID(path: rootURL.path)
         }
         return rootURL.appendingPathComponent("\(id.value).\(suffix)", isDirectory: true)
