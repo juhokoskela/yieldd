@@ -6,6 +6,39 @@ import Testing
 private let macOSBackendID = RunnerID(value: "yieldd-macos-test")
 
 @Test
+func macOSBackendPinsSSHToResolvedTemplateAfterSymlinkRetargeting() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let link = fixture.rootURL.appendingPathComponent("Current.bundle")
+    let replacement = fixture.rootURL.appendingPathComponent("Replacement.bundle")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: fixture.templateURL)
+    let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 4))
+    let backend = MacOSVirtualizationBackend(
+        templateURL: link, cloneRootURL: fixture.cloneRootURL,
+        executor: executor, resolver: BackendAddressResolver(), requireEntitlement: {},
+        makeMachine: { url, _ in
+            let disk = try Data(contentsOf: url.appendingPathComponent("Disk.img"))
+            #expect(disk == fixture.disk)
+            return ProbeVirtualMachine()
+        }
+    )
+    defer { try? backend.destroy(macOSBackendID) }
+    try FileManager.default.createDirectory(at: replacement, withIntermediateDirectories: false)
+    try FileManager.default.removeItem(at: link)
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: replacement)
+
+    try backend.create(id: macOSBackendID, memory: .full)
+    try backend.exec(["/usr/bin/true"], on: macOSBackendID)
+    try backend.stopRunner(on: macOSBackendID)
+    #expect(executor.requests.count == 4)
+    let resolved = fixture.templateURL.resolvingSymlinksInPath()
+    for request in executor.requests {
+        #expect(request.arguments.contains(resolved.appendingPathComponent("SSHPrivateKey").path))
+        #expect(request.arguments.contains("UserKnownHostsFile=\"\(resolved.appendingPathComponent("SSHKnownHosts").path)\""))
+    }
+}
+
+@Test
 func macOSBackendCreatesOnceAndDestroysRepeatedly() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }

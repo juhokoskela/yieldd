@@ -39,7 +39,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     ) {
         self.templateURL = templateURL.resolvingSymlinksInPath()
         clones = MacOSRunnerCloneStore(rootURL: cloneRootURL.resolvingSymlinksInPath())
-        let ssh = MacOSGuestSSH(templateURL: templateURL, executor: executor)
+        let ssh = MacOSGuestSSH(templateURL: self.templateURL, executor: executor)
         self.ssh = ssh
         connection = MacOSGuestConnection(resolver: resolver, ssh: ssh)
         self.checkCancellation = checkCancellation
