@@ -117,6 +117,7 @@ func interruptionAfterCreateCleansUpWithoutRunningChecks() {
 }
 
 private final class RecordingRunnerBackend: RunnerBackend {
+    let platform = RunnerPlatform.linux
     private(set) var calls: [RunnerBackendCall] = []
     private let createError: (any Error)?
     private var execOutcomes: [Result<Void, any Error>]

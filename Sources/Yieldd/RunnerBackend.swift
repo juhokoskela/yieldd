@@ -16,12 +16,18 @@ enum RunnerGuestUser: String, Equatable, Sendable {
     case runner
 }
 
+enum RunnerPlatform: String, Codable, Sendable {
+    case linux
+    case macOS
+}
+
 enum RunnerMemoryAllocation: String, Equatable, Sendable {
     case constrained
     case full
 }
 
 protocol RunnerBackend {
+    var platform: RunnerPlatform { get }
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws
     func exec(
         _ arguments: [String],

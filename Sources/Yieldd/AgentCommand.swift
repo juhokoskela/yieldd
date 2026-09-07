@@ -228,19 +228,19 @@ struct AgentRunCommand: ParsableCommand {
 
 private func recoverAgentRunners(store: AgentConfigurationStore) throws {
     try withRunnerOwnership(in: store.directory) { leaseStore in
-        guard !(try leaseStore.load()).isEmpty else {
+        if try leaseStore.load().isEmpty {
+            try MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).removeUnleased(keeping: [])
             return
         }
 
         let configuration = try store.load()
         try configuration.requireExecutables()
         let stop = try RunnerPoolStop.monitoringSignals()
-        let session = makeRunnerSession(
+        let recovery = makeRunnerRecovery(
             leaseStore: leaseStore,
             containerURL: configuration.containerURL,
             ghURL: configuration.ghURL,
             stop: stop,
-            memoryAdmission: RunnerMemoryAdmission(),
             stateChanged: { state in
                 switch state {
                 case let .waitingForGitHubCleanup(id, retryDelay):
@@ -254,7 +254,7 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
                 }
             }
         )
-        for id in try session.recoverAbandonedRunners() {
+        for id in try recovery.run() {
             print("Cleaned up abandoned runner \(id.value).")
         }
     }

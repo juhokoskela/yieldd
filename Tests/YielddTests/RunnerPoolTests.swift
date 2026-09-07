@@ -158,6 +158,9 @@ func serviceRejectsImpossibleMemoryBudgetBeforeStartingPool() throws {
         warning: { _ in },
         error: { _ in }
     )
+    let orphan = try MacOSRunnerCloneStore(stateDirectory: directory)
+        .creatingURL(for: RunnerID(value: "yieldd-macos-orphan"))
+    try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
 
     #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
         requiredBytes: AppleContainerBackend.memoryBytes,
@@ -173,6 +176,7 @@ func serviceRejectsImpossibleMemoryBudgetBeforeStartingPool() throws {
             memoryAdmission: memoryAdmission
         )
     }
+    #expect(!FileManager.default.fileExists(atPath: orphan.path))
 }
 
 private final class ConcurrentSlotGate: @unchecked Sendable {

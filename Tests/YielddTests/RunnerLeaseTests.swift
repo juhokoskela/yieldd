@@ -11,6 +11,39 @@ private let secondLease = RunnerLease(
     repository: try! GitHubRepository("other/repository")
 )
 
+@Test(arguments: [RunnerPlatform.linux, .macOS])
+func leaseStorePersistsPlatform(platform: RunnerPlatform) throws {
+    let directory = makeStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    let platformLease = RunnerLease(runnerID: lease.runnerID, repository: lease.repository, platform: platform)
+    try store.save(platformLease)
+    #expect(try store.load() == [platformLease])
+    let data = try Data(contentsOf: store.fileURL)
+    let stored = try #require(JSONSerialization.jsonObject(with: data) as? [[String: String]])
+    #expect(stored.first?["platform"] == platform.rawValue)
+}
+
+@Test
+func leaseStoreDefaultsLegacyPlatformToLinux() throws {
+    let directory = makeStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    try Data(#"[{"runnerID":"yieldd-test-123","repository":"owner/repository"}]"#.utf8)
+        .write(to: store.fileURL)
+    #expect(try store.load() == [lease])
+}
+
+@Test(arguments: ["null", "\"unknown\"", "42"])
+func leaseStoreRejectsInvalidPlatforms(value: String) throws {
+    let directory = makeStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    try Data("[{\"runnerID\":\"yieldd-test-123\",\"repository\":\"owner/repository\",\"platform\":\(value)}]".utf8)
+        .write(to: store.fileURL)
+    #expect(throws: RunnerLeaseError.invalidContents(path: store.fileURL.path)) { try store.load() }
+}
+
 @Test
 func leaseStoreRepairsStateDirectoryPermissions() throws {
     let directory = makeStateDirectory()

@@ -1,6 +1,7 @@
 import Foundation
 
 struct AppleContainerBackend: RunnerBackend {
+    let platform = RunnerPlatform.linux
     static let creationTimeout: TimeInterval = 5 * 60
     static let memoryConfigurationTimeout: TimeInterval = 30
     static let cleanupTimeout: TimeInterval = 90

@@ -86,7 +86,11 @@ func runRunnerService(
     }
 
     do {
-        for recoveredID in try makeSession().recoverAbandonedRunners() {
+        let recovery = makeRunnerRecovery(
+            leaseStore: leaseStore, containerURL: containerURL, ghURL: ghURL,
+            stop: stop, stateChanged: sessionStateChanged
+        )
+        for recoveredID in try recovery.run() {
             output.info("Cleaned up abandoned runner \(recoveredID.value).")
         }
     } catch {
@@ -158,6 +162,27 @@ func makeRunnerSession(
         recoveryWait: stop.wait,
         stateChanged: stateChanged,
         leaseStore: leaseStore
+    )
+}
+
+func makeRunnerRecovery(
+    leaseStore: RunnerLeaseStore,
+    containerURL: URL,
+    ghURL: URL,
+    stop: RunnerPoolStop,
+    stateChanged: @escaping (RunnerSessionState) -> Void
+) -> RunnerRecovery {
+    let executor = ProcessExecutor(
+        checkCancellation: stop.check,
+        maximumExecutionDeadline: stop.executionDeadline
+    )
+    return RunnerRecovery(
+        linuxBackend: AppleContainerBackend(containerURL: containerURL, executor: executor),
+        github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
+        leaseStore: leaseStore,
+        recoveryWait: stop.wait,
+        checkCancellation: stop.check,
+        stateChanged: stateChanged
     )
 }
 
