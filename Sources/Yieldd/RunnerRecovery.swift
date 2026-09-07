@@ -12,14 +12,13 @@ struct RunnerRecovery {
         linuxBackend: any RunnerBackend,
         github: any GitHubRunnerManaging,
         leaseStore: RunnerLeaseStore,
-        clones: MacOSRunnerCloneStore? = nil,
         recoveryWait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         checkCancellation: @escaping () throws -> Void = {},
         stateChanged: @escaping (RunnerSessionState) -> Void = { _ in }
     ) {
         self.linuxBackend = linuxBackend
         self.leaseStore = leaseStore
-        self.clones = clones ?? MacOSRunnerCloneStore(stateDirectory: leaseStore.directory)
+        clones = MacOSRunnerCloneStore(stateDirectory: leaseStore.directory)
         self.checkCancellation = checkCancellation
         cleanup = RunnerCleanup(github: github, recoveryWait: recoveryWait, stateChanged: stateChanged, leaseStore: leaseStore)
     }
@@ -27,7 +26,6 @@ struct RunnerRecovery {
     func run() throws -> [RunnerID] {
         try checkCancellation()
         let leases = try leaseStore.load()
-        var recovered: Set<RunnerID> = []
         var deferredCleanup: [(
             lease: RunnerLease,
             failures: [RunnerSessionCleanupFailure]
@@ -57,7 +55,6 @@ struct RunnerRecovery {
 
             if failures.isEmpty {
                 cleanup.clearLeaseAfterCleanup(id: lease.runnerID)
-                recovered.insert(lease.runnerID)
             } else if cleanup.isDeferredGitHubCleanup(failures) {
                 deferredCleanup.append((lease, failures))
             } else {
@@ -73,7 +70,6 @@ struct RunnerRecovery {
             )
             if failures.isEmpty {
                 cleanup.clearLeaseAfterCleanup(id: deferred.lease.runnerID)
-                recovered.insert(deferred.lease.runnerID)
             } else {
                 recoveryFailures.append(contentsOf: failures)
             }
@@ -82,8 +78,6 @@ struct RunnerRecovery {
         guard recoveryFailures.isEmpty else {
             throw RunnerSessionError.cleanupFailed(recoveryFailures)
         }
-        return leases.compactMap { lease in
-            recovered.contains(lease.runnerID) ? lease.runnerID : nil
-        }
+        return leases.map(\.runnerID)
     }
 }

@@ -76,10 +76,10 @@ struct RunnerCleanup {
         step: RunnerSessionCleanupStep,
         operation: () throws -> Void
     ) -> RunnerSessionCleanupFailure? {
-        switch Result<Void, any Error>(catching: { try operation() }) {
-        case .success:
+        do {
+            try operation()
             return nil
-        case let .failure(error):
+        } catch {
             return RunnerSessionCleanupFailure(step: step, error: error)
         }
     }
