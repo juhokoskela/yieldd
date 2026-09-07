@@ -1,0 +1,19 @@
+name: macOS runner test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: yieldd-macos
+    timeout-minutes: 10
+    steps:
+      - name: Check Xcode
+        run: xcodebuild -version
+      - name: Check Swift
+        run: xcrun swift --version
+      - name: Check simulator runtimes
+        run: xcrun simctl list runtimes
