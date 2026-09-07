@@ -65,7 +65,7 @@ func runRunnerService(
         case let .waitingForMemory(id):
             output.info("Runner \(id.value) is waiting for available host memory.")
         case let .waitingForJob(id):
-            output.info("Runner \(id.value) is waiting for one job labeled 'yieldd'.")
+            output.info("Runner \(id.value) is waiting for one job labeled '\(RunnerPlatform.linux.runnerLabel)'.")
         case let .waitingForGitHubCleanup(id, retryDelay):
             output.info(githubCleanupRetryMessage(id: id, delay: retryDelay))
         case let .cleaningUp(id):

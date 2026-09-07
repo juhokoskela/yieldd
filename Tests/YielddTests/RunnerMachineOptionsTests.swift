@@ -14,10 +14,18 @@ func runnerCommandsSelectMacOSTemplateWithoutChangingLinuxDefault() throws {
     #expect(runner.timeout == 10)
 }
 
-@Test(arguments: ["", "template\0.bundle"])
-func runnerCommandsRejectInvalidTemplatePaths(path: String) {
-    #expect(throws: (any Error).self) { try MachineTestCommand.parse(["--template", path]) }
-    #expect(throws: (any Error).self) { try RunnerTestCommand.parse(["owner/repository", "--template", path]) }
+@Test
+func runnerCommandsRejectEmptyTemplatePaths() {
+    if let error = #expect(throws: (any Error).self, performing: {
+        try MachineTestCommand.parse(["--template", ""])
+    }) {
+        #expect(MachineTestCommand.message(for: error) == "--template must not be empty.")
+    }
+    if let error = #expect(throws: (any Error).self, performing: {
+        try RunnerTestCommand.parse(["owner/repository", "--template", ""])
+    }) {
+        #expect(RunnerTestCommand.message(for: error) == "--template must not be empty.")
+    }
 }
 
 @Test

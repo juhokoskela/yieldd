@@ -6,8 +6,8 @@ struct RunnerMachineOptions: ParsableArguments {
     var template: String?
 
     mutating func validate() throws {
-        if let template, template.isEmpty || template.utf8.contains(0) {
-            throw ValidationError("--template must be a nonempty filesystem path without NUL bytes.")
+        if let template, template.isEmpty {
+            throw ValidationError("--template must not be empty.")
         }
     }
 

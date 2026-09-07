@@ -35,8 +35,7 @@ enum RunnerPlatform: String, Codable, Sendable {
     }
 
     func makeTestRunnerID() -> RunnerID {
-        let prefix = self == .macOS ? "yieldd-macos-test" : "yieldd-test"
-        return RunnerID(value: "\(prefix)-\(UUID().uuidString.lowercased())")
+        RunnerID(value: "\(runnerLabel)-test-\(UUID().uuidString.lowercased())")
     }
 }
 
