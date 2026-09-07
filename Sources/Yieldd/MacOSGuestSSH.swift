@@ -54,10 +54,40 @@ struct MacOSGuestSSH {
         )
     }
 
+    func execute(
+        _ arguments: [String],
+        address: String,
+        standardInput: Data? = nil,
+        timeout: TimeInterval?,
+        outputCapture: ProcessOutputCapture,
+        cancellable: Bool = true
+    ) throws {
+        guard let executable = arguments.first, !executable.isEmpty else {
+            throw RunnerBackendError.emptyCommand
+        }
+        guard arguments.allSatisfy({ !$0.utf8.contains(0) }) else {
+            throw MacOSGuestSSHError.invalidCommandArgument
+        }
+        let command = arguments.map { argument in
+            "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }.joined(separator: " ")
+        try run(
+            command,
+            address: address,
+            timeout: timeout,
+            standardInput: standardInput,
+            outputCapture: outputCapture,
+            cancellable: cancellable
+        )
+    }
+
     private func run(
         _ command: String,
         address: String,
-        timeout: TimeInterval
+        timeout: TimeInterval?,
+        standardInput: Data? = nil,
+        outputCapture: ProcessOutputCapture = .tail(maxBytes: Self.outputTailBytes),
+        cancellable: Bool = true
     ) throws {
         let request = ProcessRequest(
             executableURL: executableURL,
@@ -65,7 +95,9 @@ struct MacOSGuestSSH {
                 "-F", "/dev/null",
                 "-i", privateKeyURL.path,
                 "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=\(max(1, Int(timeout.rounded(.up))))",
+                "-o", "ConnectTimeout=\(max(1, Int(min(timeout ?? 10, 10).rounded(.up))))",
+                "-o", "ServerAliveInterval=5",
+                "-o", "ServerAliveCountMax=3",
                 "-o", "GlobalKnownHostsFile=/dev/null",
                 "-o", "HostKeyAlias=\(Self.hostKeyAlias)",
                 "-o", "IdentitiesOnly=yes",
@@ -74,11 +106,13 @@ struct MacOSGuestSSH {
                 "-o", "StrictHostKeyChecking=yes",
                 "-o", "UserKnownHostsFile=\(Self.configurationValue(knownHostsURL.path))",
                 "runner@\(address)",
-                // OpenSSH sends this through the remote login shell. Keep it fixed and argument-free.
+                // OpenSSH sends one command through the remote login shell.
                 command,
             ],
+            standardInput: standardInput,
             timeout: timeout,
-            outputCapture: .tail(maxBytes: Self.outputTailBytes)
+            outputCapture: outputCapture,
+            cancellable: cancellable
         )
         try executor.execute(request).requireSuccess(for: request)
     }
@@ -260,6 +294,7 @@ struct MacOSGuestConnection {
 }
 
 enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
+    case invalidCommandArgument
     case insecurePrivateKey(path: String, permissions: mode_t)
     case insecureKnownHosts(path: String, permissions: mode_t)
     case notRegularFile(path: String)
@@ -267,6 +302,8 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .invalidCommandArgument:
+            "macOS guest command arguments must not contain NUL bytes."
         case let .insecurePrivateKey(path, permissions):
             "The macOS guest SSH private key at \(path) has permissions "
                 + "\(String(permissions, radix: 8)); expected 600 or stricter."

@@ -2,6 +2,13 @@ import Foundation
 
 struct RunnerID: Hashable, Sendable {
     let value: String
+
+    var isValid: Bool {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
+        return value.hasPrefix("yieldd-")
+            && value.count <= 128
+            && value.unicodeScalars.allSatisfy(allowed.contains)
+    }
 }
 
 enum RunnerGuestUser: String, Equatable, Sendable {

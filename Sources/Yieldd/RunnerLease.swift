@@ -88,14 +88,15 @@ final class RunnerLeaseStore: @unchecked Sendable {
         }
 
         let leases = try stored.map { storedLease in
-            guard Self.isValidRunnerID(storedLease.runnerID) else {
+            let runnerID = RunnerID(value: storedLease.runnerID)
+            guard runnerID.isValid else {
                 throw RunnerLeaseError.invalidRunnerID(path: fileURL.path)
             }
             guard let repository = try? GitHubRepository(storedLease.repository) else {
                 throw RunnerLeaseError.invalidContents(path: fileURL.path)
             }
             return RunnerLease(
-                runnerID: RunnerID(value: storedLease.runnerID),
+                runnerID: runnerID,
                 repository: repository
             )
         }
@@ -133,13 +134,6 @@ final class RunnerLeaseStore: @unchecked Sendable {
             )
         }
         try data.write(to: fileURL, options: .atomic)
-    }
-
-    private static func isValidRunnerID(_ value: String) -> Bool {
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
-        return value.hasPrefix("yieldd-")
-            && value.count <= 128
-            && value.unicodeScalars.allSatisfy(allowed.contains)
     }
 }
 

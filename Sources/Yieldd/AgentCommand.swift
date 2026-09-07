@@ -47,7 +47,7 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
                 signals: [SIGINT, SIGTERM, SIGHUP]
             )
             let memoryAdmission = RunnerMemoryAdmission(
-                reservationBytes: MacOSVirtualizationProbe.memoryBytes
+                reservationBytes: MacOSVirtualMachineLifecycle.memoryBytes
             )
             let reservation = try memoryAdmission.acquire(
                 checkCancellation: signalMonitor.check,

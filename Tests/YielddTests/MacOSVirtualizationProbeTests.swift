@@ -183,7 +183,7 @@ func virtualizationProbeStartsAndForceStopsMachine() throws {
         requireEntitlement: {},
         makeMachine: { cloneURL, memoryBytes in
             #expect(cloneURL != fixture.templateURL)
-            #expect(memoryBytes == MacOSVirtualizationProbe.memoryBytes)
+            #expect(memoryBytes == MacOSVirtualMachineLifecycle.memoryBytes)
             return machine
         }
     )
@@ -226,7 +226,7 @@ func virtualizationProbeUsesConstrainedBootMemory() throws {
         wait: { _ in }
     )
 
-    #expect(configuredMemory == MacOSVirtualizationProbe.constrainedMemoryBytes)
+    #expect(configuredMemory == MacOSVirtualMachineLifecycle.constrainedMemoryBytes)
 }
 
 @Test
@@ -479,17 +479,8 @@ func virtualizationProbeReportsVirtualMachineError() throws {
             wait: { _ in }
         )
         Issue.record("Expected the VM error to fail the probe")
-    } catch let MacOSVirtualizationProbeError.operationAndCleanupFailed(
-        operation,
-        cleanup
-    ) {
-        guard case MacOSVirtualizationProbeError.virtualMachineFailed(let underlying) = operation
-        else {
-            Issue.record("Unexpected operation error: \(operation)")
-            return
-        }
+    } catch let MacOSVirtualizationProbeError.virtualMachineFailed(underlying) {
         #expect(underlying as? TestFailure == .runnerJob)
-        #expect(cleanup as? TestFailure == .runnerJob)
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
@@ -695,7 +686,7 @@ func virtualizationProbeChecksTheRealEntitlementBeforeFileAccess() throws {
     }
 }
 
-private struct ProbeBundleFixture {
+struct ProbeBundleFixture {
     let rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(
         "yieldd-macos-probe-tests-\(UUID().uuidString)",
         isDirectory: true
@@ -776,7 +767,7 @@ private func expectStoppedUnexpectedly(_ operation: () throws -> Void) {
     }
 }
 
-private final class ProbeVirtualMachine: @unchecked Sendable,
+final class ProbeVirtualMachine: @unchecked Sendable,
     MacOSVirtualMachineControlling
 {
     private let lock = NSLock()
