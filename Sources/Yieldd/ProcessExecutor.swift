@@ -375,6 +375,7 @@ struct ProcessExecutor: ProcessExecuting {
         sigemptyset(&defaultSignals)
         sigaddset(&defaultSignals, SIGINT)
         sigaddset(&defaultSignals, SIGTERM)
+        sigaddset(&defaultSignals, SIGHUP)
         try requirePOSIXSuccess(posix_spawnattr_setsigdefault(&attributes, &defaultSignals))
         var signalMask = sigset_t()
         sigemptyset(&signalMask)
