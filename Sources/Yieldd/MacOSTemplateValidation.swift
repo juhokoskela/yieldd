@@ -16,7 +16,6 @@ enum MacOSTemplateValidation {
         }
         if (!metadata || !Array.isArray(metadata.runtimes)) throw new Error('Malformed simulator runtime metadata: expected a runtimes array.');
         var runtimes = metadata.runtimes;
-        var selection;
         for (var i = 0; i < runtimes.length; i++) {
             var runtime = runtimes[i];
             if (!runtime || typeof runtime.identifier !== 'string' || typeof runtime.isAvailable !== 'boolean') {
@@ -30,11 +29,10 @@ enum MacOSTemplateValidation {
                     throw new Error('Malformed simulator runtime metadata: invalid device type entry.');
                 }
                 if (types[j].identifier.indexOf('com.apple.CoreSimulator.SimDeviceType.iPhone-') === 0) {
-                    selection = runtime.identifier + ' ' + types[j].identifier;
+                    return runtime.identifier + ' ' + types[j].identifier;
                 }
             }
         }
-        if (selection) return selection;
         throw new Error('No available compatible iPhone simulator was found. Install an iOS Simulator runtime in Xcode Settings > Components in the template.');
     }
     """#

@@ -53,6 +53,26 @@ struct MacOSTemplateValidationTests {
     }
 
     @Test
+    func simulatorSelectionStopsBeforeUnusedTrailingMetadata() throws {
+        let fixture = try SimulatorScriptFixture()
+        defer { fixture.remove() }
+        let runtime = "com.apple.CoreSimulator.SimRuntime.iOS-26-0"
+        let device = "com.apple.CoreSimulator.SimDeviceType.iPhone-17"
+        try Data("""
+        {"runtimes": [
+            {"identifier": "\(runtime)", "isAvailable": true, "supportedDeviceTypes": [
+                {"identifier": "\(device)"}, null
+            ]},
+            null
+        ]}
+        """.utf8).write(to: fixture.metadata)
+        let result = try fixture.select()
+        #expect(result.terminationStatus == 0)
+        #expect(result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines) == "\(runtime) \(device)")
+        #expect(result.stderr.isEmpty)
+    }
+
+    @Test
     func simulatorSelectionReportsNoCompatibleAvailablePair() throws {
         let fixture = try SimulatorScriptFixture()
         defer { fixture.remove() }
