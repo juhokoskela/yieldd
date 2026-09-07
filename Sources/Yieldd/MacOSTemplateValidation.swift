@@ -7,18 +7,35 @@ enum MacOSTemplateValidation {
     ObjC.import('Foundation');
     function run(argv) {
         var text = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null);
-        var runtimes = JSON.parse(ObjC.unwrap(text)).runtimes;
-        for (var i = runtimes.length - 1; i >= 0; i--) {
+        if (text.isNil()) throw new Error('Could not read simulator runtime metadata. Check the CoreSimulator runtime listing.');
+        var metadata;
+        try {
+            metadata = JSON.parse(ObjC.unwrap(text));
+        } catch (error) {
+            throw new Error('Malformed simulator runtime metadata: ' + error.message);
+        }
+        if (!metadata || !Array.isArray(metadata.runtimes)) throw new Error('Malformed simulator runtime metadata: expected a runtimes array.');
+        var runtimes = metadata.runtimes;
+        var selection;
+        for (var i = 0; i < runtimes.length; i++) {
             var runtime = runtimes[i];
+            if (!runtime || typeof runtime.identifier !== 'string' || typeof runtime.isAvailable !== 'boolean') {
+                throw new Error('Malformed simulator runtime metadata: invalid runtime entry.');
+            }
             if (!runtime.isAvailable || runtime.identifier.indexOf('com.apple.CoreSimulator.SimRuntime.iOS-') !== 0) continue;
-            var types = runtime.supportedDeviceTypes || [];
-            for (var j = types.length - 1; j >= 0; j--) {
+            var types = runtime.supportedDeviceTypes;
+            if (!Array.isArray(types)) throw new Error('Malformed simulator runtime metadata: expected supportedDeviceTypes.');
+            for (var j = 0; j < types.length; j++) {
+                if (!types[j] || typeof types[j].identifier !== 'string') {
+                    throw new Error('Malformed simulator runtime metadata: invalid device type entry.');
+                }
                 if (types[j].identifier.indexOf('com.apple.CoreSimulator.SimDeviceType.iPhone-') === 0) {
-                    return runtime.identifier + ' ' + types[j].identifier;
+                    selection = runtime.identifier + ' ' + types[j].identifier;
                 }
             }
         }
-        throw new Error('Install an available iOS Simulator runtime in Xcode Settings > Components in the template.');
+        if (selection) return selection;
+        throw new Error('No available compatible iPhone simulator was found. Install an iOS Simulator runtime in Xcode Settings > Components in the template.');
     }
     """#
 
@@ -53,16 +70,11 @@ enum MacOSTemplateValidation {
     selection="$(/usr/bin/osascript -l JavaScript - "$work_directory/runtimes.json" <<'JAVASCRIPT'
     \#(simulatorSelectionScript)
     JAVASCRIPT
-    )" || fail "No compatible iPhone simulator is available; install an iOS runtime in the template."
+    )"
     read -r runtime device_type <<< "$selection"
     device="$("$simctl" create yieldd-template-test "$device_type" "$runtime")" || fail "CoreSimulator could not create a device; repair the selected iOS runtime in the template."
-    "$simctl" boot "$device" || fail "Simulator boot failed; verify the runner console login and GUI launchd domain in the template."
-    "$simctl" bootstatus "$device" -b || fail "Simulator startup failed; check the iOS runtime and finish Xcode first-launch setup in the template."
+    "$simctl" bootstatus "$device" -b || fail "Simulator boot or startup failed; check the iOS runtime, runner console login, and Xcode first-launch setup in the template."
     "$simctl" io "$device" screenshot "$work_directory/screenshot.png" || fail "Simulator screenshot failed; verify the template has a working GUI login session."
     [[ -s "$work_directory/screenshot.png" ]] || fail "CoreSimulator produced an empty screenshot."
-    "$simctl" shutdown "$device" || fail "CoreSimulator could not shut down the test device."
-    "$simctl" delete "$device" || fail "CoreSimulator could not delete the test device."
-    # The host destroys this entire clone, including diagnostic files, on every exit path.
-    echo "Xcode, iOS Simulator boot, and screenshot validation passed."
     """#
 }

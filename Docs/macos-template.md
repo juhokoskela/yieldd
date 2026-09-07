@@ -33,6 +33,6 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app
 .build/yieldd.app/Contents/MacOS/yieldd machine-test --template /absolute/path/VM.bundle
 ```
 
-The command boots a disposable clone and checks SSH, console login, the GUI domain, Xcode, an installed iOS runtime, simulator boot, and screenshot capture. Fix a reported prerequisite in the template, shut it down, and repeat validation. A timeout still destroys the clone. Validation does not download or update Xcode or simulator runtimes.
+The command boots a disposable clone and checks SSH, console login, the GUI domain, Xcode, an available compatible iOS runtime and iPhone device type, simulator boot, and screenshot capture. It does not require the newest runtime or device, or test simulator teardown. Fix a reported prerequisite in the template, shut it down, and repeat validation. Cleanup is attempted even after a timeout; if destruction fails, the command reports it and leaves the clone for recovery. Validation does not download or update Xcode or simulator runtimes.
 
 After validation passes, use `runner-test --template` with a trusted workflow labeled `yieldd-macos`. Jobs get fresh clones; they do not reuse the validation guest or change the template.
