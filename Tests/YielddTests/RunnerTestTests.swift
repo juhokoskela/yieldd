@@ -536,7 +536,7 @@ func recoveryRejectsInvalidLeaseBeforeSweepingClones() throws {
 }
 
 @Test
-func machineTestReportsRecoveryRetriesAndLeaseClearFailures() throws {
+func sharedReporterEmitsRecoveryRetriesAndLeaseClearFailures() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer {
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateDirectory.path)
@@ -564,7 +564,7 @@ func machineTestReportsRecoveryRetriesAndLeaseClearFailures() throws {
         },
         stateChanged: {
             states.append($0)
-            MachineTestCommand.reportRecoveryState($0, output: output)
+            reportRunnerRecoveryState($0, output: output)
         }
     )
     #expect(try recovery.run() == [runnerTestID])
@@ -604,6 +604,18 @@ func recoveryFactoryPreservesCancellationIdentity(signal: Bool) throws {
     }
     #expect(try leaseStore.load() == [lease])
     #expect(events.values.isEmpty)
+}
+
+@Test
+func sharedRecoveryReporterLeavesCommandSpecificStatesSilent() {
+    let messages = RecoveryMessages()
+    let output = RunnerServiceOutput(info: messages.append, warning: messages.append, error: messages.append)
+    let states: [RunnerSessionState] = [
+        .preparing(runnerTestID), .waitingForMemory(runnerTestID),
+        .waitingForJob(runnerTestID), .cleaningUp(runnerTestID),
+    ]
+    for state in states { reportRunnerRecoveryState(state, output: output) }
+    #expect(messages.values.isEmpty)
 }
 
 private final class RecoveryMessages: @unchecked Sendable {

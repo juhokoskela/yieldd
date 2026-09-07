@@ -49,10 +49,8 @@ struct RunnerTestCommand: ParsableCommand {
             switch state {
             case let .waitingForMemory(id):
                 print("Runner \(id.value) is waiting for available host memory.")
-            case let .waitingForGitHubCleanup(id, retryDelay):
-                print(githubCleanupRetryMessage(id: id, delay: retryDelay))
-            case let .leaseCleanupFailed(id, reason):
-                writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
+            case .waitingForGitHubCleanup, .leaseCleanupFailed:
+                reportRunnerRecoveryState(state)
             case .preparing, .waitingForJob, .cleaningUp:
                 break
             }

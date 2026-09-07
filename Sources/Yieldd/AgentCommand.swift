@@ -241,18 +241,7 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
             containerURL: configuration.containerURL,
             ghURL: configuration.ghURL,
             stop: stop,
-            stateChanged: { state in
-                switch state {
-                case let .waitingForGitHubCleanup(id, retryDelay):
-                    print(githubCleanupRetryMessage(id: id, delay: retryDelay))
-                case let .leaseCleanupFailed(id, reason):
-                    writeToStandardError(
-                        "Warning: Could not clear runner lease for \(id.value): \(reason)\n"
-                    )
-                case .preparing, .waitingForMemory, .waitingForJob, .cleaningUp:
-                    break
-                }
-            }
+            stateChanged: { reportRunnerRecoveryState($0) }
         )
         for id in try recovery.run() {
             print("Cleaned up abandoned runner \(id.value).")
