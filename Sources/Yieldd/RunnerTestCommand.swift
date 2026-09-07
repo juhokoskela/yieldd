@@ -15,6 +15,9 @@ struct RunnerTestCommand: ParsableCommand {
     @Option(name: .long, help: "Maximum number of minutes to wait for a job, up to 1440.")
     var timeout = 120
 
+    @OptionGroup
+    var machine: RunnerMachineOptions
+
     mutating func validate() throws {
         guard timeout > 0 else {
             throw ValidationError("--timeout must be greater than zero.")
@@ -32,16 +35,11 @@ struct RunnerTestCommand: ParsableCommand {
     }
 
     private func run(repository: GitHubRepository, leaseStore: RunnerLeaseStore) throws {
-        let signalMonitor = try SignalMonitor()
+        let signalMonitor = try SignalMonitor(signals: [SIGINT, SIGTERM, SIGHUP])
         let locator = ExecutableLocator()
         let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
-        let backend = AppleContainerBackend(
-            containerURL: try locator.locate("container"),
-            executor: executor,
-            dockerReadiness: DockerReadiness(
-                wait: signalMonitor.wait,
-                checkCancellation: signalMonitor.check
-            )
+        let backend = try machine.makeBackend(
+            leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor
         )
         let github = GitHubRunnerClient(
             ghURL: try locator.locate("gh"),
@@ -62,7 +60,7 @@ struct RunnerTestCommand: ParsableCommand {
         let session = EphemeralRunnerSession(
             backend: backend,
             github: github,
-            memoryAdmission: RunnerMemoryAdmission(),
+            memoryAdmission: RunnerMemoryAdmission(reservationBytes: backend.platform.memoryReservationBytes),
             jobTimeout: TimeInterval(timeout) * 60,
             checkCancellation: signalMonitor.check,
             recoveryWait: signalMonitor.wait,
@@ -71,7 +69,10 @@ struct RunnerTestCommand: ParsableCommand {
         )
 
         let recovery = RunnerRecovery(
-            linuxBackend: backend, github: github, leaseStore: leaseStore,
+            linuxBackend: {
+                AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor)
+            },
+            github: github, leaseStore: leaseStore,
             recoveryWait: signalMonitor.wait, checkCancellation: signalMonitor.check,
             stateChanged: stateChanged
         )
@@ -79,9 +80,9 @@ struct RunnerTestCommand: ParsableCommand {
             print("Cleaned up abandoned runner \(recoveredID.value).")
         }
 
-        let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
+        let id = backend.platform.makeTestRunnerID()
         print("Starting ephemeral runner \(id.value) for \(repository.fullName).")
-        print("Waiting for one job labeled 'yieldd'.")
+        print("Waiting for one job labeled '\(backend.platform.runnerLabel)'.")
 
         try session.run(id: id, repository: repository)
         print("Runner job completed and cleanup passed.")

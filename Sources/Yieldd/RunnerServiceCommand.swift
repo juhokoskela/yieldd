@@ -177,7 +177,7 @@ func makeRunnerRecovery(
         maximumExecutionDeadline: stop.executionDeadline
     )
     return RunnerRecovery(
-        linuxBackend: AppleContainerBackend(containerURL: containerURL, executor: executor),
+        linuxBackend: { AppleContainerBackend(containerURL: containerURL, executor: executor) },
         github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
         leaseStore: leaseStore,
         recoveryWait: stop.wait,

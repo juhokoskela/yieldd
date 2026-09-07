@@ -181,7 +181,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         try MacOSGuestSSH.validateTemplate(at: templateURL)
     }
 
-    private func requireSeparateTemplate() throws {
+    func requireSeparateTemplate() throws {
         let root = clones.rootURL.pathComponents
         guard !templateURL.pathComponents.starts(with: root) else {
             throw MacOSVirtualizationBackendError.templateInsideCloneRoot

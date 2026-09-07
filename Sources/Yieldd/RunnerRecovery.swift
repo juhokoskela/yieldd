@@ -2,14 +2,14 @@ import Foundation
 
 // Run only while holding runner ownership, before any new session can provision a VM.
 struct RunnerRecovery {
-    let linuxBackend: any RunnerBackend
+    private let linuxBackend: () throws -> any RunnerBackend
     let leaseStore: RunnerLeaseStore
     let clones: MacOSRunnerCloneStore
     private let cleanup: RunnerCleanup
     private let checkCancellation: () throws -> Void
 
     init(
-        linuxBackend: any RunnerBackend,
+        linuxBackend: @escaping () throws -> any RunnerBackend,
         github: any GitHubRunnerManaging,
         leaseStore: RunnerLeaseStore,
         recoveryWait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
@@ -43,10 +43,14 @@ struct RunnerRecovery {
             let failures: [RunnerSessionCleanupFailure]
             switch lease.platform {
             case .linux:
-                failures = cleanup.run(
-                    lifecycle: .runnerMayBeRunning, backend: linuxBackend,
-                    id: lease.runnerID, repository: lease.repository
-                )
+                do {
+                    failures = cleanup.run(
+                        lifecycle: .runnerMayBeRunning, backend: try linuxBackend(),
+                        id: lease.runnerID, repository: lease.repository
+                    )
+                } catch {
+                    failures = [RunnerSessionCleanupFailure(step: .machine, error: error)]
+                }
             case .macOS:
                 failures = cleanup.removeRegistrationAndClone(
                     id: lease.runnerID, repository: lease.repository, clones: clones

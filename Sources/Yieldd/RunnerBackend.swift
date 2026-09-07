@@ -19,6 +19,25 @@ enum RunnerGuestUser: String, Equatable, Sendable {
 enum RunnerPlatform: String, Codable, Sendable {
     case linux
     case macOS
+
+    var memoryReservationBytes: UInt64 {
+        switch self {
+        case .linux: AppleContainerBackend.memoryBytes
+        case .macOS: MacOSVirtualMachineLifecycle.memoryBytes
+        }
+    }
+
+    var runnerLabel: String {
+        switch self {
+        case .linux: "yieldd"
+        case .macOS: "yieldd-macos"
+        }
+    }
+
+    func makeTestRunnerID() -> RunnerID {
+        let prefix = self == .macOS ? "yieldd-macos-test" : "yieldd-test"
+        return RunnerID(value: "\(prefix)-\(UUID().uuidString.lowercased())")
+    }
 }
 
 enum RunnerMemoryAllocation: String, Equatable, Sendable {

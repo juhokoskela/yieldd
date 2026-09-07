@@ -4,26 +4,44 @@ import Foundation
 struct MachineTestCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "machine-test",
-        abstract: "Run a temporary Docker-in-machine integration test."
+        abstract: "Validate a temporary Linux machine or macOS template clone."
     )
 
+    @OptionGroup
+    var machine: RunnerMachineOptions
+
     mutating func run() throws {
-        try withRunnerOwnership { _ in
-            let signalMonitor = try SignalMonitor()
-            let containerURL = try ExecutableLocator().locate("container")
-            let backend = AppleContainerBackend(
-                containerURL: containerURL,
-                executor: ProcessExecutor(checkCancellation: signalMonitor.check),
-                dockerReadiness: DockerReadiness(
-                    wait: signalMonitor.wait,
-                    checkCancellation: signalMonitor.check
-                )
+        try withRunnerOwnership { leaseStore in
+            let signalMonitor = try SignalMonitor(signals: [SIGINT, SIGTERM, SIGHUP])
+            let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
+            let backend = try machine.makeBackend(
+                leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor
             )
-            let id = RunnerID(value: "yieldd-test-\(UUID().uuidString.lowercased())")
+            if backend.platform == .macOS {
+                if try leaseStore.load().isEmpty {
+                    try MacOSRunnerCloneStore(stateDirectory: leaseStore.directory)
+                        .removeUnleased(keeping: [], checkCancellation: signalMonitor.check)
+                } else {
+                    let locator = ExecutableLocator()
+                    let recovery = RunnerRecovery(
+                        linuxBackend: {
+                            AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor)
+                        },
+                        github: GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor),
+                        leaseStore: leaseStore,
+                        recoveryWait: signalMonitor.wait,
+                        checkCancellation: signalMonitor.check
+                    )
+                    for id in try recovery.run() {
+                        print("Cleaned up abandoned runner \(id.value).")
+                    }
+                }
+            }
+            let id = backend.platform.makeTestRunnerID()
 
             try MachineTestRunner(
                 backend: backend,
-                memoryAdmission: RunnerMemoryAdmission(),
+                memoryAdmission: RunnerMemoryAdmission(reservationBytes: backend.platform.memoryReservationBytes),
                 checkCancellation: signalMonitor.check,
                 waitingForMemory: {
                     print("Machine test is waiting for available host memory.")
@@ -65,11 +83,16 @@ struct MachineTestRunner {
             machineMayExist = true
             try backend.create(id: id, memory: reservation.allocation)
             try checkCancellation()
-            try backend.exec(
-                ["docker", "run", "--rm", "hello-world"],
-                timeout: Self.helloWorldTimeout,
-                on: id
-            )
+            switch backend.platform {
+            case .linux:
+                try backend.exec(
+                    ["docker", "run", "--rm", "hello-world"],
+                    timeout: Self.helloWorldTimeout,
+                    on: id
+                )
+            case .macOS:
+                try MacOSTemplateValidation.run(backend: backend, id: id)
+            }
         }
 
         let cleanup = machineMayExist
