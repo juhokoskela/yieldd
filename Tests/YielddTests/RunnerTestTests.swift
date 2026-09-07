@@ -498,7 +498,16 @@ func macOSRecoveryDoesNotDependOnLinuxTools(hasLinuxLease: Bool) throws {
         github: RunnerTestGitHub(events: events), leaseStore: leaseStore
     )
     if hasLinuxLease {
-        #expect(throws: RunnerSessionError.self) { try recovery.run() }
+        let error = try #require(#expect(throws: RunnerSessionError.self) { try recovery.run() })
+        guard case let .cleanupFailed(failures) = error,
+              failures.count == 1,
+              case let RunnerRecoveryError.linuxBackendUnavailable(underlying) = failures[0].error else {
+            Issue.record("Expected a Linux backend recovery failure")
+            return
+        }
+        #expect(failures[0].step == .machine)
+        #expect((underlying as? TestFailure) == .create)
+        #expect(describeError(error).contains("Restore the container executable"))
     } else {
         #expect(try recovery.run() == [macID])
     }
@@ -524,6 +533,84 @@ func recoveryRejectsInvalidLeaseBeforeSweepingClones() throws {
     #expect(throws: RunnerLeaseError.self) { try recovery.run() }
     #expect(FileManager.default.fileExists(atPath: orphan.path))
     #expect(events.values.isEmpty)
+}
+
+@Test
+func machineTestReportsRecoveryRetriesAndLeaseClearFailures() throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateDirectory.path)
+        try? FileManager.default.removeItem(at: stateDirectory)
+    }
+    let lease = RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository, platform: .macOS)
+    try leaseStore.save(lease)
+    let messages = RecoveryMessages()
+    let events = RunnerTestEventRecorder()
+    let output = RunnerServiceOutput(
+        info: { messages.append("info: \($0)") },
+        warning: { messages.append("warning: \($0)") },
+        error: { messages.append("error: \($0)") }
+    )
+    var states: [RunnerSessionState] = []
+    let recovery = RunnerRecovery(
+        linuxBackend: { throw TestFailure.create },
+        github: RunnerTestGitHub(events: events, removeOutcomes: [
+            .failure(GitHubRunnerClientError.runnerBusy(name: runnerTestID.value)), .success(()),
+        ]),
+        leaseStore: leaseStore,
+        recoveryWait: { delay in
+            #expect(delay == 1)
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: stateDirectory.path)
+        },
+        stateChanged: {
+            states.append($0)
+            MachineTestCommand.reportRecoveryState($0, output: output)
+        }
+    )
+    #expect(try recovery.run() == [runnerTestID])
+    #expect(states.first == .waitingForGitHubCleanup(runnerTestID, retryDelay: 1))
+    guard case let .leaseCleanupFailed(id, reason) = states.last else {
+        Issue.record("Expected a lease-clear failure after the busy-runner retry")
+        return
+    }
+    #expect(id == runnerTestID)
+    #expect(!reason.isEmpty)
+    #expect(messages.values == [
+        "info: \(githubCleanupRetryMessage(id: runnerTestID, delay: 1))",
+        "warning: Could not clear runner lease for \(runnerTestID.value): \(reason)",
+    ])
+    #expect(try leaseStore.load() == [lease])
+}
+
+@Test(arguments: [false, true])
+func recoveryFactoryPreservesCancellationIdentity(signal: Bool) throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let lease = RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository)
+    try leaseStore.save(lease)
+    let events = RunnerTestEventRecorder()
+    let recovery = RunnerRecovery(
+        linuxBackend: {
+            if signal { throw SignalInterruption(signal: SIGHUP) }
+            throw CancellationError()
+        },
+        github: RunnerTestGitHub(events: events), leaseStore: leaseStore
+    )
+    let error = try #require(#expect(throws: (any Error).self) { try recovery.run() })
+    if signal {
+        #expect((error as? SignalInterruption)?.signal == SIGHUP)
+    } else {
+        #expect(error is CancellationError)
+    }
+    #expect(try leaseStore.load() == [lease])
+    #expect(events.values.isEmpty)
+}
+
+private final class RecoveryMessages: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+    var values: [String] { lock.withLock { messages } }
+    func append(_ message: String) { lock.withLock { messages.append(message) } }
 }
 
 @Test

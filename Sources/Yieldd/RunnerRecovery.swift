@@ -3,8 +3,8 @@ import Foundation
 // Run only while holding runner ownership, before any new session can provision a VM.
 struct RunnerRecovery {
     private let linuxBackend: () throws -> any RunnerBackend
-    let leaseStore: RunnerLeaseStore
-    let clones: MacOSRunnerCloneStore
+    private let leaseStore: RunnerLeaseStore
+    private let clones: MacOSRunnerCloneStore
     private let cleanup: RunnerCleanup
     private let checkCancellation: () throws -> Void
 
@@ -49,7 +49,10 @@ struct RunnerRecovery {
                         id: lease.runnerID, repository: lease.repository
                     )
                 } catch {
-                    failures = [RunnerSessionCleanupFailure(step: .machine, error: error)]
+                    if isCancellation(error) { throw error }
+                    failures = [RunnerSessionCleanupFailure(
+                        step: .machine, error: RunnerRecoveryError.linuxBackendUnavailable(error)
+                    )]
                 }
             case .macOS:
                 failures = cleanup.removeRegistrationAndClone(
@@ -83,5 +86,16 @@ struct RunnerRecovery {
             throw RunnerSessionError.cleanupFailed(recoveryFailures)
         }
         return leases.map(\.runnerID)
+    }
+}
+
+enum RunnerRecoveryError: Error, LocalizedError {
+    case linuxBackendUnavailable(any Error)
+
+    var errorDescription: String? {
+        switch self {
+        case let .linuxBackendUnavailable(error):
+            "Linux lease recovery requires Apple Container. Restore the container executable and retry recovery: \(describeError(error))"
+        }
     }
 }

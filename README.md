@@ -83,7 +83,7 @@ Then start one ephemeral runner for that repository:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd runner-test OWNER/REPOSITORY
 ```
 
-The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also removes any exact-name registration left behind and destroys the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM.
+The command requests a short-lived registration token through the authenticated `gh` CLI, sends it to the guest over stdin, registers an ephemeral runner, and waits up to 120 minutes for one job. Override that limit with `--timeout MINUTES`, up to 1440 minutes. GitHub removes the ephemeral registration after the job. The command also attempts to remove any exact-name registration left behind and destroy the machine, including when setup or the job fails, times out, or receives Ctrl+C or SIGTERM. Cleanup failures are reported, and the lease remains available for recovery if the machine cannot be destroyed.
 
 After macOS template validation passes, queue a trusted workflow with `runs-on: yieldd-macos`, then run:
 
@@ -93,7 +93,7 @@ After macOS template validation passes, queue a trusted workflow with `runs-on: 
 
 macOS runners have the `yieldd-macos` label and no default labels. Their names start with `yieldd-macos-test-`. Each job uses a fresh clone, and closing the controlling terminal also triggers cleanup through SIGHUP. The opt-in `macOS runner test` workflow can be dispatched manually once it is on the default branch; it is never queued automatically for pull requests.
 
-`machine-test`, `runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock, and runner commands record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next runner command cleans up those exact runners before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps its lease and the next command waits with exponential backoff until GitHub releases it.
+`machine-test`, `runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock. GitHub runner sessions record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, `runner-test`, `serve`, the local agent, and macOS `machine-test` recover those exact runners before creating another machine. Linux `machine-test` does not perform recovery. If GitHub still considers an interrupted runner busy, recovery keeps its lease and waits with exponential backoff until GitHub releases it.
 
 Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched. macOS slots in `serve` and the agent configuration are not exposed yet.
 

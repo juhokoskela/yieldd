@@ -30,7 +30,8 @@ struct MachineTestCommand: ParsableCommand {
                         github: GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor),
                         leaseStore: leaseStore,
                         recoveryWait: signalMonitor.wait,
-                        checkCancellation: signalMonitor.check
+                        checkCancellation: signalMonitor.check,
+                        stateChanged: { Self.reportRecoveryState($0) }
                     )
                     for id in try recovery.run() {
                         print("Cleaned up abandoned runner \(id.value).")
@@ -48,6 +49,17 @@ struct MachineTestCommand: ParsableCommand {
                 }
             ).run(id: id)
             print("Machine test passed.")
+        }
+    }
+
+    static func reportRecoveryState(_ state: RunnerSessionState, output: RunnerServiceOutput = .terminal) {
+        switch state {
+        case let .waitingForGitHubCleanup(id, retryDelay):
+            output.info(githubCleanupRetryMessage(id: id, delay: retryDelay))
+        case let .leaseCleanupFailed(id, reason):
+            output.warning("Could not clear runner lease for \(id.value): \(reason)")
+        case .waitingForMemory, .preparing, .waitingForJob, .cleaningUp:
+            break
         }
     }
 }
