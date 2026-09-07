@@ -951,6 +951,49 @@ func leaseIsPersistedImmediatelyBeforeMachineCreationAndClearedAfterFailure(plat
     #expect(try leaseStore.load().isEmpty)
 }
 
+@Test(arguments: [RunnerPlatform.linux, .macOS])
+func leaseSynchronizationFailureClearsPublishedLeaseBeforeReturning(platform: RunnerPlatform) throws {
+    let (readStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let alias = stateDirectory.appendingPathComponent("alias")
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: stateDirectory)
+    // Publication succeeds through the alias, but synchronizing it with O_NOFOLLOW fails.
+    let leaseStore = try RunnerLeaseStore(directory: alias)
+    let events = RunnerTestEventRecorder()
+    let memoryAdmission = singleRunnerMemoryAdmission()
+    var publishedLeases: Result<[RunnerLease], any Error>?
+
+    #expect(throws: POSIXError(.ELOOP)) {
+        try EphemeralRunnerSession(
+            backend: RunnerTestBackend(events: events, platform: platform),
+            github: RunnerTestGitHub(events: events),
+            memoryAdmission: memoryAdmission,
+            stateChanged: { state in
+                if case .cleaningUp = state {
+                    publishedLeases = Result { try readStore.load() }
+                }
+            },
+            leaseStore: leaseStore
+        ).run(id: runnerTestID, repository: runnerTestRepository)
+    }
+
+    let observedLeases = try #require(publishedLeases).get()
+    #expect(observedLeases == [
+        RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository, platform: platform),
+    ])
+    #expect(events.values == [
+        .createRegistrationToken(runnerTestRepository),
+        .destroy(runnerTestID),
+    ])
+    #expect(try readStore.load().isEmpty)
+    var blocked = false
+    let reservation = try memoryAdmission.acquire(
+        checkCancellation: { if blocked { throw CancellationError() } },
+        onBlocked: { blocked = true }
+    )
+    memoryAdmission.release(reservation)
+}
+
 @Test(arguments: [
     HostMemoryPressure.warning,
     HostMemoryPressure.unknown,

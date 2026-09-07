@@ -55,8 +55,8 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             reservation = acquiredReservation
             let registrationToken = try github.createRegistrationToken(for: repository)
             try checkCancellation()
-            try leaseStore?.save(RunnerLease(runnerID: id, repository: repository, platform: backend.platform))
             lifecycle = .machineMayExist
+            try leaseStore?.save(RunnerLease(runnerID: id, repository: repository, platform: backend.platform))
             try backend.create(id: id, memory: acquiredReservation.allocation)
             try checkCancellation()
             lifecycle = .runnerRegistrationMayExist
