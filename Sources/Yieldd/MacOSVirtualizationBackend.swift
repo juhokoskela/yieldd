@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 
 final class MacOSVirtualizationBackend: RunnerBackend {
+    let platform = RunnerPlatform.macOS
     private struct Guest {
         let machine: any MacOSVirtualMachineControlling
         let address: String?

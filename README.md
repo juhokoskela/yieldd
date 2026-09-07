@@ -72,6 +72,8 @@ The command requests a short-lived registration token through the authenticated 
 
 `machine-test`, `runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock, and runner commands record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, the next runner command cleans up those exact runners before creating another one. If GitHub still considers an interrupted runner busy, `yieldd` keeps its lease and the next command waits with exponential backoff until GitHub releases it.
 
+Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched. Selecting macOS runners through the commands and agent configuration is not exposed yet.
+
 ## Foreground runner service
 
 To keep serving jobs until the process is stopped, run:

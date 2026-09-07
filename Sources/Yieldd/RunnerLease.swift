@@ -4,6 +4,13 @@ import Foundation
 struct RunnerLease: Equatable, Sendable {
     let runnerID: RunnerID
     let repository: GitHubRepository
+    let platform: RunnerPlatform
+
+    init(runnerID: RunnerID, repository: GitHubRepository, platform: RunnerPlatform = .linux) {
+        self.runnerID = runnerID
+        self.repository = repository
+        self.platform = platform
+    }
 }
 
 // The lock serializes every read-modify-write operation on the shared lease file.
@@ -36,6 +43,9 @@ final class RunnerLeaseStore: @unchecked Sendable {
 
     func save(_ lease: RunnerLease) throws {
         try lock.withLock {
+            guard lease.runnerID.isValid else {
+                throw RunnerLeaseError.invalidRunnerID(path: fileURL.path)
+            }
             var leases = try loadUnlocked()
             if let index = leases.firstIndex(where: { $0.runnerID == lease.runnerID }) {
                 leases[index] = lease
@@ -97,7 +107,8 @@ final class RunnerLeaseStore: @unchecked Sendable {
             }
             return RunnerLease(
                 runnerID: runnerID,
-                repository: repository
+                repository: repository,
+                platform: storedLease.platform
             )
         }
         guard Set(leases.map(\.runnerID)).count == leases.count else {
@@ -123,7 +134,8 @@ final class RunnerLeaseStore: @unchecked Sendable {
             .map { lease in
                 StoredRunnerLease(
                     runnerID: lease.runnerID.value,
-                    repository: lease.repository.fullName
+                    repository: lease.repository.fullName,
+                    platform: lease.platform
                 )
             }
         let data = try JSONEncoder().encode(stored)
@@ -134,6 +146,17 @@ final class RunnerLeaseStore: @unchecked Sendable {
             )
         }
         try data.write(to: fileURL, options: .atomic)
+        try synchronize(fileURL)
+        try synchronize(directory)
+    }
+
+    private func synchronize(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { _ = Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 }
 
@@ -201,4 +224,24 @@ enum RunnerOwnershipError: Error, Equatable, LocalizedError {
 private struct StoredRunnerLease: Codable {
     let runnerID: String
     let repository: String
+    let platform: RunnerPlatform
+
+    init(runnerID: String, repository: String, platform: RunnerPlatform) {
+        self.runnerID = runnerID
+        self.repository = repository
+        self.platform = platform
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runnerID, repository, platform
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        runnerID = try values.decode(String.self, forKey: .runnerID)
+        repository = try values.decode(String.self, forKey: .repository)
+        platform = try values.contains(.platform)
+            ? values.decode(RunnerPlatform.self, forKey: .platform)
+            : .linux
+    }
 }

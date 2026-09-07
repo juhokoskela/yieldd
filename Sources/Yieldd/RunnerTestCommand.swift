@@ -47,6 +47,18 @@ struct RunnerTestCommand: ParsableCommand {
             ghURL: try locator.locate("gh"),
             executor: executor
         )
+        let stateChanged: (RunnerSessionState) -> Void = { state in
+            switch state {
+            case let .waitingForMemory(id):
+                print("Runner \(id.value) is waiting for available host memory.")
+            case let .waitingForGitHubCleanup(id, retryDelay):
+                print(githubCleanupRetryMessage(id: id, delay: retryDelay))
+            case let .leaseCleanupFailed(id, reason):
+                writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
+            case .preparing, .waitingForJob, .cleaningUp:
+                break
+            }
+        }
         let session = EphemeralRunnerSession(
             backend: backend,
             github: github,
@@ -54,22 +66,16 @@ struct RunnerTestCommand: ParsableCommand {
             jobTimeout: TimeInterval(timeout) * 60,
             checkCancellation: signalMonitor.check,
             recoveryWait: signalMonitor.wait,
-            stateChanged: { state in
-                switch state {
-                case let .waitingForMemory(id):
-                    print("Runner \(id.value) is waiting for available host memory.")
-                case let .waitingForGitHubCleanup(id, retryDelay):
-                    print(githubCleanupRetryMessage(id: id, delay: retryDelay))
-                case let .leaseCleanupFailed(id, reason):
-                    writeToStandardError("Warning: Could not clear runner lease for \(id.value): \(reason)\n")
-                case .preparing, .waitingForJob, .cleaningUp:
-                    break
-                }
-            },
+            stateChanged: stateChanged,
             leaseStore: leaseStore
         )
 
-        for recoveredID in try session.recoverAbandonedRunners() {
+        let recovery = RunnerRecovery(
+            linuxBackend: backend, github: github, leaseStore: leaseStore,
+            recoveryWait: signalMonitor.wait, checkCancellation: signalMonitor.check,
+            stateChanged: stateChanged
+        )
+        for recoveredID in try recovery.run() {
             print("Cleaned up abandoned runner \(recoveredID.value).")
         }
 
