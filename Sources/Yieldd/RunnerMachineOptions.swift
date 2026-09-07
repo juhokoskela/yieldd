@@ -18,16 +18,13 @@ struct RunnerMachineOptions: ParsableArguments {
     ) throws -> any RunnerBackend {
         if let template {
             try VirtualizationEntitlement.requireCurrentProcess()
-            let backend = MacOSVirtualizationBackend(
+            return try MacOSVirtualizationBackend(
                 templateURL: URL(fileURLWithPath: template),
                 cloneRootURL: MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).rootURL,
                 executor: executor,
                 checkCancellation: signalMonitor.check,
                 wait: signalMonitor.wait
             )
-            // Reject a template inside the clone root before startup recovery can sweep it.
-            try backend.requireSeparateTemplate()
-            return backend
         }
         return AppleContainerBackend(
             containerURL: try ExecutableLocator().locate("container"),

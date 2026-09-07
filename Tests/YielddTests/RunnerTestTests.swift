@@ -613,6 +613,43 @@ private final class RecoveryMessages: @unchecked Sendable {
     func append(_ message: String) { lock.withLock { messages.append(message) } }
 }
 
+@Test(arguments: [false, true])
+func templateInsideCloneRootIsRejectedBeforeRecovery(symlink: Bool) throws {
+    let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+    let clones = MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let template = try clones.bundleURL(for: RunnerID(value: "yieldd-template"))
+    try FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
+    let contents = Data("template must survive".utf8)
+    let disk = template.appendingPathComponent("Disk.img")
+    try contents.write(to: disk)
+    let alias = stateDirectory.appendingPathComponent("Template.bundle")
+    if symlink { try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: template) }
+    let events = RunnerTestEventRecorder()
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let error = try #require(#expect(throws: MacOSVirtualizationBackendError.self) {
+        _ = try MacOSVirtualizationBackend(
+            templateURL: symlink ? alias : template, cloneRootURL: clones.rootURL, executor: executor
+        )
+        _ = try RunnerRecovery(
+            linuxBackend: { RunnerTestBackend(events: events) },
+            github: RunnerTestGitHub(events: events), leaseStore: leaseStore
+        ).run()
+    })
+    guard case .templateInsideCloneRoot = error else {
+        Issue.record("Expected template location rejection")
+        return
+    }
+    #expect(describeError(error).contains("Move the macOS template"))
+    #expect(describeError(error).contains("Subsequent recovery commands may delete"))
+    #expect(try Data(contentsOf: disk) == contents)
+    #expect(executor.requests.isEmpty)
+    #expect(events.values.isEmpty)
+    // Confirm this fixture really would be swept if initialization allowed recovery to run.
+    try clones.removeUnleased(keeping: [])
+    #expect(!FileManager.default.fileExists(atPath: template.path))
+}
+
 @Test
 func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()

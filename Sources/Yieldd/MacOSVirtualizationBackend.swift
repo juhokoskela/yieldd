@@ -37,9 +37,12 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         requireEntitlement: @escaping () throws -> Void = VirtualizationEntitlement.requireCurrentProcess,
         makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
             MacOSVirtualMachineLifecycle.makeMachine
-    ) {
+    ) throws {
         self.templateURL = templateURL.resolvingSymlinksInPath()
         clones = MacOSRunnerCloneStore(rootURL: cloneRootURL.resolvingSymlinksInPath())
+        guard !self.templateURL.pathComponents.starts(with: clones.rootURL.pathComponents) else {
+            throw MacOSVirtualizationBackendError.templateInsideCloneRoot
+        }
         let ssh = MacOSGuestSSH(templateURL: self.templateURL, executor: executor)
         self.ssh = ssh
         connection = MacOSGuestConnection(resolver: resolver, ssh: ssh)
@@ -128,7 +131,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         } else {
             command = arguments
         }
-        // Both shared session call sites execute as runner; macOS guests have no sudo.
+        // macOS executes every command as runner, including callers' requests for root.
         try ssh.execute(
             command, address: address, standardInput: standardInput,
             timeout: timeout, outputCapture: outputCapture
@@ -157,7 +160,6 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         try lock.withLock {
             // Validate paths even when no in-memory VM survived.
             _ = try clones.bundleURL(for: id)
-            try requireSeparateTemplate()
             try destroyLocked(id)
         }
     }
@@ -176,16 +178,8 @@ final class MacOSVirtualizationBackend: RunnerBackend {
 
     private func validateStorage(_ id: RunnerID) throws {
         _ = try clones.bundleURL(for: id)
-        try requireSeparateTemplate()
         try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
         try MacOSGuestSSH.validateTemplate(at: templateURL)
-    }
-
-    func requireSeparateTemplate() throws {
-        let root = clones.rootURL.pathComponents
-        guard !templateURL.pathComponents.starts(with: root) else {
-            throw MacOSVirtualizationBackendError.templateInsideCloneRoot
-        }
     }
 
     private func checkCleanupDeadline() throws {
@@ -213,7 +207,7 @@ enum MacOSVirtualizationBackendError: Error, LocalizedError {
         case let .notReady(id):
             "macOS runner \(id.value) is not ready."
         case .templateInsideCloneRoot:
-            "The macOS template must be outside the runner clone directory."
+            "Move the macOS template outside the managed runner clone directory before retrying. Subsequent recovery commands may delete templates stored there."
         }
     }
 }
