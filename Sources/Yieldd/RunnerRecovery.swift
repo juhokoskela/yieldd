@@ -2,14 +2,14 @@ import Foundation
 
 // Run only while holding runner ownership, before any new session can provision a VM.
 struct RunnerRecovery {
-    let linuxBackend: any RunnerBackend
-    let leaseStore: RunnerLeaseStore
-    let clones: MacOSRunnerCloneStore
+    private let linuxBackend: () throws -> any RunnerBackend
+    private let leaseStore: RunnerLeaseStore
+    private let clones: MacOSRunnerCloneStore
     private let cleanup: RunnerCleanup
     private let checkCancellation: () throws -> Void
 
     init(
-        linuxBackend: any RunnerBackend,
+        linuxBackend: @escaping () throws -> any RunnerBackend,
         github: any GitHubRunnerManaging,
         leaseStore: RunnerLeaseStore,
         recoveryWait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
@@ -43,10 +43,17 @@ struct RunnerRecovery {
             let failures: [RunnerSessionCleanupFailure]
             switch lease.platform {
             case .linux:
-                failures = cleanup.run(
-                    lifecycle: .runnerMayBeRunning, backend: linuxBackend,
-                    id: lease.runnerID, repository: lease.repository
-                )
+                do {
+                    failures = cleanup.run(
+                        lifecycle: .runnerMayBeRunning, backend: try linuxBackend(),
+                        id: lease.runnerID, repository: lease.repository
+                    )
+                } catch {
+                    if isCancellation(error) { throw error }
+                    failures = [RunnerSessionCleanupFailure(
+                        step: .machine, error: RunnerRecoveryError.linuxBackendUnavailable(error)
+                    )]
+                }
             case .macOS:
                 failures = cleanup.removeRegistrationAndClone(
                     id: lease.runnerID, repository: lease.repository, clones: clones
@@ -79,5 +86,16 @@ struct RunnerRecovery {
             throw RunnerSessionError.cleanupFailed(recoveryFailures)
         }
         return leases.map(\.runnerID)
+    }
+}
+
+enum RunnerRecoveryError: Error, LocalizedError {
+    case linuxBackendUnavailable(any Error)
+
+    var errorDescription: String? {
+        switch self {
+        case let .linuxBackendUnavailable(error):
+            "Linux lease recovery requires Apple Container. Restore the container executable and retry recovery: \(describeError(error))"
+        }
     }
 }

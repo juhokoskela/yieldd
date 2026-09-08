@@ -13,7 +13,7 @@ func macOSBackendPinsSSHToResolvedTemplateAfterSymlinkRetargeting() throws {
     let replacement = fixture.rootURL.appendingPathComponent("Replacement.bundle")
     try FileManager.default.createSymbolicLink(at: link, withDestinationURL: fixture.templateURL)
     let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 4))
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: link, cloneRootURL: fixture.cloneRootURL,
         executor: executor, resolver: BackendAddressResolver(), requireEntitlement: {},
         makeMachine: { url, _ in
@@ -44,7 +44,7 @@ func macOSBackendCreatesOnceAndDestroysRepeatedly() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 3))
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: executor, resolver: BackendAddressResolver(), requireEntitlement: {},
         makeMachine: { url, memory in
@@ -73,7 +73,7 @@ func macOSBackendCleansCloneAfterCreationOrBootFailure(failBoot: Bool) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(startError: TestFailure.create)
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: []), requireEntitlement: {},
         makeMachine: { _, _ in
@@ -96,7 +96,7 @@ func macOSBackendStopsAndRemovesCloneAfterReadinessFailure() throws {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()), .failure(TestFailure.runnerConfiguration),
     ])
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: executor, resolver: BackendAddressResolver(), requireEntitlement: {},
         makeMachine: { _, _ in machine }
@@ -115,7 +115,7 @@ func macOSBackendCancellationDuringReadinessStillCleansUp() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     var cancelled = false
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: []),
         resolver: BackendAddressResolver(addressValue: nil),
@@ -135,7 +135,7 @@ func macOSBackendRetainsMachineAndCloneWhenForcedStopFails() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(stopError: TestFailure.cleanup)
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2)),
         resolver: BackendAddressResolver(), requireEntitlement: {}, makeMachine: { _, _ in machine }
@@ -170,7 +170,7 @@ func macOSBackendRunsThroughTheExistingSession() throws {
     let machine = ProbeVirtualMachine()
     let github = BackendGitHub()
     let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 4))
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: executor, resolver: BackendAddressResolver(), requireEntitlement: {},
         makeMachine: { _, _ in machine }
@@ -204,7 +204,7 @@ func macOSBackendReleasesTerminallyFailedMachine(replaceDirectly: Bool) throws {
     defer { fixture.remove() }
     weak var firstMachine: ProbeVirtualMachine?
     var creations = 0
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 4)),
         resolver: BackendAddressResolver(), requireEntitlement: {},
@@ -235,7 +235,7 @@ func macOSBackendReleasesTerminallyFailedMachine(replaceDirectly: Bool) throws {
 func macOSBackendTerminalFailurePreservesSessionErrorAndReleasesReservation() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: []), requireEntitlement: {},
         makeMachine: { _, _ in ProbeVirtualMachine(stateAfterStart: .failed(TestFailure.runnerJob)) }
@@ -267,7 +267,7 @@ func macOSBackendReleasesMachineThatFailsDuringForcedStop() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     weak var machine: ProbeVirtualMachine?
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2)),
         resolver: BackendAddressResolver(), requireEntitlement: {},
@@ -293,7 +293,7 @@ func macOSBackendReplacesIncompleteCloneBeforeBoot() throws {
         try Data("stale".utf8).write(to: url.appendingPathComponent("stale"))
     }
     let machine = ProbeVirtualMachine()
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2)),
         resolver: BackendAddressResolver(), requireEntitlement: {},
@@ -312,7 +312,7 @@ func macOSBackendTimesOutBootAndCleansUp() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(completesStart: false)
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: []), bootTimeout: 0.001,
         requireEntitlement: {}, makeMachine: { _, _ in machine }
@@ -330,7 +330,7 @@ func macOSBackendHonorsShutdownDeadlineAndRetainsCleanupState() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     var expired = false
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2)),
         resolver: BackendAddressResolver(), maximumExecutionDeadline: { expired ? .now() : nil },
@@ -378,7 +378,7 @@ func macOSBackendBoundsRunnerStopByRemainingShutdownTime() throws {
     let machine = ProbeVirtualMachine()
     let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 3))
     var deadline: DispatchTime?
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: executor, resolver: BackendAddressResolver(),
         maximumExecutionDeadline: { deadline }, requireEntitlement: {},
@@ -402,7 +402,7 @@ func macOSBackendSerializesConcurrentCreationForOneID() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2))
-    let backend = MacOSVirtualizationBackend(
+    let backend = try MacOSVirtualizationBackend(
         templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: executor, resolver: BackendAddressResolver(), requireEntitlement: {},
         makeMachine: { _, _ in machine }

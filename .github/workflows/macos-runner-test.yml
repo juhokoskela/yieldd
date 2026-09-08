@@ -1,0 +1,46 @@
+name: macOS runner test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: yieldd-macos
+    timeout-minutes: 10
+    steps:
+      - name: Check Xcode
+        run: xcodebuild -version
+      - name: Check Swift
+        run: xcrun swift --version
+      - name: Boot a compatible iPhone simulator and capture its screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list runtimes --json > "$RUNNER_TEMP/runtimes.json"
+          selection="$(/usr/bin/osascript -l JavaScript - "$RUNNER_TEMP/runtimes.json" <<'JAVASCRIPT'
+          ObjC.import('Foundation');
+          function run(argv) {
+              var text = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null);
+              var runtimes = JSON.parse(ObjC.unwrap(text)).runtimes;
+              for (var i = 0; i < runtimes.length; i++) {
+                  var runtime = runtimes[i];
+                  if (!runtime.isAvailable || runtime.identifier.indexOf('com.apple.CoreSimulator.SimRuntime.iOS-') !== 0) continue;
+                  var types = runtime.supportedDeviceTypes || [];
+                  for (var j = 0; j < types.length; j++) {
+                      if (types[j].identifier.indexOf('com.apple.CoreSimulator.SimDeviceType.iPhone-') === 0) {
+                          return runtime.identifier + ' ' + types[j].identifier;
+                      }
+                  }
+              }
+              throw new Error('No available compatible iPhone simulator was found.');
+          }
+          JAVASCRIPT
+          )"
+          read -r runtime device_type <<< "$selection"
+          device="$(xcrun simctl create yieldd-workflow-test "$device_type" "$runtime")"
+          xcrun simctl bootstatus "$device" -b
+          xcrun simctl io "$device" screenshot "$RUNNER_TEMP/screenshot.png"
+          test -s "$RUNNER_TEMP/screenshot.png"

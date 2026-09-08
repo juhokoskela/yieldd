@@ -20,6 +20,15 @@ func signalMonitorHandlesTimeoutFailedInstallAndCaughtSignal() throws {
         signalReceived: delivery.record
     )
     try monitor.wait(for: 0)
+    let child = try ProcessExecutor().execute(ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "kill -HUP $$; printf survived"],
+        timeout: 5
+    ))
+    #expect(child.terminationReason == .uncaughtSignal)
+    #expect(child.terminationStatus == SIGHUP)
+    #expect(child.stdout.isEmpty)
+    try monitor.check()
     #expect(Darwin.kill(Darwin.getpid(), SIGHUP) == 0)
 
     do {

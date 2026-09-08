@@ -830,7 +830,7 @@ extension MacOSVirtualizationProbeError: LocalizedError {
         switch self {
         case .missingEntitlement:
             "This executable lacks the com.apple.security.virtualization entitlement. "
-                + "Run the probe from the packaged yieldd.app."
+                + "Use the executable inside the packaged yieldd.app."
         case .entitlementLookupFailed:
             "Could not read the current process's virtualization entitlement."
         case .virtualizationUnavailable:

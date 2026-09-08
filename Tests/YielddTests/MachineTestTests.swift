@@ -48,6 +48,26 @@ func failedHelloWorldStillCleansUp() {
     #expect(backend.calls.filter { $0 == .destroy(machineTestID) }.count == 1)
 }
 
+@Test(arguments: [false, true])
+func macOSMachineValidationAlwaysDestroysClone(validationFails: Bool) throws {
+    let backend = RecordingRunnerBackend(
+        platform: .macOS,
+        execOutcomes: [validationFails ? .failure(TestFailure.helloWorld) : .success(())]
+    )
+    if validationFails {
+        #expect(throws: TestFailure.helloWorld) {
+            try machineTestRunner(backend: backend).run(id: machineTestID)
+        }
+    } else {
+        try machineTestRunner(backend: backend).run(id: machineTestID)
+    }
+    #expect(backend.calls == [
+        .create(machineTestID, .full),
+        .exec(machineTestID, ["/bin/bash", "-s"]),
+        .destroy(machineTestID),
+    ])
+}
+
 @Test
 func failedCreateStillAttemptsCleanup() {
     let backend = RecordingRunnerBackend(createError: TestFailure.create)
@@ -117,17 +137,19 @@ func interruptionAfterCreateCleansUpWithoutRunningChecks() {
 }
 
 private final class RecordingRunnerBackend: RunnerBackend {
-    let platform = RunnerPlatform.linux
+    let platform: RunnerPlatform
     private(set) var calls: [RunnerBackendCall] = []
     private let createError: (any Error)?
     private var execOutcomes: [Result<Void, any Error>]
     private let destroyError: (any Error)?
 
     init(
+        platform: RunnerPlatform = .linux,
         createError: (any Error)? = nil,
         execOutcomes: [Result<Void, any Error>] = [],
         destroyError: (any Error)? = nil
     ) {
+        self.platform = platform
         self.createError = createError
         self.execOutcomes = execOutcomes
         self.destroyError = destroyError
@@ -148,10 +170,16 @@ private final class RecordingRunnerBackend: RunnerBackend {
         as user: RunnerGuestUser,
         on id: RunnerID
     ) throws {
-        #expect(standardInput == nil)
-        #expect(outputCapture == .all)
+        if platform == .macOS {
+            #expect(standardInput == Data(MacOSTemplateValidation.script.utf8))
+            #expect(outputCapture == .tail(maxBytes: MacOSGuestSSH.outputTailBytes))
+            #expect(timeout == MacOSTemplateValidation.timeout)
+        } else {
+            #expect(standardInput == nil)
+            #expect(outputCapture == .all)
+            #expect(timeout == MachineTestRunner.helloWorldTimeout)
+        }
         #expect(user == .runner)
-        #expect(timeout == MachineTestRunner.helloWorldTimeout)
         calls.append(.exec(id, arguments))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall

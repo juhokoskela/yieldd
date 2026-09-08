@@ -65,13 +65,11 @@ func runRunnerService(
         case let .waitingForMemory(id):
             output.info("Runner \(id.value) is waiting for available host memory.")
         case let .waitingForJob(id):
-            output.info("Runner \(id.value) is waiting for one job labeled 'yieldd'.")
-        case let .waitingForGitHubCleanup(id, retryDelay):
-            output.info(githubCleanupRetryMessage(id: id, delay: retryDelay))
+            output.info("Runner \(id.value) is waiting for one job labeled '\(RunnerPlatform.linux.runnerLabel)'.")
+        case .waitingForGitHubCleanup, .leaseCleanupFailed:
+            reportRunnerRecoveryState(state, output: output)
         case let .cleaningUp(id):
             output.info("Cleaning up runner \(id.value).")
-        case let .leaseCleanupFailed(id, reason):
-            output.warning("Could not clear runner lease for \(id.value): \(reason)")
         }
     }
     let makeSession: @Sendable () -> EphemeralRunnerSession = {
@@ -177,13 +175,24 @@ func makeRunnerRecovery(
         maximumExecutionDeadline: stop.executionDeadline
     )
     return RunnerRecovery(
-        linuxBackend: AppleContainerBackend(containerURL: containerURL, executor: executor),
+        linuxBackend: { AppleContainerBackend(containerURL: containerURL, executor: executor) },
         github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
         leaseStore: leaseStore,
         recoveryWait: stop.wait,
         checkCancellation: stop.check,
         stateChanged: stateChanged
     )
+}
+
+func reportRunnerRecoveryState(_ state: RunnerSessionState, output: RunnerServiceOutput = .terminal) {
+    switch state {
+    case let .waitingForGitHubCleanup(id, retryDelay):
+        output.info(githubCleanupRetryMessage(id: id, delay: retryDelay))
+    case let .leaseCleanupFailed(id, reason):
+        output.warning("Could not clear runner lease for \(id.value): \(reason)")
+    case .waitingForMemory, .preparing, .waitingForJob, .cleaningUp:
+        break
+    }
 }
 
 func githubCleanupRetryMessage(id: RunnerID, delay: TimeInterval) -> String {
