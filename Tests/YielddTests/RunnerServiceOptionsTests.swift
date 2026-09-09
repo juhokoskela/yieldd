@@ -58,6 +58,7 @@ func serviceRejectsManagedTemplateBeforeRecovery(symlink: Bool) throws {
         try runRunnerService(
             configuration: configuration, leaseStore: store, containerURL: nil,
             ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), output: .terminal,
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024),
             prepareContainer: {
                 Issue.record("Template validation must precede Container startup")
                 throw TestFailure.unexpectedProcessRequest
