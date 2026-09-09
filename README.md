@@ -34,6 +34,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd doctor
 ```
 
+The `CI` workflow builds and tests yieldd and verifies the signed app on GitHub-hosted `macos-26` runners for pushes to `main` and pull requests. Tests run serially while parallel lifecycle-test timing failures remain unresolved. To exercise the same job on a trusted yieldd macOS guest, manually dispatch `ci.yml` with the `runner` input set to `yieldd-macos`. Automatic CI never selects a self-hosted runner.
+
 ## Guest image
 
 The local-agent installer builds the Ubuntu 24.04 guest image automatically when Linux slots are configured. To build it manually for the foreground commands, run this from the repository root:

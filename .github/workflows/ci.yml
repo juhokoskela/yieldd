@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner for this trusted manual run
+        type: choice
+        default: macos-26
+        options:
+          - macos-26
+          - yieldd-macos
+
+permissions:
+  contents: read
+
+jobs:
+  swift:
+    name: Swift build and tests
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner == 'yieldd-macos' && 'yieldd-macos' || 'macos-26' }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Show runner and toolchain
+        run: |
+          echo "Runner: $RUNNER_NAME"
+          xcodebuild -version
+          swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        # Parallel execution currently hits timing failures in lifecycle tests.
+        run: swift test --no-parallel
+
+      - name: Build and verify signed app
+        run: Scripts/build-local-app.sh
