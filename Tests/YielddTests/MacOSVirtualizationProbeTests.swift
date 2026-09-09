@@ -4,6 +4,18 @@ import Foundation
 import Testing
 @testable import Yieldd
 
+#if arch(arm64)
+import Virtualization
+
+@Test
+func virtualMachineAudioExposesOnlyASilentOutput() throws {
+    let device = MacOSVirtualMachineLifecycle.makeAudioDevice()
+    #expect(device.streams.count == 1)
+    let output = try #require(device.streams.first as? VZVirtioSoundDeviceOutputStreamConfiguration)
+    #expect(output.sink == nil)
+}
+#endif
+
 @Test
 func virtualizationProbeCloneIsPrivateAndUsesFreshIdentity() throws {
     let fixture = try ProbeBundleFixture()
