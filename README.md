@@ -73,6 +73,8 @@ Validation checks SSH, automatic console login, the GUI launchd domain, Xcode se
 
 This command needs neither `container` nor `gh` when no abandoned leases exist. If leases exist, it recovers them first; Linux leases still require `container`. It also sweeps abandoned, unleased macOS clones.
 
+macOS guests expose one virtual audio output for Core Audio workloads. Playback is discarded instead of sent to the host speakers, and no microphone input is exposed. The device is configured at VM creation, so updating yieldd requires restarting the service to use it in new guests; the template needs no audio-driver installation.
+
 ## Ephemeral runner test
 
 Only run self-hosted jobs from private repositories and contributors you trust. A workflow job executes repository-controlled commands on the runner machine.

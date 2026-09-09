@@ -586,6 +586,16 @@ enum MacOSVirtualMachineLifecycle {
 #endif
     }
 
+#if arch(arm64)
+    static func makeAudioDevice() -> VZVirtioSoundDeviceConfiguration {
+        let output = VZVirtioSoundDeviceOutputStreamConfiguration()
+        // A nil sink keeps guest playback silent without using the host's audio devices.
+        let device = VZVirtioSoundDeviceConfiguration()
+        device.streams = [output]
+        return device
+    }
+#endif
+
     static func makeMachine(
         bundleURL: URL,
         memoryBytes: UInt64
@@ -760,6 +770,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
         configuration.storageDevices = [storage]
         configuration.graphicsDevices = [graphics]
         configuration.networkDevices = [network]
+        configuration.audioDevices = [MacOSVirtualMachineLifecycle.makeAudioDevice()]
         configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         configuration.keyboards = [VZMacKeyboardConfiguration()]
         configuration.pointingDevices = [VZMacTrackpadConfiguration()]
