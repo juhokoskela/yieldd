@@ -8,12 +8,16 @@ private let firstPoolRepository = try! GitHubRepository("owner/first")
 private let secondPoolRepository = try! GitHubRepository("owner/second")
 
 @Test
-func poolRunsOneConcurrentSlotPerRepository() throws {
+func poolRunsConcurrentMixedPlatformSlots() throws {
     let gate = ConcurrentSlotGate(expected: 2)
 
-    try RunnerPool(stop: RunnerPoolStop()) { repository, _ in
-        try gate.enter(repository)
-    }.run(repositories: [firstPoolRepository, secondPoolRepository])
+    try RunnerPool(stop: RunnerPoolStop()) { slot, _ in
+        #expect(slot.platform == (slot.repository == firstPoolRepository ? .linux : .macOS))
+        try gate.enter(slot.repository)
+    }.run(slots: [
+        RunnerSlot(repository: firstPoolRepository, platform: .linux),
+        RunnerSlot(repository: secondPoolRepository, platform: .macOS),
+    ])
 
     #expect(Set(gate.repositories.map(\.fullName)) == [
         firstPoolRepository.fullName,
@@ -26,9 +30,9 @@ func poolRunsOneConcurrentSlotPerRepository() throws {
 func poolPreservesRepeatedRepositorySlots() throws {
     let gate = ConcurrentSlotGate(expected: 2)
 
-    try RunnerPool(stop: RunnerPoolStop()) { repository, _ in
-        try gate.enter(repository)
-    }.run(repositories: [firstPoolRepository, firstPoolRepository])
+    try RunnerPool(stop: RunnerPoolStop()) { slot, _ in
+        try gate.enter(slot.repository)
+    }.run(slots: [firstPoolRepository, firstPoolRepository].map { RunnerSlot(repository: $0, platform: .linux) })
 
     #expect(gate.repositories == [firstPoolRepository, firstPoolRepository])
     #expect(gate.maximumActiveSlots == 2)
@@ -40,9 +44,9 @@ func poolFailureCancelsOtherSlotsAndPreservesTheFirstError() {
     let peerWasCancelled = LockedFlag()
 
     #expect(throws: TestFailure.runnerJob) {
-        try RunnerPool(stop: RunnerPoolStop()) { repository, stop in
-            try gate.enter(repository)
-            if repository == firstPoolRepository {
+        try RunnerPool(stop: RunnerPoolStop()) { slot, stop in
+            try gate.enter(slot.repository)
+            if slot.repository == firstPoolRepository {
                 throw TestFailure.runnerJob
             }
             do {
@@ -51,7 +55,7 @@ func poolFailureCancelsOtherSlotsAndPreservesTheFirstError() {
             } catch is CancellationError {
                 peerWasCancelled.set()
             }
-        }.run(repositories: [firstPoolRepository, secondPoolRepository])
+        }.run(slots: [firstPoolRepository, secondPoolRepository].map { RunnerSlot(repository: $0, platform: .linux) })
     }
 
     #expect(peerWasCancelled.value)
@@ -77,8 +81,7 @@ func capacityWaitObservesPoolStop() throws {
     let blocked = DispatchSemaphore(value: 0)
     let cancelled = DispatchSemaphore(value: 0)
     let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 4,
-        reservationBytes: 3,
+        physicalMemoryBytes: 16 * 1_024 * 1_024 * 1_024,
         readMemoryPressure: { .normal }
     )
     let reservation = try admission.acquire()
@@ -111,7 +114,7 @@ func serviceCommandPreservesRepeatedRepositories() throws {
         firstPoolRepository.fullName,
     ])
 
-    #expect(command.repositories == [
+    #expect(command.runners.repositories == [
         firstPoolRepository.fullName,
         firstPoolRepository.fullName,
     ])
@@ -167,7 +170,7 @@ func serviceRejectsImpossibleMemoryBudgetBeforeStartingPool() throws {
         budgetBytes: 6 * 1_024 * 1_024 * 1_024
     )) {
         try runRunnerService(
-            repositories: [firstPoolRepository],
+            configuration: RunnerServiceConfiguration(repositories: [firstPoolRepository]),
             leaseStore: RunnerLeaseStore(directory: directory),
             containerURL: URL(fileURLWithPath: "/missing/container"),
             ghURL: URL(fileURLWithPath: "/missing/gh"),

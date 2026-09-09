@@ -49,6 +49,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         var operationFailure: (any Error)?
         do {
             let acquiredReservation = try memoryAdmission.acquire(
+                reserving: backend.platform.memoryReservationBytes,
                 checkCancellation: checkCancellation,
                 onBlocked: { stateChanged(.waitingForMemory(id)) }
             )

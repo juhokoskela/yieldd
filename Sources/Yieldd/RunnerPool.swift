@@ -5,27 +5,27 @@ struct RunnerPool: Sendable {
     static let maximumSlots = 16
 
     private let stop: RunnerPoolStop
-    private let runSlot: @Sendable (GitHubRepository, RunnerPoolStop) throws -> Void
+    private let runSlot: @Sendable (RunnerSlot, RunnerPoolStop) throws -> Void
 
     init(
         stop: RunnerPoolStop,
-        runSlot: @escaping @Sendable (GitHubRepository, RunnerPoolStop) throws -> Void
+        runSlot: @escaping @Sendable (RunnerSlot, RunnerPoolStop) throws -> Void
     ) {
         self.stop = stop
         self.runSlot = runSlot
     }
 
-    func run(repositories: [GitHubRepository]) throws {
-        precondition(!repositories.isEmpty)
+    func run(slots: [RunnerSlot]) throws {
+        precondition(!slots.isEmpty)
 
         let group = DispatchGroup()
         let failure = RunnerPoolFailure()
-        for (index, repository) in repositories.enumerated() {
+        for (index, slot) in slots.enumerated() {
             group.enter()
             DispatchQueue(label: "dev.yieldd.runner-slot.\(index)").async {
                 defer { group.leave() }
                 do {
-                    try runSlot(repository, stop)
+                    try runSlot(slot, stop)
                 } catch {
                     failure.record(error)
                     stop.request()
@@ -60,7 +60,7 @@ final class RunnerPoolStop: @unchecked Sendable {
         shutdownTimeout: TimeInterval? = nil
     ) throws -> RunnerPoolStop {
         let stop = RunnerPoolStop(shutdownTimeout: shutdownTimeout)
-        stop.signalMonitor = try SignalMonitor(signalReceived: { [weak stop] _ in
+        stop.signalMonitor = try SignalMonitor(signals: [SIGINT, SIGTERM, SIGHUP], signalReceived: { [weak stop] _ in
             stop?.request()
         })
         return stop

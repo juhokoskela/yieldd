@@ -95,7 +95,7 @@ macOS runners have the `yieldd-macos` label and no default labels. Their names s
 
 `machine-test`, `runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock. GitHub runner sessions record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, `runner-test`, `serve`, the local agent, and macOS `machine-test` recover those exact runners before creating another machine. Linux `machine-test` does not perform recovery. If GitHub still considers an interrupted runner busy, recovery keeps its lease and waits with exponential backoff until GitHub releases it.
 
-Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched. macOS slots in `serve` and the agent configuration are not exposed yet.
+Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched. macOS slots are available in `serve`; agent configuration support is not exposed yet.
 
 ## Foreground runner service
 
@@ -107,7 +107,16 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd serve 
 
 Each repository argument creates one independent runner slot, up to 16 slots per process. Repeat a repository to give it more than one slot. Every slot creates and registers an ephemeral runner, waits for one job, cleans up both the GitHub registration and machine, and then starts its next runner. Setup and runner failures use exponential backoff capped at 30 seconds; a successful session resets that slot's delay. A cleanup failure stops the pool and cleans up the other slots rather than admitting more work alongside a machine whose removal could not be confirmed.
 
-This is a foreground command, not a daemon. Ctrl+C and SIGTERM interrupt every active slot and run cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.
+Add macOS slots with repeatable `--macos OWNER/REPOSITORY` options and one `--macos-template PATH`. Positional repositories remain Linux slots. Use the signed application for macOS slots:
+
+```sh
+.build/yieldd.app/Contents/MacOS/yieldd serve OWNER/LINUX-REPO \
+  --macos OWNER/MACOS-REPO --macos-template /absolute/path/VM.bundle
+```
+
+Omit positional repositories for a macOS-only service, which does not require `container` unless abandoned Linux leases need recovery. The service permits at most two macOS slots and sixteen total slots. All slots share one memory budget: Linux reserves 12 GiB per live machine and macOS reserves 8 GiB. Two macOS slots fit within the 18 GiB budget of a 24 GiB host; a Linux and macOS slot together require 20 GiB, so they must take turns on that host. Each reservation is released only after its machine is confirmed absent.
+
+This is a foreground command, not a daemon. Ctrl+C, SIGTERM, and closing the terminal (SIGHUP) interrupt every active slot and attempt cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.
 
 ## Local agent
 

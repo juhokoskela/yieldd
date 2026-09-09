@@ -46,10 +46,9 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
             let signalMonitor = try SignalMonitor(
                 signals: [SIGINT, SIGTERM, SIGHUP]
             )
-            let memoryAdmission = RunnerMemoryAdmission(
-                reservationBytes: MacOSVirtualMachineLifecycle.memoryBytes
-            )
+            let memoryAdmission = RunnerMemoryAdmission()
             let reservation = try memoryAdmission.acquire(
+                reserving: MacOSVirtualMachineLifecycle.memoryBytes,
                 checkCancellation: signalMonitor.check,
                 onBlocked: {
                     print("Virtualization probe is waiting for available host memory.")
@@ -209,7 +208,7 @@ struct AgentRunCommand: ParsableCommand {
                     )
                 ).start()
                 try runRunnerService(
-                    repositories: configuration.repositories,
+                    configuration: RunnerServiceConfiguration(repositories: configuration.repositories),
                     leaseStore: leaseStore,
                     containerURL: configuration.containerURL,
                     ghURL: configuration.ghURL,

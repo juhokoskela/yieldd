@@ -42,7 +42,7 @@ struct MachineTestCommand: ParsableCommand {
 
             try MachineTestRunner(
                 backend: backend,
-                memoryAdmission: RunnerMemoryAdmission(reservationBytes: backend.platform.memoryReservationBytes),
+                memoryAdmission: RunnerMemoryAdmission(),
                 checkCancellation: signalMonitor.check,
                 waitingForMemory: {
                     print("Machine test is waiting for available host memory.")
@@ -75,6 +75,7 @@ struct MachineTestRunner {
 
     func run(id: RunnerID) throws {
         let reservation = try memoryAdmission.acquire(
+            reserving: backend.platform.memoryReservationBytes,
             checkCancellation: checkCancellation,
             onBlocked: waitingForMemory
         )

@@ -177,7 +177,7 @@ func macOSBackendRunsThroughTheExistingSession() throws {
     )
     let admission = RunnerMemoryAdmission(
         physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024,
-        reservationBytes: MacOSVirtualMachineLifecycle.memoryBytes, readMemoryPressure: { .normal }
+        readMemoryPressure: { .normal }
     )
     try EphemeralRunnerSession(
         backend: backend, github: github, memoryAdmission: admission, jobTimeout: 60
@@ -241,7 +241,7 @@ func macOSBackendTerminalFailurePreservesSessionErrorAndReleasesReservation() th
         makeMachine: { _, _ in ProbeVirtualMachine(stateAfterStart: .failed(TestFailure.runnerJob)) }
     )
     let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 12, reservationBytes: 8, readMemoryPressure: { .normal }
+        physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024, readMemoryPressure: { .normal }
     )
     do {
         try EphemeralRunnerSession(
@@ -256,6 +256,7 @@ func macOSBackendTerminalFailurePreservesSessionErrorAndReleasesReservation() th
     #expect(try fixture.cloneRootContents().isEmpty)
     var blocked = false
     let reservation = try admission.acquire(
+        reserving: MacOSVirtualMachineLifecycle.memoryBytes,
         checkCancellation: { if blocked { throw TestFailure.cancelled } },
         onBlocked: { blocked = true }
     )

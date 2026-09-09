@@ -6,14 +6,13 @@ import Testing
 
 private let runnerTestID = RunnerID(value: "yieldd-test-runner")
 private let runnerTestRepository = try! GitHubRepository("owner/repository")
-private let runnerTestMemoryBytes: UInt64 = 1_024
+private let runnerTestMemoryBytes = AppleContainerBackend.memoryBytes
 
 private func runnerTestMemoryAdmission(
     pressure: HostMemoryPressure = .normal
 ) -> RunnerMemoryAdmission {
     RunnerMemoryAdmission(
-        physicalMemoryBytes: 4_096,
-        reservationBytes: runnerTestMemoryBytes,
+        physicalMemoryBytes: 4 * runnerTestMemoryBytes,
         readMemoryPressure: { pressure }
     )
 }
@@ -21,7 +20,6 @@ private func runnerTestMemoryAdmission(
 private func singleRunnerMemoryAdmission() -> RunnerMemoryAdmission {
     RunnerMemoryAdmission(
         physicalMemoryBytes: runnerTestMemoryBytes * 4 / 3 + 1,
-        reservationBytes: runnerTestMemoryBytes,
         readMemoryPressure: { .normal }
     )
 }
@@ -670,7 +668,6 @@ func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
     var waitedForCapacity = false
     let memoryAdmission = RunnerMemoryAdmission(
         physicalMemoryBytes: runnerTestMemoryBytes * 4 / 3 + 1,
-        reservationBytes: runnerTestMemoryBytes,
         readMemoryPressure: { .normal }
     )
     let session = EphemeralRunnerSession(
@@ -992,8 +989,7 @@ func cancellationWhileWaitingForMemorySkipsMachineCleanupAndLeasePersistence() t
     var blocked = false
     var states: [RunnerSessionState] = []
     let memoryAdmission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 4,
-        reservationBytes: 3,
+        physicalMemoryBytes: 4 * runnerTestMemoryBytes,
         readMemoryPressure: { .critical }
     )
 
@@ -1032,12 +1028,11 @@ func insufficientHostMemoryFailsBeforeProvisioning() throws {
     let events = RunnerTestEventRecorder()
     let memoryAdmission = RunnerMemoryAdmission(
         physicalMemoryBytes: 2,
-        reservationBytes: 3,
         readMemoryPressure: { .normal }
     )
 
     #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
-        requiredBytes: 3,
+        requiredBytes: runnerTestMemoryBytes,
         budgetBytes: 2
     )) {
         try EphemeralRunnerSession(
@@ -1056,8 +1051,7 @@ func insufficientHostMemoryFailsBeforeProvisioning() throws {
 func memoryAdmissionPrecedesRegistrationTokenCreation() {
     let events = RunnerTestEventRecorder()
     let memoryAdmission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 4,
-        reservationBytes: 3,
+        physicalMemoryBytes: 4 * runnerTestMemoryBytes,
         readMemoryPressure: {
             events.values.append(.memoryAdmission)
             return .normal

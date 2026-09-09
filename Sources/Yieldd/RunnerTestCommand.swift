@@ -58,7 +58,7 @@ struct RunnerTestCommand: ParsableCommand {
         let session = EphemeralRunnerSession(
             backend: backend,
             github: github,
-            memoryAdmission: RunnerMemoryAdmission(reservationBytes: backend.platform.memoryReservationBytes),
+            memoryAdmission: RunnerMemoryAdmission(),
             jobTimeout: TimeInterval(timeout) * 60,
             checkCancellation: signalMonitor.check,
             recoveryWait: signalMonitor.wait,
