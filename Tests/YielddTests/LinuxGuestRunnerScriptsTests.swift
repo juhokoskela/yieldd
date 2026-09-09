@@ -20,6 +20,26 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
     let replay = try ProcessExecutor().execute(fixture.request("control", ["run"]))
     #expect(replay.terminationStatus == 7)
     #expect(replay.stdoutText == "listener output\n")
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .success(try ProcessExecutor().execute(status)),
+        .success(replay),
+    ])
+    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor)
+    do {
+        try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in
+            Issue.record("The listener has already completed")
+        }, stateChanged: { _ in }).run(
+            id: RunnerID(value: "yieldd-test"),
+            assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+        )
+        Issue.record("Expected listener failure")
+    } catch let error as RunnerAssignmentError {
+        #expect(error == .listenerFailed(7, output: "listener output"))
+        #expect(describeError(error).contains("listener output"))
+        #expect(describeError(error).contains("listener exited with status 7"))
+    }
+    #expect(executor.requests.last?.outputCapture == .tail(maxBytes: EphemeralRunnerSession.jobOutputTailBytes))
     #expect(try String(contentsOf: fixture.directory.appendingPathComponent("starts"), encoding: .utf8) == "start\n")
     #expect(try ProcessExecutor().execute(configure).terminationStatus == 2)
 }

@@ -51,11 +51,23 @@ struct ReservedRunnerJob {
             }
             if let exitStatus = status.exitStatus {
                 stateChanged(.listenerExited(id, status: exitStatus))
-                // Fetch the bounded listener tail and preserve its actual exit failure.
-                try backend.exec(["yieldd-runner-control", "run"], timeout: 30,
-                                 outputCapture: .tail(maxBytes: EphemeralRunnerSession.jobOutputTailBytes),
-                                 as: .root, on: id)
-                guard exitStatus == 0 else { throw RunnerAssignmentError.listenerFailed(exitStatus) }
+                let replay: ProcessResult
+                do {
+                    replay = try backend.exec(
+                        ["yieldd-runner-control", "run"], timeout: 30,
+                        outputCapture: .tail(maxBytes: EphemeralRunnerSession.jobOutputTailBytes),
+                        as: .root, on: id
+                    )
+                } catch let ProcessExecutionError.nonZeroExit(_, result) where result.terminationStatus == exitStatus {
+                    replay = result
+                }
+                guard replay.terminationStatus == exitStatus else { throw RunnerAssignmentError.invalidStatus }
+                guard exitStatus == 0 else {
+                    let output = [replay.stdoutText, replay.stderrText]
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }.joined(separator: "\n")
+                    throw RunnerAssignmentError.listenerFailed(exitStatus, output: output)
+                }
                 guard jobStarted else { throw RunnerAssignmentError.exitedWithoutJob }
                 return
             }
@@ -89,7 +101,7 @@ private struct RunnerListenerStatus: Decodable {
 
 enum RunnerAssignmentError: Error, Equatable, LocalizedError {
     case invalidRoutingLabel, invalidPickupTimeout, pickupTimedOut, executionTimedOut, startupTimedOut
-    case invalidStatus, exitedWithoutJob, listenerFailed(Int32)
+    case invalidStatus, exitedWithoutJob, listenerFailed(Int32, output: String)
 
     var errorDescription: String? {
         switch self {
@@ -101,7 +113,10 @@ enum RunnerAssignmentError: Error, Equatable, LocalizedError {
         case .startupTimedOut: "Runner startup exceeded its ten-minute timeout."
         case .invalidStatus: "The guest returned invalid runner lifecycle status. Update the guest scripts before retrying."
         case .exitedWithoutJob: "The runner exited without reporting a job start."
-        case let .listenerFailed(status): "The runner listener exited with status \(status)."
+        case let .listenerFailed(status, output):
+            output.isEmpty
+                ? "The runner listener exited with status \(status)."
+                : "The runner listener exited with status \(status): \(output)"
         }
     }
 }

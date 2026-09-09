@@ -65,6 +65,60 @@ func reservedRunnerDoesNotReportSuccessWhenNoJobRan() throws {
     }
 }
 
+@Test(arguments: [
+    processResult(stdout: "fatal: runner crashed\n", status: 7),
+    processResult(stderr: "fatal: hook failed\n", status: 7),
+    processResult(stdout: "listener output\n", stderr: "runner warning\n", status: 7),
+    processResult(status: 7),
+])
+func reservedRunnerReportsFailedListenerOutput(_ replay: ProcessResult) throws {
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()), .success(processResult(stdout: exited(true, status: 7))), .success(replay),
+    ])
+    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor)
+    let output = [replay.stdoutText, replay.stderrText]
+        .filter { !$0.isEmpty }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    #expect(throws: RunnerAssignmentError.listenerFailed(7, output: output)) {
+        try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
+            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+        )
+    }
+}
+
+@Test(arguments: ["transport", "cancelled", "timeout", "signal"])
+func reservedRunnerPreservesReplayTransportAndCancellationErrors(_ failure: String) throws {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/ssh"), arguments: [])
+    let result = processResult(stderr: "transport diagnostic", status: 255)
+    let expected: ProcessExecutionError = switch failure {
+    case "cancelled": .cancelled(request: request, result: result, underlying: CancellationError())
+    case "timeout": .timedOut(request: request, result: result)
+    case "signal": .terminatedBySignal(request: request, result: result)
+    default: .nonZeroExit(request: request, result: result)
+    }
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()), .success(processResult(stdout: exited(true, status: 7))), .failure(expected),
+    ])
+    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor)
+    do {
+        try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
+            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+        )
+        Issue.record("Expected replay failure")
+    } catch let error as ProcessExecutionError {
+        #expect(describeError(error) == describeError(expected))
+    }
+}
+
+@Test
+func reservedRunnerRejectsReplayThatDisagreesWithTerminalStatus() throws {
+    let backend = AssignmentBackend(statuses: [exited(true, status: 7)])
+    #expect(throws: RunnerAssignmentError.invalidStatus) {
+        try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
+            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+        )
+    }
+}
+
 @Test(arguments: [false, true])
 func reservedSessionReleasesCapacityOnlyAfterMachineRemoval(destructionFails: Bool) throws {
     let backend = AssignmentBackend(statuses: [exited(true)], destructionFails: destructionFails)
@@ -168,7 +222,7 @@ func reservedRunnerCLIValidatesAndForwardsAssignment() throws {
 
 private let assignmentID = RunnerID(value: "yieldd-reserved-test")
 private func listening(_ started: Bool) -> String { "{\"phase\":\"listening\",\"jobStarted\":\(started)}" }
-private func exited(_ started: Bool) -> String { "{\"phase\":\"exited\",\"jobStarted\":\(started),\"exitStatus\":0}" }
+private func exited(_ started: Bool, status: Int32 = 0) -> String { "{\"phase\":\"exited\",\"jobStarted\":\(started),\"exitStatus\":\(status)}" }
 
 private final class AssignmentBackend: RunnerBackend {
     let platform = RunnerPlatform.macOS
