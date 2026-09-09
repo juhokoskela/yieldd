@@ -13,8 +13,9 @@ struct RunnerMachineOptions: ParsableArguments {
 
     func makeBackend(
         leaseStore: RunnerLeaseStore,
-        signalMonitor: SignalMonitor,
-        executor: any ProcessExecuting
+        executor: any ProcessExecuting,
+        checkCancellation: @escaping () throws -> Void,
+        wait: @escaping (TimeInterval) throws -> Void
     ) throws -> any RunnerBackend {
         if let template {
             try VirtualizationEntitlement.requireCurrentProcess()
@@ -22,16 +23,16 @@ struct RunnerMachineOptions: ParsableArguments {
                 templateURL: URL(fileURLWithPath: template),
                 cloneRootURL: MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).rootURL,
                 executor: executor,
-                checkCancellation: signalMonitor.check,
-                wait: signalMonitor.wait
+                checkCancellation: checkCancellation,
+                wait: wait
             )
         }
         return AppleContainerBackend(
             containerURL: try ExecutableLocator().locate("container"),
             executor: executor,
             dockerReadiness: DockerReadiness(
-                wait: signalMonitor.wait,
-                checkCancellation: signalMonitor.check
+                wait: wait,
+                checkCancellation: checkCancellation
             )
         )
     }

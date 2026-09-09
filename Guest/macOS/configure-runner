@@ -1,13 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-if [[ "$#" -ne 2 ]]; then
-    echo "usage: yieldd-configure-runner OWNER/REPOSITORY RUNNER_NAME" >&2
+if [[ "$#" -lt 2 || "$#" -gt 3 ]]; then
+    echo "usage: yieldd-configure-runner OWNER/REPOSITORY RUNNER_NAME [ROUTING_LABEL]" >&2
     exit 2
 fi
 
 repository="$1"
 runner_name="$2"
+label="${3:-yieldd-macos}"
+if [[ "$#" -eq 3 ]] && [[ ! "$label" =~ ^yieldd-request-[a-z0-9-]+$ || ${#label} -gt 63 ]]; then
+    echo "invalid reservation routing label" >&2
+    exit 2
+fi
 IFS= read -r registration_token
 
 if [[ -z "$registration_token" ]]; then
@@ -16,6 +21,23 @@ if [[ -z "$registration_token" ]]; then
 fi
 
 cd "$HOME/actions-runner"
+if [[ "$#" -eq 3 ]]; then
+    for marker in exit-status process-group launched job-started; do
+        if [[ -e ".yieldd-runner/$marker" ]]; then
+            echo "runner lifecycle state already exists; use a fresh guest" >&2
+            exit 2
+        fi
+    done
+    mkdir -p .yieldd-runner
+    cat > "$HOME/.yieldd-job-started.sh" <<'HOOK'
+#!/bin/bash
+set -euo pipefail
+state_directory="$HOME/actions-runner/.yieldd-runner"
+printf 'started\n' > "$state_directory/job-started.$$"
+mv -f "$state_directory/job-started.$$" "$state_directory/job-started"
+HOOK
+    chmod 0700 "$HOME/.yieldd-job-started.sh"
+fi
 exec ./config.sh \
     --unattended \
     --ephemeral \
@@ -23,5 +45,5 @@ exec ./config.sh \
     --token "$registration_token" \
     --name "$runner_name" \
     --no-default-labels \
-    --labels yieldd-macos \
+    --labels "$label" \
     --work _work

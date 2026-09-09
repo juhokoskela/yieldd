@@ -20,6 +20,8 @@ container system start
 
 `yieldd doctor` never starts or changes the container system.
 
+For macOS-only checks, use the signed application with `doctor --template /absolute/path/VM.bundle`. This checks virtualization support, signing entitlement, template files and location, memory capacity, and GitHub authentication without requiring Apple Container. It does not boot a guest; use `machine-test` for SSH, GUI, and simulator validation.
+
 Authenticate the GitHub CLI if needed:
 
 ```sh
@@ -101,6 +103,40 @@ macOS runners have the `yieldd-macos` label and no default labels. Their names s
 
 Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched.
 
+## Standalone recovery
+
+Run `yieldd recover` to clean up abandoned registrations and disposable macOS clones without starting new runner machines or uninstalling an agent. Stop any active yieldd service first: recovery takes the same exclusive ownership lock as runner commands. It needs no template or slot configuration. With no leases, it sweeps unleased clones without requiring `gh` or `container`; otherwise `gh` is required, and Linux leases also need a working Container system. A Linux failure does not prevent independent macOS cleanup. Failed cleanup records remain for a later retry.
+
+## Reserved single-job tests
+
+To exercise job-specific routing before connecting a coordinator, queue a trusted job whose `runs-on` matches a unique label, then run:
+
+```sh
+.build/yieldd.app/Contents/MacOS/yieldd runner-test OWNER/REPOSITORY \
+  --template /absolute/path/VM.bundle \
+  --routing-label yieldd-request-unique-id \
+  --pickup-timeout 5 --timeout 120
+```
+
+Replace `unique-id` with a fresh lowercase identifier. Labels must start with `yieldd-request-`, contain only lowercase letters, digits, and hyphens, and be at most 63 characters. The runner registers only this label, not its generic platform label. Omit `--template` for Linux. Rebuild the Linux guest image and update both macOS guest entry-point scripts before using reserved tests. No coordinator or hosted fallback is implemented yet.
+
+The manual `macOS runner test` workflow accepts an optional `routing-label` input. Leaving it empty keeps the default `yieldd-macos` target. After pushing the branch containing this workflow change, generate one label and use it for both dispatch and the local runner:
+
+```sh
+routing_label="yieldd-request-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+gh workflow run macos-runner-test.yml --repo OWNER/REPOSITORY \
+  --ref "$(git branch --show-current)" -f "routing-label=$routing_label" &&
+.build/yieldd.app/Contents/MacOS/yieldd runner-test OWNER/REPOSITORY \
+  --template /absolute/path/VM.bundle \
+  --routing-label "$routing_label" --pickup-timeout 5 --timeout 15
+```
+
+Expect job-start and listener-exit events, followed by capacity release and cleanup completion. Check the workflow run in GitHub for its actual conclusion.
+
+Startup has a ten-minute budget after memory admission, with existing shorter per-operation limits. Job pickup has its own five-minute default. With `--routing-label`, `--timeout` starts when yieldd observes the job-start hook; without it, the existing combined listener timeout is unchanged. Listener startup is not proof of an online GitHub connection. Status reports listener launch, observed job start, listener exit, machine-capacity release, and cleanup completion separately. Listener exit status is not the GitHub job conclusion.
+
+A pickup timeout or lost connection does not prove that the job never started and must not automatically authorize duplicate execution on a hosted runner. Guest status is diagnostic data from the runner account, not a security boundary. Cleanup still attempts to remove the runner and machine; capacity is released only after confirmed machine removal. The completion hook is not used to destroy machines.
+
 ## Foreground runner service
 
 To keep serving jobs until the process is stopped, run:
@@ -160,6 +196,8 @@ Check the registration, configured slots, and active runner leases with:
 ```sh
 ~/Applications/yieldd.app/Contents/MacOS/yieldd agent status
 ```
+
+The status command reads persisted configuration and cleanup leases. It does not query live guest health, determine whether a job is running, or establish available capacity.
 
 If macOS reports that approval is required, enable `yieldd` under System Settings > General > Login Items & Extensions. Agent logs are available through unified logging:
 

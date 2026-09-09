@@ -51,25 +51,25 @@ enum RunnerMemoryAllocation: String, Equatable, Sendable {
 protocol RunnerBackend {
     var platform: RunnerPlatform { get }
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws
+    ) throws -> ProcessResult
     func stopRunner(on id: RunnerID) throws
     func destroy(_ id: RunnerID) throws
 }
 
 extension RunnerBackend {
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
         on id: RunnerID
-    ) throws {
+    ) throws -> ProcessResult {
         try exec(
             arguments,
             standardInput: standardInput,
@@ -80,13 +80,13 @@ extension RunnerBackend {
         )
     }
 
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws {
+    ) throws -> ProcessResult {
         try exec(
             arguments,
             standardInput: nil,

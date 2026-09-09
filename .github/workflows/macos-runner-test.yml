@@ -2,13 +2,19 @@ name: macOS runner test
 
 on:
   workflow_dispatch:
+    inputs:
+      routing-label:
+        description: Optional yieldd-request- label. Leave empty for yieldd-macos.
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   macos:
-    runs-on: yieldd-macos
+    runs-on: ${{ inputs['routing-label'] || 'yieldd-macos' }}
     timeout-minutes: 10
     steps:
       - name: Check Xcode

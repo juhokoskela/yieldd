@@ -71,6 +71,7 @@ func reportAgentStatus(
     }
 
     let leases = try RunnerLeaseStore(directory: store.directory).load()
+    output("Lease records are persisted cleanup obligations, not live runner health or job status.")
     if leases.isEmpty {
         output("Active runner leases: none")
     } else {

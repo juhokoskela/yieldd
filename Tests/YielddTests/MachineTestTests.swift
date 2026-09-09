@@ -161,14 +161,14 @@ private final class RecordingRunnerBackend: RunnerBackend {
         }
     }
 
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws {
+    ) throws -> ProcessResult {
         if platform == .macOS {
             #expect(standardInput == Data(MacOSTemplateValidation.script.utf8))
             #expect(outputCapture == .tail(maxBytes: MacOSGuestSSH.outputTailBytes))
@@ -184,6 +184,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
             throw TestFailure.unexpectedBackendCall
         }
         try execOutcomes.removeFirst().get()
+        return processResult()
     }
 
     func destroy(_ id: RunnerID) throws {

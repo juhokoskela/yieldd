@@ -106,6 +106,27 @@ func doctorChecksGitHubEvenWhenContainerIsMissing() throws {
     ])
 }
 
+@Test
+func macOSDoctorDoesNotRequireOrInvokeContainer() throws {
+    let fixture = try ExecutableFixture(names: ["gh"])
+    defer { fixture.remove() }
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let report = Doctor(
+        executor: executor,
+        executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
+        supportsAppleSilicon: { true }
+    ).run(templateURL: fixture.directory.appendingPathComponent("missing.bundle"))
+
+    #expect(!report.succeeded)
+    #expect(!report.checks.contains { $0.name.hasPrefix("container") })
+    let template = try #require(report.checks.first { $0.name == "macOS template" })
+    guard case .failed = template.status else {
+        Issue.record("Expected missing template validation to fail")
+        return
+    }
+    #expect(executor.requests.map(\.arguments) == [["auth", "status", "--active", "--hostname", "github.com"]])
+}
+
 private struct ExecutableFixture {
     let directory: URL
     private let executables: [String: URL]

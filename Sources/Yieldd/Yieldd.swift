@@ -7,6 +7,7 @@ struct Yieldd: AsyncParsableCommand {
         abstract: "Manage ephemeral GitHub Actions runner machines.",
         subcommands: [
             DoctorCommand.self,
+            RecoverCommand.self,
             MachineTestCommand.self,
             RunnerTestCommand.self,
             RunnerServiceCommand.self,

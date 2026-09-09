@@ -60,6 +60,36 @@ func macOSRunnerControlReturnsTheListenerOutputAndStatus() throws {
 }
 
 @Test
+func macOSReservedRunnerPublishesJobStartAndImmutableCompletion() throws {
+    let fixture = try MacOSGuestRunnerFixture(runScript: """
+        #!/bin/bash
+        "$ACTIONS_RUNNER_HOOK_JOB_STARTED"
+        printf 'reserved job output\n'
+        exit 7
+        """, configScript: """
+        #!/bin/bash
+        printf '%s\n' "$@" > "$HOME/config-arguments"
+        """)
+    defer { fixture.remove() }
+    let configure = fixture.request(script: macOSConfigureRunnerURL,
+                                    arguments: ["owner/repo", "yieldd-test", "yieldd-request-test"],
+                                    standardInput: Data("token\n".utf8))
+    try ProcessExecutor().execute(configure).requireSuccess(for: configure)
+    let arguments = try fixture.recordedLines(filename: "config-arguments")
+    #expect(arguments.contains("yieldd-request-test"))
+    #expect(!arguments.contains("yieldd-macos"))
+    let start = fixture.controlRequest("start")
+    try ProcessExecutor().execute(start).requireSuccess(for: start)
+    try waitForFile(fixture.diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: fixture.diagnosticsDirectory)
+    let status = fixture.controlRequest("status")
+    let first = try ProcessExecutor().execute(status).requireSuccess(for: status)
+    #expect(first.stdoutText == "{\"phase\":\"exited\",\"jobStarted\":true,\"exitStatus\":7}\n")
+    try ProcessExecutor().execute(start).requireSuccess(for: start)
+    #expect(try ProcessExecutor().execute(status).stdout == first.stdout)
+    #expect(try ProcessExecutor().execute(configure).terminationStatus == 2)
+}
+
+@Test
 func macOSRunnerControlKeepsOneListenerAliveAcrossClientDisconnects() throws {
     let fixture = try MacOSGuestRunnerFixture(runScript: """
         #!/bin/bash

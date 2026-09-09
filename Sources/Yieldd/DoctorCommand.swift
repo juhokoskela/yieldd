@@ -8,8 +8,11 @@ struct DoctorCommand: ParsableCommand {
         abstract: "Check whether this Mac can run yieldd machines."
     )
 
+    @OptionGroup
+    var machine: RunnerMachineOptions
+
     mutating func run() throws {
-        let report = Doctor().run()
+        let report = Doctor().run(templateURL: machine.template.map { URL(fileURLWithPath: $0) })
         for check in report.checks {
             print(check.formatted)
         }
@@ -32,7 +35,7 @@ struct Doctor {
         self.supportsAppleSilicon = supportsAppleSilicon
     }
 
-    func run() -> DoctorReport {
+    func run(templateURL: URL? = nil) -> DoctorReport {
         var checks = [DoctorCheck(
             name: "Apple Silicon",
             status: supportsAppleSilicon()
@@ -40,9 +43,36 @@ struct Doctor {
                 : .failed("this host does not report Apple Silicon support")
         )]
 
-        checks.append(contentsOf: containerChecks())
+        if let templateURL {
+            checks.append(contentsOf: macOSChecks(templateURL: templateURL))
+        } else {
+            checks.append(contentsOf: containerChecks())
+        }
         checks.append(contentsOf: githubChecks())
         return DoctorReport(checks: checks)
+    }
+
+    private func macOSChecks(templateURL: URL) -> [DoctorCheck] {
+        let checks: [(String, () throws -> Void)] = [
+            ("macOS virtualization", { try MacOSVirtualMachineLifecycle.requireSupportedHost() }),
+            ("Virtualization entitlement", { try VirtualizationEntitlement.requireCurrentProcess() }),
+            ("macOS template", {
+                try validateRunnerServiceTemplate(
+                    templateURL, stateDirectory: try yielddApplicationSupportDirectory()
+                )
+            }),
+            ("macOS memory capacity", {
+                try RunnerMemoryAdmission().validateCapacity(reserving: RunnerPlatform.macOS.memoryReservationBytes)
+            }),
+        ]
+        return checks.map { name, check in
+            do {
+                try check()
+                return DoctorCheck(name: name, status: .passed("available"))
+            } catch {
+                return DoctorCheck(name: name, status: .failed(describeError(error)))
+            }
+        }
     }
 
     private func containerChecks() -> [DoctorCheck] {

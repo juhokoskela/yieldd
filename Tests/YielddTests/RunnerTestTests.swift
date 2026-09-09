@@ -641,10 +641,12 @@ func templateInsideCloneRootIsRejectedBeforeRecovery(symlink: Bool) throws {
         _ = try MacOSVirtualizationBackend(
             templateURL: symlink ? alias : template, cloneRootURL: clones.rootURL, executor: executor
         )
-        _ = try RunnerRecovery(
-            linuxBackend: { RunnerTestBackend(events: events) },
-            github: RunnerTestGitHub(events: events), leaseStore: leaseStore
-        ).run()
+        try recoverAbandonedRunners(
+            leaseStore: leaseStore,
+            makeGitHub: { RunnerTestGitHub(events: events) },
+            makeLinuxBackend: { RunnerTestBackend(events: events) },
+            checkCancellation: {}, wait: { _ in }
+        )
     })
     guard case .templateInsideCloneRoot = error else {
         Issue.record("Expected template location rejection")
@@ -1320,20 +1322,21 @@ private final class RunnerTestBackend: RunnerBackend {
         }
     }
 
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws {
+    ) throws -> ProcessResult {
         outputCaptures.append(outputCapture)
         events.values.append(.exec(id, arguments, standardInput, timeout, user))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall
         }
         try execOutcomes.removeFirst().get()
+        return processResult()
     }
 
     func destroy(_ id: RunnerID) throws {
