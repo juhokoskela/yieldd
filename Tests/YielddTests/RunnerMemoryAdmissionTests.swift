@@ -12,7 +12,7 @@ func normalPressureUsesFullMemory() throws {
         readMemoryPressure: { .normal }
     )
 
-    let reservation = try admission.acquire()
+    let reservation = try admission.acquire(reserving: 12 * gibibyte)
 
     #expect(reservation.allocation == .full)
 }
@@ -24,7 +24,7 @@ func uncertainPressureUsesConstrainedMemory(_ pressure: HostMemoryPressure) thro
         readMemoryPressure: { pressure }
     )
 
-    let reservation = try admission.acquire()
+    let reservation = try admission.acquire(reserving: 12 * gibibyte)
 
     #expect(reservation.allocation == .constrained)
 }
@@ -38,11 +38,11 @@ func concurrentAdmissionWaitsForRelease() throws {
         physicalMemoryBytes: 16 * gibibyte,
         readMemoryPressure: { .normal }
     )
-    let first = try admission.acquire()
+    let first = try admission.acquire(reserving: 12 * gibibyte)
 
     DispatchQueue.global().async {
         result.store(Result {
-            try admission.acquire(onBlocked: { blocked.signal() })
+            try admission.acquire(reserving: 12 * gibibyte, onBlocked: { blocked.signal() })
         })
         finished.signal()
     }
@@ -66,7 +66,7 @@ func criticalPressureRetriesUntilItReturnsToNormal() throws {
 
     DispatchQueue.global().async {
         result.store(Result {
-            try admission.acquire(onBlocked: { blocked.signal() })
+            try admission.acquire(reserving: 12 * gibibyte, onBlocked: { blocked.signal() })
         })
         finished.signal()
     }
@@ -87,7 +87,7 @@ func blockedNotificationIsEmittedOnlyOnce() throws {
         readMemoryPressure: pressure.read
     )
 
-    _ = try admission.acquire(onBlocked: {
+    _ = try admission.acquire(reserving: 12 * gibibyte, onBlocked: {
         notifications += 1
         pressure.set(.normal)
     })
@@ -104,7 +104,7 @@ func criticalPressureWaitCanBeCancelled() {
     )
 
     #expect(throws: CancellationError.self) {
-        try admission.acquire(checkCancellation: {
+        try admission.acquire(reserving: 12 * gibibyte, checkCancellation: {
             if cancelled.value {
                 throw CancellationError()
             }

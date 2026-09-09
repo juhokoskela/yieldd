@@ -189,7 +189,7 @@ func macOSBackendRunsThroughTheExistingSession() throws {
     #expect(executor.requests[2].arguments.last == "'/Users/runner/bin/yieldd-configure-runner' 'owner/repo' 'yieldd-macos-test'")
     #expect(executor.requests[3].arguments.last == "'/Users/runner/bin/yieldd-runner-control' 'run'")
     #expect(executor.requests[3].arguments.contains("runner@192.168.64.2"))
-    let reservation = try admission.acquire()
+    let reservation = try admission.acquire(reserving: RunnerPlatform.macOS.memoryReservationBytes)
     admission.release(reservation)
 }
 

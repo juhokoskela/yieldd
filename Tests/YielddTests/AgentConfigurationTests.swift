@@ -311,6 +311,37 @@ func agentInstallRejectsManagedTemplateBeforeRegistration(symlink: Bool) throws 
     #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("agent.json").path))
 }
 
+@Test(arguments: [(24, false), (24, true), (32, true)])
+func agentPreflightValidatesCombinedReservations(hostGiB: Int, mixed: Bool) throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let command = try AgentInstallCommand.parse(
+        (mixed ? ["owner/repo"] : ["--macos", "owner/repo"]) + [
+            "--macos", "owner/repo", "--macos-template", fixture.templateURL.path, "--preflight-only",
+        ]
+    )
+    var resolvedTools: [String] = []
+    func preflight() throws {
+        try command.run(locateExecutable: { name in
+            resolvedTools.append(name)
+            return URL(fileURLWithPath: "/usr/bin/true")
+        }, stateDirectory: fixture.rootURL,
+        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: UInt64(hostGiB) * 1_024 * 1_024 * 1_024))
+    }
+    if mixed && hostGiB == 24 {
+        #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
+            requiredBytes: 20 * 1_024 * 1_024 * 1_024, budgetBytes: 18 * 1_024 * 1_024 * 1_024
+        )) {
+            try preflight()
+        }
+        #expect(resolvedTools.isEmpty)
+    } else {
+        try preflight()
+        #expect(resolvedTools == (mixed ? ["container", "gh"] : ["gh"]))
+    }
+    #expect(!FileManager.default.fileExists(atPath: fixture.rootURL.appendingPathComponent("agent.json").path))
+}
+
 private func macOSStoredConfiguration(
     repositories: [String] = ["owner/repo"], template: String = "/tmp/Template.bundle"
 ) -> Data {

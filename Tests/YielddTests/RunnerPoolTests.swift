@@ -84,12 +84,13 @@ func capacityWaitObservesPoolStop() throws {
         physicalMemoryBytes: 16 * 1_024 * 1_024 * 1_024,
         readMemoryPressure: { .normal }
     )
-    let reservation = try admission.acquire()
+    let reservation = try admission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes)
     let stop = RunnerPoolStop()
 
     DispatchQueue.global().async {
         do {
             _ = try admission.acquire(
+                reserving: RunnerPlatform.linux.memoryReservationBytes,
                 checkCancellation: stop.check,
                 onBlocked: { blocked.signal() }
             )
@@ -179,7 +180,7 @@ func serviceRejectsImpossibleMemoryBudgetBeforeStartingPool() throws {
             memoryAdmission: memoryAdmission
         )
     }
-    #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    #expect(FileManager.default.fileExists(atPath: orphan.path))
 }
 
 private final class ConcurrentSlotGate: @unchecked Sendable {

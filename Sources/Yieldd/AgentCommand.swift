@@ -113,8 +113,13 @@ struct AgentInstallCommand: ParsableCommand {
         try run(locateExecutable: locator.locate)
     }
 
-    func run(locateExecutable: (String) throws -> URL, stateDirectory: URL? = nil) throws {
+    func run(
+        locateExecutable: (String) throws -> URL,
+        stateDirectory: URL? = nil,
+        memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
+    ) throws {
         let slots = try runners.serviceConfiguration()
+        try memoryAdmission.validateCapacity(reserving: slots.memoryReservationBytes)
         let configuration = try AgentConfiguration(
             repositories: slots.slots.filter { $0.platform == .linux }.map(\.repository),
             macOSRepositories: slots.slots.filter { $0.platform == .macOS }.map(\.repository),
@@ -124,11 +129,7 @@ struct AgentInstallCommand: ParsableCommand {
         )
         let directory = try stateDirectory ?? yielddApplicationSupportDirectory()
         if let templateURL = configuration.runners.macOSTemplateURL {
-            try validateRunnerServiceTemplate(templateURL, stateDirectory: directory, executor: ProcessExecutor())
-        }
-        let admission = RunnerMemoryAdmission()
-        for slot in configuration.runners.slots {
-            try admission.validateCapacity(reserving: slot.platform.memoryReservationBytes)
+            try validateRunnerServiceTemplate(templateURL, stateDirectory: directory)
         }
         guard !preflightOnly else {
             // Machine-readable result consumed by install-local-agent.sh.
@@ -206,9 +207,11 @@ struct AgentRunCommand: ParsableCommand {
             let configuration = try store.load()
             try configuration.requireExecutables()
             try withRunnerOwnership(in: store.directory) { leaseStore in
+                let memoryAdmission = RunnerMemoryAdmission()
+                try memoryAdmission.validateCapacity(reserving: configuration.runners.memoryReservationBytes)
                 let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
                 if let templateURL = configuration.runners.macOSTemplateURL {
-                    try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory, executor: executor)
+                    try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory)
                 }
                 try startAgentContainerIfNeeded(configuration: configuration, leaseStore: leaseStore, executor: executor)
                 try runRunnerService(
@@ -217,7 +220,8 @@ struct AgentRunCommand: ParsableCommand {
                     containerURL: configuration.containerURL,
                     ghURL: configuration.ghURL,
                     stop: stop,
-                    output: .agentLog
+                    output: .agentLog,
+                    memoryAdmission: memoryAdmission
                 )
             }
         } catch where isCancellation(error) {

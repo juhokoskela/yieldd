@@ -52,10 +52,10 @@ func runRunnerService(
     output: RunnerServiceOutput,
     memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
 ) throws {
+    try memoryAdmission.validateCapacity(reserving: configuration.memoryReservationBytes)
     if let templateURL = configuration.macOSTemplateURL {
         try validateRunnerServiceTemplate(
-            templateURL, stateDirectory: leaseStore.directory,
-            executor: ProcessExecutor(checkCancellation: stop.check)
+            templateURL, stateDirectory: leaseStore.directory
         )
         try VirtualizationEntitlement.requireCurrentProcess()
     }
@@ -73,10 +73,6 @@ func runRunnerService(
             throw error
         }
         return
-    }
-
-    for slot in configuration.slots {
-        try memoryAdmission.validateCapacity(reserving: slot.platform.memoryReservationBytes)
     }
 
     let slot = configuration.slots.count == 1 ? "slot" : "slots"
@@ -187,11 +183,10 @@ func makeRunnerRecovery(
     )
 }
 
-func validateRunnerServiceTemplate(_ templateURL: URL, stateDirectory: URL, executor: any ProcessExecuting) throws {
-    _ = try MacOSVirtualizationBackend(
-        templateURL: templateURL,
-        cloneRootURL: MacOSRunnerCloneStore(stateDirectory: stateDirectory).rootURL,
-        executor: executor
+func validateRunnerServiceTemplate(_ templateURL: URL, stateDirectory: URL) throws {
+    try MacOSVirtualizationBackend.validateTemplateLocation(
+        templateURL,
+        cloneRootURL: MacOSRunnerCloneStore(stateDirectory: stateDirectory).rootURL
     )
     try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
     try MacOSGuestSSH.validateTemplate(at: templateURL)

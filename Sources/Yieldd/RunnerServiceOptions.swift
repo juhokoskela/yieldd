@@ -38,6 +38,10 @@ struct RunnerServiceConfiguration: Equatable, Sendable {
     }
 
     var requiresLinux: Bool { slots.contains { $0.platform == .linux } }
+
+    var memoryReservationBytes: UInt64 {
+        slots.reduce(0) { $0 + $1.platform.memoryReservationBytes }
+    }
 }
 
 struct RunnerServiceOptions: ParsableArguments {
@@ -47,7 +51,7 @@ struct RunnerServiceOptions: ParsableArguments {
     @Option(name: .customLong("macos"), help: "macOS repository in owner/name form. Repeat for another slot, up to two.")
     var macOSRepositories: [String] = []
 
-    @Option(name: .customLong("macos-template"), help: "Prepared macOS template bundle shared by the macOS slots.")
+    @Option(name: .customLong("macos-template"), help: "Absolute path to the prepared macOS template bundle shared by the macOS slots.")
     var macOSTemplate: String?
 
     mutating func validate() throws { _ = try serviceConfiguration() }
@@ -55,6 +59,9 @@ struct RunnerServiceOptions: ParsableArguments {
     func serviceConfiguration() throws -> RunnerServiceConfiguration {
         if let macOSTemplate, macOSTemplate.isEmpty {
             throw ValidationError("--macos-template must not be empty.")
+        }
+        if let macOSTemplate, !macOSTemplate.hasPrefix("/") {
+            throw ValidationError("--macos-template must be an absolute path.")
         }
         return try RunnerServiceConfiguration(
             repositories: repositories.map(GitHubRepository.init),

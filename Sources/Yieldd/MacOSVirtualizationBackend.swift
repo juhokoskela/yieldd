@@ -40,9 +40,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     ) throws {
         self.templateURL = templateURL.resolvingSymlinksInPath()
         clones = MacOSRunnerCloneStore(rootURL: cloneRootURL.resolvingSymlinksInPath())
-        guard !self.templateURL.pathComponents.starts(with: clones.rootURL.pathComponents) else {
-            throw MacOSVirtualizationBackendError.templateInsideCloneRoot
-        }
+        try Self.validateTemplateLocation(self.templateURL, cloneRootURL: clones.rootURL)
         let ssh = MacOSGuestSSH(templateURL: self.templateURL, executor: executor)
         self.ssh = ssh
         connection = MacOSGuestConnection(resolver: resolver, ssh: ssh)
@@ -53,6 +51,14 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         self.stopTimeout = stopTimeout
         self.requireEntitlement = requireEntitlement
         self.makeMachine = makeMachine
+    }
+
+    static func validateTemplateLocation(_ templateURL: URL, cloneRootURL: URL) throws {
+        guard !templateURL.resolvingSymlinksInPath().pathComponents.starts(
+            with: cloneRootURL.resolvingSymlinksInPath().pathComponents
+        ) else {
+            throw MacOSVirtualizationBackendError.templateInsideCloneRoot
+        }
     }
 
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
