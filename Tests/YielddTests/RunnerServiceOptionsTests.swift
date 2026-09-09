@@ -22,6 +22,8 @@ func serviceOptionsPreserveMixedAndRepeatedSlots() throws {
 
 @Test(arguments: [
     ([], "At least one runner repository is required."),
+    (["not-a-repository"], "Repository must use the owner/name format accepted by GitHub."),
+    (["--macos", "not-a-repository", "--macos-template", "/tmp/template"], "Repository must use the owner/name format accepted by GitHub."),
     (["--macos", "owner/repo"], "--macos and --macos-template must be supplied together."),
     (["owner/repo", "--macos-template", "/tmp/template"], "--macos and --macos-template must be supplied together."),
     (["--macos", "owner/repo", "--macos-template", ""], "--macos-template must be an absolute path."),
@@ -34,6 +36,8 @@ func serviceOptionsPreserveMixedAndRepeatedSlots() throws {
 func serviceOptionsRejectInvalidSlotConfigurations(arguments: [String], message: String) throws {
     let error = try #require(#expect(throws: (any Error).self) { try RunnerServiceCommand.parse(arguments) })
     #expect(RunnerServiceCommand.message(for: error) == message)
+    let agentError = try #require(#expect(throws: (any Error).self) { try AgentInstallCommand.parse(arguments) })
+    #expect(AgentInstallCommand.message(for: agentError) == message)
 }
 
 @Test(arguments: [false, true])
@@ -53,7 +57,11 @@ func serviceRejectsManagedTemplateBeforeRecovery(symlink: Bool) throws {
     let error = try #require(#expect(throws: MacOSVirtualizationBackendError.self) {
         try runRunnerService(
             configuration: configuration, leaseStore: store, containerURL: nil,
-            ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), output: .terminal
+            ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), output: .terminal,
+            prepareContainer: {
+                Issue.record("Template validation must precede Container startup")
+                throw TestFailure.unexpectedProcessRequest
+            }
         )
     })
     guard case .templateInsideCloneRoot = error else {
@@ -193,7 +201,7 @@ func serviceRecoveryReportsMissingContainerAndRetainsLinuxLease() throws {
     #expect(try recovery.run().isEmpty)
     try leases.save(lease)
     let error = try #require(#expect(throws: RunnerSessionError.self) { try recovery.run() })
-    #expect(describeError(error).contains("Linux lease recovery requires Apple Container"))
+    #expect(describeError(error).contains("Linux lease recovery could not prepare Apple Container"))
     #expect(describeError(error).contains("Could not find executable container"))
     #expect(try leases.load() == [lease])
     #expect(executor.requests.isEmpty)

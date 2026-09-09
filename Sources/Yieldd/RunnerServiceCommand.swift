@@ -50,7 +50,8 @@ func runRunnerService(
     ghURL: URL,
     stop: RunnerPoolStop,
     output: RunnerServiceOutput,
-    memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
+    memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission(),
+    prepareContainer: (() throws -> URL)? = nil
 ) throws {
     try memoryAdmission.validateCapacity(reserving: configuration.memoryReservationBytes)
     if let templateURL = configuration.macOSTemplateURL {
@@ -61,13 +62,12 @@ func runRunnerService(
         try MacOSVirtualMachineLifecycle.requireSupportedHost()
     }
 
+    let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+    let resolveContainer = prepareContainer ?? { try containerURL ?? ExecutableLocator().locate("container") }
     do {
         let recovery = makeRunnerRecovery(
-            leaseStore: leaseStore,
-            resolveContainer: { try containerURL ?? ExecutableLocator().locate("container") },
-            ghURL: ghURL, stop: stop,
-            executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline),
-            stateChanged: { reportRunnerRecoveryState($0, output: output) }
+            leaseStore: leaseStore, resolveContainer: resolveContainer, ghURL: ghURL,
+            stop: stop, executor: executor, stateChanged: { reportRunnerRecoveryState($0, output: output) }
         )
         for recoveredID in try recovery.run() {
             output.info("Cleaned up abandoned runner \(recoveredID.value).")
@@ -79,11 +79,12 @@ func runRunnerService(
         return
     }
 
+    let preparedContainerURL = try configuration.requiresLinux ? resolveContainer() : nil
     let slots = try configuration.slots.map { slot in
         let backend: RunnerSlotBackend
         switch slot.platform {
         case .linux:
-            guard let containerURL else { throw RunnerServiceConfigurationError.missingContainerExecutable }
+            guard let containerURL = preparedContainerURL else { throw RunnerServiceConfigurationError.missingContainerExecutable }
             backend = .linux(containerURL: containerURL)
         case .macOS:
             guard let templateURL = configuration.macOSTemplateURL else {

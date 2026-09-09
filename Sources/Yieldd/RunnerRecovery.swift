@@ -95,7 +95,7 @@ enum RunnerRecoveryError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .linuxBackendUnavailable(error):
-            "Linux lease recovery requires Apple Container. Restore the container executable and retry recovery: \(describeError(error))"
+            "Linux lease recovery could not prepare Apple Container: \(describeError(error))"
         }
     }
 }

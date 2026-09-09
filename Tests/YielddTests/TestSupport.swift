@@ -1,6 +1,19 @@
 import Foundation
 @testable import Yieldd
 
+extension AgentConfiguration {
+    init(
+        repositories: [GitHubRepository], macOSRepositories: [GitHubRepository] = [],
+        macOSTemplateURL: URL? = nil, containerURL: URL?, ghURL: URL
+    ) throws {
+        try self.init(
+            runners: RunnerServiceConfiguration(
+                repositories: repositories, macOSRepositories: macOSRepositories, macOSTemplateURL: macOSTemplateURL
+            ), containerURL: containerURL, ghURL: ghURL
+        )
+    }
+}
+
 extension RunnerMemoryAdmission {
     func acquireWithoutWaiting(reserving bytes: UInt64) throws -> RunnerMemoryReservation {
         var blocked = false
