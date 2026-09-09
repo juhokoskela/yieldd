@@ -69,7 +69,7 @@ func localAgentInstallerPreflightsBeforeReplacingAndBuildsOnlyForLinux(result: S
 }
 
 @Test(arguments: [false, true])
-func agentPreflightBinaryEmitsInstallerProtocolToken(linux: Bool) throws {
+func agentPreflightBinaryHonorsCapacityAndInstallerProtocol(linux: Bool) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let bin = fixture.rootURL.appendingPathComponent("bin")
@@ -86,9 +86,22 @@ func agentPreflightBinaryEmitsInstallerProtocolToken(linux: Bool) throws {
                     "agent", "install", "--preflight-only"] + arguments,
         timeout: 15
     )
-    let result = try ProcessExecutor().execute(request).requireSuccess(for: request)
-    #expect(result.stdoutText == (linux ? "linux\n" : "macos\n"))
-    #expect(result.stderr.isEmpty)
+    let result = try ProcessExecutor().execute(request)
+    let physicalMemory = ProcessInfo.processInfo.physicalMemory
+    let budget = physicalMemory - physicalMemory / 4
+    let required = (linux ? RunnerPlatform.linux : .macOS).memoryReservationBytes
+    if required > budget {
+        #expect(result.terminationReason == .exit)
+        #expect(result.terminationStatus == 1)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderrText.contains(describeError(RunnerMemoryAdmissionError.insufficientHostMemory(
+            requiredBytes: required, budgetBytes: budget
+        ))))
+    } else {
+        _ = try result.requireSuccess(for: request)
+        #expect(result.stdoutText == (linux ? "linux\n" : "macos\n"))
+        #expect(result.stderr.isEmpty)
+    }
 }
 
 private struct InstallerFixture {

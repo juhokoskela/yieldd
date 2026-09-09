@@ -134,10 +134,10 @@ func agentInstallPreflightResolvesToolsWithoutAPackagedApplication() throws {
     command.preflightOnly = true
     var resolvedTools: [String] = []
 
-    try command.run { name in
+    try command.run(locateExecutable: { name in
         resolvedTools.append(name)
         return URL(fileURLWithPath: "/usr/bin/\(name)")
-    }
+    }, memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024))
 
     #expect(resolvedTools == ["container", "gh"])
 }
@@ -152,7 +152,10 @@ func agentInstallPreflightReportsMissingTool() throws {
     )
 
     #expect(throws: expectedError) {
-        try command.run { _ in throw expectedError }
+        try command.run(
+            locateExecutable: { _ in throw expectedError },
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024)
+        )
     }
 }
 
@@ -258,7 +261,10 @@ func agentInstallRejectsManagedTemplateBeforeRegistration(symlink: Bool) throws 
         "--macos", "owner/repo", "--macos-template", (symlink ? alias : template).path,
     ])
     let error = try #require(#expect(throws: MacOSVirtualizationBackendError.self) {
-        try command.run(locateExecutable: { _ in URL(fileURLWithPath: "/usr/bin/true") }, stateDirectory: directory)
+        try command.run(
+            locateExecutable: { _ in URL(fileURLWithPath: "/usr/bin/true") }, stateDirectory: directory,
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024)
+        )
     })
     guard case .templateInsideCloneRoot = error else {
         Issue.record("Expected template location rejection")
