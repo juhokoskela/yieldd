@@ -2,35 +2,37 @@ import Darwin
 import Foundation
 
 struct AgentConfiguration: Equatable {
-    let repositories: [GitHubRepository]
-    let containerURL: URL
+    let runners: RunnerServiceConfiguration
+    let containerURL: URL?
     let ghURL: URL
+
+    var repositories: [GitHubRepository] { runners.slots.filter { $0.platform == .linux }.map(\.repository) }
+    var macOSRepositories: [GitHubRepository] { runners.slots.filter { $0.platform == .macOS }.map(\.repository) }
 
     init(
         repositories: [GitHubRepository],
-        containerURL: URL,
+        macOSRepositories: [GitHubRepository] = [],
+        macOSTemplateURL: URL? = nil,
+        containerURL: URL?,
         ghURL: URL
     ) throws {
-        guard !repositories.isEmpty else {
-            throw AgentConfigurationError.emptyRepositories
+        runners = try RunnerServiceConfiguration(
+            repositories: repositories, macOSRepositories: macOSRepositories, macOSTemplateURL: macOSTemplateURL
+        )
+        guard !runners.requiresLinux || containerURL != nil else {
+            throw AgentConfigurationError.missingContainerExecutable
         }
-        guard repositories.count <= RunnerPool.maximumSlots else {
-            throw AgentConfigurationError.tooManyRepositories(
-                maximum: RunnerPool.maximumSlots
-            )
-        }
-        for url in [containerURL, ghURL]
+        for url in [containerURL, ghURL].compactMap({ $0 })
         where !url.isFileURL || !url.path.hasPrefix("/") {
             throw AgentConfigurationError.invalidExecutableURL(url)
         }
 
-        self.repositories = repositories
         self.containerURL = containerURL
         self.ghURL = ghURL
     }
 
     func requireExecutables() throws {
-        for url in [containerURL, ghURL]
+        for url in [runners.requiresLinux ? containerURL : nil, ghURL].compactMap({ $0 })
         where !FileManager.default.isExecutableFile(atPath: url.path) {
             throw AgentConfigurationError.executableUnavailable(path: url.path)
         }
@@ -81,7 +83,8 @@ struct AgentConfigurationStore {
         } catch {
             throw AgentConfigurationError.invalidContents(path: fileURL.path)
         }
-        guard stored.containerExecutable.hasPrefix("/"),
+        guard stored.containerExecutable.map({ $0.hasPrefix("/") }) ?? true,
+              stored.macOSTemplate.map({ $0.hasPrefix("/") }) ?? true,
               stored.githubCLIExecutable.hasPrefix("/") else {
             throw AgentConfigurationError.invalidContents(path: fileURL.path)
         }
@@ -89,7 +92,9 @@ struct AgentConfigurationStore {
         do {
             return try AgentConfiguration(
                 repositories: stored.repositories.map(GitHubRepository.init),
-                containerURL: URL(fileURLWithPath: stored.containerExecutable),
+                macOSRepositories: (stored.macOSRepositories ?? []).map(GitHubRepository.init),
+                macOSTemplateURL: stored.macOSTemplate.map { URL(fileURLWithPath: $0) },
+                containerURL: stored.containerExecutable.map { URL(fileURLWithPath: $0) },
                 ghURL: URL(fileURLWithPath: stored.githubCLIExecutable)
             )
         } catch {
@@ -100,7 +105,9 @@ struct AgentConfigurationStore {
     func save(_ configuration: AgentConfiguration) throws {
         let stored = StoredAgentConfiguration(
             repositories: configuration.repositories.map(\.fullName),
-            containerExecutable: configuration.containerURL.path,
+            macOSRepositories: configuration.macOSRepositories.map(\.fullName),
+            macOSTemplate: configuration.runners.macOSTemplateURL?.path,
+            containerExecutable: configuration.containerURL?.path,
             githubCLIExecutable: configuration.ghURL.path
         )
         let encoder = JSONEncoder()
@@ -123,8 +130,7 @@ struct AgentConfigurationStore {
 }
 
 enum AgentConfigurationError: Error, Equatable, LocalizedError {
-    case emptyRepositories
-    case tooManyRepositories(maximum: Int)
+    case missingContainerExecutable
     case invalidExecutableURL(URL)
     case missing(path: String)
     case invalidContents(path: String)
@@ -132,10 +138,8 @@ enum AgentConfigurationError: Error, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .emptyRepositories:
-            "The local agent requires at least one repository."
-        case let .tooManyRepositories(maximum):
-            "The local agent supports at most \(maximum) runner slots."
+        case .missingContainerExecutable:
+            "Linux runner slots require a configured container executable."
         case let .invalidExecutableURL(url):
             "The local agent executable URL must be an absolute file URL: \(url.absoluteString)"
         case let .missing(path):
@@ -150,6 +154,8 @@ enum AgentConfigurationError: Error, Equatable, LocalizedError {
 
 private struct StoredAgentConfiguration: Codable {
     let repositories: [String]
-    let containerExecutable: String
+    let macOSRepositories: [String]?
+    let macOSTemplate: String?
+    let containerExecutable: String?
     let githubCLIExecutable: String
 }

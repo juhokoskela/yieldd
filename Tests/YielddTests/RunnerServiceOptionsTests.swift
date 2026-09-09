@@ -30,6 +30,8 @@ func serviceOptionsPreserveMixedAndRepeatedSlots() throws {
 func serviceOptionsRejectInvalidSlotConfigurations(arguments: [String], message: String) throws {
     let error = try #require(#expect(throws: (any Error).self) { try RunnerServiceCommand.parse(arguments) })
     #expect(RunnerServiceCommand.message(for: error) == message)
+    let agentError = try #require(#expect(throws: (any Error).self) { try AgentInstallCommand.parse(arguments) })
+    #expect(AgentInstallCommand.message(for: agentError) == message)
 }
 
 @Test(arguments: [false, true])

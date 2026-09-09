@@ -205,6 +205,69 @@ func agentUninstallTreatsConfirmedMissingServiceAsAlreadyStopped() async throws 
     #expect(recovered)
 }
 
+@Test
+func agentStatusReportsMacOSSlotsAndTemplate() throws {
+    let fixture = try AgentServiceFixture(status: .enabled)
+    defer { fixture.remove() }
+    let configuration = try AgentConfiguration(
+        repositories: [], macOSRepositories: [GitHubRepository("owner/mac"), GitHubRepository("owner/mac")],
+        macOSTemplateURL: fixture.directory.appendingPathComponent("Template.bundle"),
+        containerURL: nil, ghURL: fixture.configuration.ghURL
+    )
+    try fixture.store.save(configuration)
+    var lines: [String] = []
+    try reportAgentStatus(store: fixture.store, service: fixture.service, output: { lines.append($0) })
+    #expect(lines.contains("macOS repositories: owner/mac, owner/mac"))
+    #expect(lines.contains("macOS template: \(try #require(configuration.runners.macOSTemplateURL).path)"))
+    #expect(!lines.contains { $0.hasPrefix("container:") })
+}
+
+@Test
+func agentInstallRejectsChangedMacOSTemplateWhileEnabled() throws {
+    let fixture = try AgentServiceFixture(status: .enabled)
+    defer { fixture.remove() }
+    func configuration(_ name: String) throws -> AgentConfiguration {
+        try AgentConfiguration(
+            repositories: [], macOSRepositories: [GitHubRepository("owner/mac")],
+            macOSTemplateURL: fixture.directory.appendingPathComponent(name),
+            containerURL: nil, ghURL: fixture.configuration.ghURL
+        )
+    }
+    let existing = try configuration("Original.bundle")
+    try fixture.store.save(existing)
+    #expect(throws: AgentError.configurationChanged) {
+        try installAgent(configuration: configuration("Replacement.bundle"), store: fixture.store, service: fixture.service)
+    }
+    #expect(try fixture.store.load() == existing)
+    #expect(fixture.registerCalls == 0)
+}
+
+@Test(arguments: [RunnerPlatform.linux, .macOS], [nil, RunnerPlatform.linux, .macOS])
+func agentStartsContainerOnlyForLinuxSlotsOrLeases(platform: RunnerPlatform, leasePlatform: RunnerPlatform?) throws {
+    let fixture = try AgentServiceFixture(status: .enabled)
+    defer { fixture.remove() }
+    let repository = try GitHubRepository("owner/repo")
+    let configuration = try AgentConfiguration(
+        repositories: platform == .linux ? [repository] : [],
+        macOSRepositories: platform == .macOS ? [repository] : [],
+        macOSTemplateURL: platform == .macOS ? fixture.directory.appendingPathComponent("Missing.bundle") : nil,
+        containerURL: fixture.configuration.containerURL, ghURL: fixture.configuration.ghURL
+    )
+    let leases = try RunnerLeaseStore(directory: fixture.directory)
+    if let leasePlatform {
+        try leases.save(RunnerLease(runnerID: RunnerID(value: "yieldd-abandoned"), repository: repository, platform: leasePlatform))
+    }
+    let needsContainer = platform == .linux || leasePlatform == .linux
+    let executor = RecordingProcessExecutor(outcomes: needsContainer ? [.success(processResult())] : [])
+    try startAgentContainerIfNeeded(configuration: configuration, leaseStore: leases, executor: executor)
+    #expect(executor.requests.count == (needsContainer ? 1 : 0))
+    if needsContainer {
+        let request = try #require(executor.requests.first)
+        #expect(request.executableURL == configuration.containerURL)
+        #expect(request.arguments == ["system", "start", "--disable-kernel-install", "--timeout", "60"])
+    }
+}
+
 private final class AgentServiceFixture {
     let directory: URL
     let store: AgentConfigurationStore

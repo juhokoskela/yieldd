@@ -102,38 +102,44 @@ struct AgentInstallCommand: ParsableCommand {
         abstract: "Configure and enable the local agent."
     )
 
-    @Argument(help: "Repositories in owner/name form. Repeat a repository to give it another runner slot.")
-    var repositories: [String]
+    @OptionGroup
+    var runners: RunnerServiceOptions
 
     @Flag(name: .long, help: .hidden)
     var preflightOnly = false
-
-    mutating func validate() throws {
-        guard repositories.count <= RunnerPool.maximumSlots else {
-            throw ValidationError("The local agent supports at most \(RunnerPool.maximumSlots) runner slots.")
-        }
-        _ = try repositories.map(GitHubRepository.init)
-    }
 
     mutating func run() throws {
         let locator = ExecutableLocator()
         try run(locateExecutable: locator.locate)
     }
 
-    func run(locateExecutable: (String) throws -> URL) throws {
+    func run(locateExecutable: (String) throws -> URL, stateDirectory: URL? = nil) throws {
+        let slots = try runners.serviceConfiguration()
         let configuration = try AgentConfiguration(
-            repositories: repositories.map(GitHubRepository.init),
-            containerURL: locateExecutable("container"),
+            repositories: slots.slots.filter { $0.platform == .linux }.map(\.repository),
+            macOSRepositories: slots.slots.filter { $0.platform == .macOS }.map(\.repository),
+            macOSTemplateURL: slots.macOSTemplateURL,
+            containerURL: slots.requiresLinux ? locateExecutable("container") : nil,
             ghURL: locateExecutable("gh")
         )
+        let directory = try stateDirectory ?? yielddApplicationSupportDirectory()
+        if let templateURL = configuration.runners.macOSTemplateURL {
+            try validateRunnerServiceTemplate(templateURL, stateDirectory: directory, executor: ProcessExecutor())
+        }
+        let admission = RunnerMemoryAdmission()
+        for slot in configuration.runners.slots {
+            try admission.validateCapacity(reserving: slot.platform.memoryReservationBytes)
+        }
         guard !preflightOnly else {
+            // Machine-readable result consumed by install-local-agent.sh.
+            print(configuration.runners.requiresLinux ? "linux" : "macos")
             return
         }
 
         let service = try localAgentService()
         try installAgent(
             configuration: configuration,
-            store: AgentConfigurationStore(),
+            store: AgentConfigurationStore(directory: directory),
             service: service
         )
         print(registrationStatusDescription(service.status()))
@@ -200,15 +206,13 @@ struct AgentRunCommand: ParsableCommand {
             let configuration = try store.load()
             try configuration.requireExecutables()
             try withRunnerOwnership(in: store.directory) { leaseStore in
-                try AppleContainerSystem(
-                    containerURL: configuration.containerURL,
-                    executor: ProcessExecutor(
-                        checkCancellation: stop.check,
-                        maximumExecutionDeadline: stop.executionDeadline
-                    )
-                ).start()
+                let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+                if let templateURL = configuration.runners.macOSTemplateURL {
+                    try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory, executor: executor)
+                }
+                try startAgentContainerIfNeeded(configuration: configuration, leaseStore: leaseStore, executor: executor)
                 try runRunnerService(
-                    configuration: RunnerServiceConfiguration(repositories: configuration.repositories),
+                    configuration: configuration.runners,
                     leaseStore: leaseStore,
                     containerURL: configuration.containerURL,
                     ghURL: configuration.ghURL,
@@ -235,6 +239,9 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
         let configuration = try store.load()
         try configuration.requireExecutables()
         let stop = try RunnerPoolStop.monitoringSignals()
+        try startAgentContainerIfNeeded(
+            configuration: configuration, leaseStore: leaseStore, executor: ProcessExecutor(checkCancellation: stop.check)
+        )
         let recovery = makeRunnerRecovery(
             leaseStore: leaseStore,
             containerURL: configuration.containerURL,
@@ -246,6 +253,21 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
             print("Cleaned up abandoned runner \(id.value).")
         }
     }
+}
+
+func startAgentContainerIfNeeded(
+    configuration: AgentConfiguration, leaseStore: RunnerLeaseStore, executor: any ProcessExecuting
+) throws {
+    let hasLinuxLease = try leaseStore.load().contains { $0.platform == .linux }
+    guard configuration.runners.requiresLinux || hasLinuxLease else { return }
+    let containerURL: URL
+    do {
+        containerURL = try configuration.containerURL ?? ExecutableLocator().locate("container")
+    } catch {
+        if isCancellation(error) { throw error }
+        throw RunnerRecoveryError.linuxBackendUnavailable(error)
+    }
+    try AppleContainerSystem(containerURL: containerURL, executor: executor).start()
 }
 
 private extension RunnerServiceOutput {

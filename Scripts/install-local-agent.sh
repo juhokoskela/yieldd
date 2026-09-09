@@ -3,7 +3,7 @@
 set -eu
 
 if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 OWNER/REPOSITORY [OWNER/REPOSITORY ...]" >&2
+    echo "Usage: $0 [OWNER/REPOSITORY ...] [--macos OWNER/REPOSITORY ... --macos-template PATH]" >&2
     exit 64
 fi
 
@@ -58,13 +58,19 @@ trap 'exit 143' TERM
 
 ditto "$source_application" "$staged_application"
 codesign --verify --strict "$staged_application"
-"$staged_application/Contents/MacOS/yieldd" agent install \
-    --preflight-only "$@"
-stop_builder=true
-remove_staged_image=true
-container build -t "$staged_image" "$repository_directory/Guest"
-container builder stop
-stop_builder=false
+guest_platform=$("$staged_application/Contents/MacOS/yieldd" agent install \
+    --preflight-only "$@")
+case "$guest_platform" in
+    linux)
+        stop_builder=true
+        remove_staged_image=true
+        container build -t "$staged_image" "$repository_directory/Guest"
+        container builder stop
+        stop_builder=false
+        ;;
+    macos) ;;
+    *) echo "Unexpected agent preflight result: $guest_platform" >&2; exit 1 ;;
+esac
 
 if [ -e "$installed_application" ]; then
     installed_executable="$installed_application/Contents/MacOS/yieldd"
@@ -77,10 +83,12 @@ if [ -e "$installed_application" ]; then
     mv "$installed_application" "$previous_application"
 fi
 
-container image delete --force "$guest_image"
-container image tag "$staged_image" "$guest_image"
-container image delete "$staged_image"
-remove_staged_image=false
+if [ "$guest_platform" = linux ]; then
+    container image delete --force "$guest_image"
+    container image tag "$staged_image" "$guest_image"
+    container image delete "$staged_image"
+    remove_staged_image=false
+fi
 
 mv "$staged_application" "$installed_application"
 replacement_complete=true

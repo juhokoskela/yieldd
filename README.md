@@ -36,7 +36,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd doctor
 
 ## Guest image
 
-The local-agent installer builds the Ubuntu 24.04 guest image automatically. To build it manually for the foreground commands, run this from the repository root:
+The local-agent installer builds the Ubuntu 24.04 guest image automatically when Linux slots are configured. To build it manually for the foreground commands, run this from the repository root:
 
 ```sh
 container build -t local/yieldd-guest:dev Guest
@@ -95,7 +95,7 @@ macOS runners have the `yieldd-macos` label and no default labels. Their names s
 
 `machine-test`, `runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock. GitHub runner sessions record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, `runner-test`, `serve`, the local agent, and macOS `machine-test` recover those exact runners before creating another machine. Linux `machine-test` does not perform recovery. If GitHub still considers an interrupted runner busy, recovery keeps its lease and waits with exponential backoff until GitHub releases it.
 
-Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched. macOS slots are available in `serve`; agent configuration support is not exposed yet.
+Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched.
 
 ## Foreground runner service
 
@@ -120,7 +120,7 @@ This is a foreground command, not a daemon. Ctrl+C, SIGTERM, and closing the ter
 
 ## Local agent
 
-The local agent runs the same runner pool at login without keeping a terminal open. Before installing it, run `yieldd doctor` and start the container system once so Apple Container can install any required kernel components.
+The local agent runs the same runner pool at login without keeping a terminal open. For Linux slots, run `yieldd doctor` and start the container system once before installation so Apple Container can install any required kernel components. For macOS slots, validate the template with `machine-test` first.
 
 Install one or more runner slots from the repository root:
 
@@ -128,7 +128,18 @@ Install one or more runner slots from the repository root:
 Scripts/install-local-agent.sh OWNER/REPOSITORY [OWNER/REPOSITORY ...]
 ```
 
-Before replacing any existing installation at `~/Applications/yieldd.app`, the script builds the guest image and an ad-hoc-signed application, then verifies the application. It waits for the previous agent to stop and recover active runners, installs the new application, stores the repository slots plus the resolved absolute paths to `container` and `gh`, and registers a per-user LaunchAgent through `SMAppService`. The agent starts Apple Container without interactive kernel installation, recovers abandoned runners, and then serves the configured repositories. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
+The installer accepts the same slots as `serve`, including up to two macOS slots and sixteen total slots. For a macOS-only agent:
+
+```sh
+Scripts/install-local-agent.sh --macos OWNER/REPOSITORY --macos OWNER/REPOSITORY \
+  --macos-template /absolute/path/VM.bundle
+```
+
+Add positional repositories to include Linux slots. All slots share the same host-memory budget described above.
+
+Before replacing any existing installation at `~/Applications/yieldd.app`, the script builds and verifies an ad-hoc-signed application and validates its configuration and template files. It builds the Linux guest image only when Linux slots are configured. It then waits for the previous agent to stop and recover active runners, installs the new application, and registers a per-user LaunchAgent through `SMAppService`. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
+
+The saved configuration includes each platform's repository slots, the resolved absolute template path, `gh`, and `container` when Linux slots are configured. Existing Linux-only configuration files remain supported. Status reports the macOS slots and template path. At startup, the agent validates the template before recovery, starts Apple Container without interactive kernel installation when Linux slots or abandoned Linux leases require it, recovers abandoned runners, and serves the configured slots. A macOS-only agent does not otherwise need `container`; recovering an old Linux lease still requires restoring it. Uninstall recovery does not require the macOS template to remain available.
 
 launchd gives the agent 60 seconds to stop. `yieldd` uses a 50-second shutdown budget for its runner processes and cleanup commands so launchd does not kill it halfway through cleanup. Any lease that cannot be cleared within that budget remains available for recovery on the next launch.
 
