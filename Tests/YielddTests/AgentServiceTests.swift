@@ -325,6 +325,55 @@ func agentRecoveryKeepsLinuxFailuresIndependentOfMacOSCleanup(missingContainerPa
     #expect(try fixture.store.load() == configuration)
 }
 
+@Test(arguments: [false, true])
+func mixedAgentRecoversMacOSAfterContainerBecomesUnavailable(nonExecutable: Bool) throws {
+    let fixture = try AgentServiceFixture(status: .notRegistered)
+    defer { fixture.remove() }
+    let repository = try GitHubRepository("owner/repo")
+    let containerURL = fixture.directory.appendingPathComponent("container")
+    if nonExecutable {
+        try Data().write(to: containerURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: containerURL.path)
+    }
+    let configuration = try AgentConfiguration(
+        repositories: [repository], macOSRepositories: [repository],
+        macOSTemplateURL: fixture.directory.appendingPathComponent("Template.bundle"),
+        containerURL: containerURL, ghURL: URL(fileURLWithPath: "/usr/bin/true")
+    )
+    try fixture.store.save(configuration)
+    let leases = try RunnerLeaseStore(directory: fixture.directory)
+    let linuxID = RunnerID(value: "yieldd-a-linux")
+    let macID = RunnerID(value: "yieldd-z-macos")
+    try leases.save(RunnerLease(runnerID: linuxID, repository: repository))
+    try leases.save(RunnerLease(runnerID: macID, repository: repository, platform: .macOS))
+    let clone = try MacOSRunnerCloneStore(stateDirectory: fixture.directory).bundleURL(for: macID)
+    try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
+    let loaded = try fixture.store.load()
+    try loaded.requireGitHubCLI()
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-z-macos","busy":false}]}]"#)),
+        .success(processResult()),
+    ])
+    let recovery = makeRunnerRecovery(
+        leaseStore: leases, resolveContainer: agentContainerPreparation(configuration: loaded, executor: executor),
+        ghURL: loaded.ghURL, stop: RunnerPoolStop(), executor: executor, stateChanged: { _ in }
+    )
+    let error = try #require(#expect(throws: RunnerSessionError.self) { try recovery.run() })
+    guard case let .cleanupFailed(failures) = error,
+          let failure = failures.first,
+          case let RunnerRecoveryError.linuxBackendUnavailable(underlying) = failure.error else {
+        Issue.record("Expected Linux preparation failure")
+        return
+    }
+    #expect(failures.count == 1)
+    #expect(underlying as? AgentConfigurationError == .executableUnavailable(path: containerURL.path))
+    #expect(try leases.load().map(\.runnerID) == [linuxID])
+    #expect(!FileManager.default.fileExists(atPath: clone.path))
+    #expect(executor.requests.count == 2)
+    #expect(executor.requests.allSatisfy { $0.executableURL == loaded.ghURL })
+    #expect(executor.requests.last?.arguments.contains("DELETE") == true)
+}
+
 private final class AgentServiceFixture {
     let directory: URL
     let store: AgentConfigurationStore

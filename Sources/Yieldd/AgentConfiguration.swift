@@ -24,10 +24,9 @@ struct AgentConfiguration: Equatable {
         self.ghURL = ghURL
     }
 
-    func requireExecutables() throws {
-        for case let url? in [runners.requiresLinux ? containerURL : nil, ghURL]
-        where !FileManager.default.isExecutableFile(atPath: url.path) {
-            throw AgentConfigurationError.executableUnavailable(path: url.path)
+    func requireGitHubCLI() throws {
+        guard FileManager.default.isExecutableFile(atPath: ghURL.path) else {
+            throw AgentConfigurationError.executableUnavailable(path: ghURL.path)
         }
     }
 

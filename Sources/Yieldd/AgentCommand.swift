@@ -197,7 +197,7 @@ struct AgentRunCommand: ParsableCommand {
         do {
             let store = try AgentConfigurationStore()
             let configuration = try store.load()
-            try configuration.requireExecutables()
+            try configuration.requireGitHubCLI()
             try withRunnerOwnership(in: store.directory) { leaseStore in
                 let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
                 try runRunnerService(

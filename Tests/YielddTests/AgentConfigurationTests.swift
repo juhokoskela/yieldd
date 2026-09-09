@@ -99,15 +99,15 @@ func agentConfigurationEnforcesRepositoryAndExecutableInvariants() throws {
 }
 
 @Test
-func agentConfigurationRequiresConfiguredExecutables() throws {
+func agentConfigurationRequiresGitHubCLI() throws {
     let configuration = try AgentConfiguration(
         repositories: [try GitHubRepository("owner/repository")],
         containerURL: URL(fileURLWithPath: "/missing/container"),
         ghURL: URL(fileURLWithPath: "/missing/gh")
     )
 
-    #expect(throws: AgentConfigurationError.executableUnavailable(path: "/missing/container")) {
-        try configuration.requireExecutables()
+    #expect(throws: AgentConfigurationError.executableUnavailable(path: "/missing/gh")) {
+        try configuration.requireGitHubCLI()
     }
 }
 
@@ -241,7 +241,7 @@ func agentConfigurationRoundTripsMacOSSlots(mixed: Bool) throws {
     #expect(loaded == configuration)
     #expect(loaded.runners.macOSTemplateURL == fixture.templateURL.resolvingSymlinksInPath())
     #expect(loaded.runners.slots.map(\.platform) == (mixed ? [.linux, .macOS, .macOS] : [.macOS, .macOS]))
-    try loaded.requireExecutables()
+    try loaded.requireGitHubCLI()
 }
 
 @Test(arguments: [false, true])
@@ -339,14 +339,14 @@ func agentConfigurationRecordsOptionalContainerOutsideLaunchdPath(available: Boo
     }
 }
 
-@Test
-func macOSAgentDoesNotRequireAStaleContainerPath() throws {
+@Test(arguments: [false, true])
+func agentStartupDefersAStaleContainerPath(mixed: Bool) throws {
     let configuration = try AgentConfiguration(
-        repositories: [], macOSRepositories: [GitHubRepository("owner/repo")],
+        repositories: mixed ? [GitHubRepository("owner/repo")] : [], macOSRepositories: [GitHubRepository("owner/repo")],
         macOSTemplateURL: URL(fileURLWithPath: "/missing/template"),
         containerURL: URL(fileURLWithPath: "/missing/container"), ghURL: URL(fileURLWithPath: "/usr/bin/true")
     )
-    try configuration.requireExecutables()
+    try configuration.requireGitHubCLI()
 }
 
 private let validStoredConfiguration = storedConfiguration()
