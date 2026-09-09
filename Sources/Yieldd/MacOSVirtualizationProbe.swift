@@ -576,14 +576,22 @@ enum MacOSVirtualMachineLifecycle {
         }
     }
 
+    static func requireSupportedHost() throws {
+#if arch(arm64)
+        guard VZVirtualMachine.isSupported else {
+            throw MacOSVirtualizationProbeError.virtualizationUnavailable
+        }
+#else
+        throw MacOSVirtualizationProbeError.requiresAppleSilicon
+#endif
+    }
+
     static func makeMachine(
         bundleURL: URL,
         memoryBytes: UInt64
     ) throws -> any MacOSVirtualMachineControlling {
 #if arch(arm64)
-        guard VZVirtualMachine.isSupported else {
-            throw MacOSVirtualizationProbeError.virtualizationUnavailable
-        }
+        try requireSupportedHost()
         return try VirtualizationFrameworkMachine(
             bundleURL: bundleURL,
             memoryBytes: memoryBytes

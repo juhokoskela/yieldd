@@ -61,6 +61,11 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         }
     }
 
+    static func validateTemplate(at templateURL: URL) throws {
+        try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
+        try MacOSGuestSSH.validateTemplate(at: templateURL)
+    }
+
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
         try lock.withLock {
             try requireEntitlement()
@@ -184,8 +189,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
 
     private func validateStorage(_ id: RunnerID) throws {
         _ = try clones.bundleURL(for: id)
-        try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
-        try MacOSGuestSSH.validateTemplate(at: templateURL)
+        try Self.validateTemplate(at: templateURL)
     }
 
     private func checkCleanupDeadline() throws {

@@ -12,7 +12,7 @@ struct MachineTestCommand: ParsableCommand {
 
     mutating func run() throws {
         try withRunnerOwnership { leaseStore in
-            let signalMonitor = try SignalMonitor(signals: [SIGINT, SIGTERM, SIGHUP])
+            let signalMonitor = try SignalMonitor()
             let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
             let backend = try machine.makeBackend(
                 leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor

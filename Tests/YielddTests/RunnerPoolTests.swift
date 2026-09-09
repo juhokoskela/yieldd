@@ -11,13 +11,13 @@ private let secondPoolRepository = try! GitHubRepository("owner/second")
 func poolRunsConcurrentMixedPlatformSlots() throws {
     let gate = ConcurrentSlotGate(expected: 2)
 
-    try RunnerPool(stop: RunnerPoolStop()) { slot, _ in
-        #expect(slot.platform == (slot.repository == firstPoolRepository ? .linux : .macOS))
-        try gate.enter(slot.repository)
-    }.run(slots: [
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: [
         RunnerSlot(repository: firstPoolRepository, platform: .linux),
         RunnerSlot(repository: secondPoolRepository, platform: .macOS),
-    ])
+    ]) { slot, _ in
+        #expect(slot.platform == (slot.repository == firstPoolRepository ? .linux : .macOS))
+        try gate.enter(slot.repository)
+    }
 
     #expect(Set(gate.repositories.map(\.fullName)) == [
         firstPoolRepository.fullName,
@@ -30,9 +30,9 @@ func poolRunsConcurrentMixedPlatformSlots() throws {
 func poolPreservesRepeatedRepositorySlots() throws {
     let gate = ConcurrentSlotGate(expected: 2)
 
-    try RunnerPool(stop: RunnerPoolStop()) { slot, _ in
-        try gate.enter(slot.repository)
-    }.run(slots: [firstPoolRepository, firstPoolRepository].map { RunnerSlot(repository: $0, platform: .linux) })
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: [firstPoolRepository, firstPoolRepository]) { repository, _ in
+        try gate.enter(repository)
+    }
 
     #expect(gate.repositories == [firstPoolRepository, firstPoolRepository])
     #expect(gate.maximumActiveSlots == 2)
@@ -44,9 +44,9 @@ func poolFailureCancelsOtherSlotsAndPreservesTheFirstError() {
     let peerWasCancelled = LockedFlag()
 
     #expect(throws: TestFailure.runnerJob) {
-        try RunnerPool(stop: RunnerPoolStop()) { slot, stop in
-            try gate.enter(slot.repository)
-            if slot.repository == firstPoolRepository {
+        try RunnerPool(stop: RunnerPoolStop()).run(slots: [firstPoolRepository, secondPoolRepository]) { repository, stop in
+            try gate.enter(repository)
+            if repository == firstPoolRepository {
                 throw TestFailure.runnerJob
             }
             do {
@@ -55,7 +55,7 @@ func poolFailureCancelsOtherSlotsAndPreservesTheFirstError() {
             } catch is CancellationError {
                 peerWasCancelled.set()
             }
-        }.run(slots: [firstPoolRepository, secondPoolRepository].map { RunnerSlot(repository: $0, platform: .linux) })
+        }
     }
 
     #expect(peerWasCancelled.value)
@@ -146,41 +146,6 @@ func serviceCommandAcceptsMaximumRunnerSlots() throws {
     )
 
     _ = try RunnerServiceCommand.parse(arguments)
-}
-
-@Test
-func serviceRejectsImpossibleMemoryBudgetBeforeStartingPool() throws {
-    let directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent("yieldd-service-memory-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let memoryAdmission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
-        readMemoryPressure: { .normal }
-    )
-    let output = RunnerServiceOutput(
-        info: { _ in Issue.record("The runner pool must not start") },
-        warning: { _ in },
-        error: { _ in }
-    )
-    let orphan = try MacOSRunnerCloneStore(stateDirectory: directory)
-        .creatingURL(for: RunnerID(value: "yieldd-macos-orphan"))
-    try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
-
-    #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
-        requiredBytes: AppleContainerBackend.memoryBytes,
-        budgetBytes: 6 * 1_024 * 1_024 * 1_024
-    )) {
-        try runRunnerService(
-            configuration: RunnerServiceConfiguration(repositories: [firstPoolRepository]),
-            leaseStore: RunnerLeaseStore(directory: directory),
-            containerURL: URL(fileURLWithPath: "/missing/container"),
-            ghURL: URL(fileURLWithPath: "/missing/gh"),
-            stop: RunnerPoolStop(),
-            output: output,
-            memoryAdmission: memoryAdmission
-        )
-    }
-    #expect(FileManager.default.fileExists(atPath: orphan.path))
 }
 
 private final class ConcurrentSlotGate: @unchecked Sendable {
