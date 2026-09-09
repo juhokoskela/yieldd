@@ -222,6 +222,16 @@ func validateRunnerServiceTemplate(_ templateURL: URL, stateDirectory: URL) thro
 
 func reportRunnerServiceState(_ state: RunnerSessionState, platform: RunnerPlatform, output: RunnerServiceOutput) {
     switch state {
+    case let .listenerStarted(id):
+        output.info("Runner listener \(id.value) started; waiting for job pickup.")
+    case let .jobStarted(id):
+        output.info("Runner \(id.value) reported job start.")
+    case let .listenerExited(id, status):
+        output.info("Runner listener \(id.value) exited with status \(status).")
+    case let .capacityReleased(id):
+        output.info("Machine capacity released for \(id.value).")
+    case let .cleanupCompleted(id):
+        output.info("Runner cleanup completed for \(id.value).")
     case let .preparing(id):
         output.info("Preparing ephemeral runner \(id.value).")
     case let .waitingForMemory(id):
@@ -241,7 +251,8 @@ func reportRunnerRecoveryState(_ state: RunnerSessionState, output: RunnerServic
         output.info(githubCleanupRetryMessage(id: id, delay: retryDelay))
     case let .leaseCleanupFailed(id, reason):
         output.warning("Could not clear runner lease for \(id.value): \(reason)")
-    case .waitingForMemory, .preparing, .waitingForJob, .cleaningUp:
+    case .waitingForMemory, .preparing, .waitingForJob, .cleaningUp,
+         .listenerStarted, .jobStarted, .listenerExited, .capacityReleased, .cleanupCompleted:
         break
     }
 }

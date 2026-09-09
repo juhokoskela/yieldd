@@ -1320,20 +1320,21 @@ private final class RunnerTestBackend: RunnerBackend {
         }
     }
 
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws {
+    ) throws -> ProcessResult {
         outputCaptures.append(outputCapture)
         events.values.append(.exec(id, arguments, standardInput, timeout, user))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall
         }
         try execOutcomes.removeFirst().get()
+        return processResult()
     }
 
     func destroy(_ id: RunnerID) throws {

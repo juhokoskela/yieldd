@@ -54,14 +54,14 @@ struct MacOSGuestSSH {
         )
     }
 
-    func execute(
+    @discardableResult func execute(
         _ arguments: [String],
         address: String,
         standardInput: Data? = nil,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         cancellable: Bool = true
-    ) throws {
+    ) throws -> ProcessResult {
         guard let executable = arguments.first, !executable.isEmpty else {
             throw RunnerBackendError.emptyCommand
         }
@@ -71,7 +71,7 @@ struct MacOSGuestSSH {
         let command = arguments.map { argument in
             "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }.joined(separator: " ")
-        try run(
+        return try run(
             command,
             address: address,
             timeout: timeout,
@@ -81,14 +81,14 @@ struct MacOSGuestSSH {
         )
     }
 
-    private func run(
+    @discardableResult private func run(
         _ command: String,
         address: String,
         timeout: TimeInterval?,
         standardInput: Data? = nil,
         outputCapture: ProcessOutputCapture = .tail(maxBytes: Self.outputTailBytes),
         cancellable: Bool = true
-    ) throws {
+    ) throws -> ProcessResult {
         let request = ProcessRequest(
             executableURL: executableURL,
             arguments: [
@@ -114,7 +114,7 @@ struct MacOSGuestSSH {
             outputCapture: outputCapture,
             cancellable: cancellable
         )
-        try executor.execute(request).requireSuccess(for: request)
+        return try executor.execute(request).requireSuccess(for: request)
     }
 
     private static func configurationValue(_ value: String) -> String {

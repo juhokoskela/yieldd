@@ -119,14 +119,14 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         }
     }
 
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws {
+    ) throws -> ProcessResult {
         try checkCancellation()
         let address = try lock.withLock { () throws -> String in
             guard let guest = guests[id], let address = guest.address else {
@@ -143,7 +143,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
             command = arguments
         }
         // macOS executes every command as runner, including callers' requests for root.
-        try ssh.execute(
+        return try ssh.execute(
             command, address: address, standardInput: standardInput,
             timeout: timeout, outputCapture: outputCapture
         )

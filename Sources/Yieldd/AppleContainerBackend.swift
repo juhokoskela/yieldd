@@ -36,7 +36,7 @@ struct AppleContainerBackend: RunnerBackend {
             Self.image,
         ], timeout: Self.creationTimeout)
         try dockerReadiness.wait {
-            try exec(
+            _ = try exec(
                 ["docker", "info"],
                 timeout: DockerReadiness.probeTimeout,
                 on: id
@@ -51,14 +51,14 @@ struct AppleContainerBackend: RunnerBackend {
         )
     }
 
-    func exec(
+    @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
         as user: RunnerGuestUser,
         on id: RunnerID
-    ) throws {
+    ) throws -> ProcessResult {
         guard !arguments.isEmpty else {
             throw RunnerBackendError.emptyCommand
         }
@@ -73,7 +73,7 @@ struct AppleContainerBackend: RunnerBackend {
         containerArguments.append("--")
         containerArguments.append(contentsOf: arguments)
 
-        _ = try run(
+        return try run(
             containerArguments,
             standardInput: standardInput,
             timeout: timeout,

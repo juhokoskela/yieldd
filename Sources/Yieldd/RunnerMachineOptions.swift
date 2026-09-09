@@ -14,7 +14,8 @@ struct RunnerMachineOptions: ParsableArguments {
     func makeBackend(
         leaseStore: RunnerLeaseStore,
         signalMonitor: SignalMonitor,
-        executor: any ProcessExecuting
+        executor: any ProcessExecuting,
+        checkCancellation: (() throws -> Void)? = nil
     ) throws -> any RunnerBackend {
         if let template {
             try VirtualizationEntitlement.requireCurrentProcess()
@@ -22,7 +23,7 @@ struct RunnerMachineOptions: ParsableArguments {
                 templateURL: URL(fileURLWithPath: template),
                 cloneRootURL: MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).rootURL,
                 executor: executor,
-                checkCancellation: signalMonitor.check,
+                checkCancellation: checkCancellation ?? signalMonitor.check,
                 wait: signalMonitor.wait
             )
         }
@@ -31,7 +32,7 @@ struct RunnerMachineOptions: ParsableArguments {
             executor: executor,
             dockerReadiness: DockerReadiness(
                 wait: signalMonitor.wait,
-                checkCancellation: signalMonitor.check
+                checkCancellation: checkCancellation ?? signalMonitor.check
             )
         )
     }

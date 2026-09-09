@@ -12,8 +12,14 @@ struct RunnerTestCommand: ParsableCommand {
     @Argument(help: "Repository in owner/name form.")
     var repository: String
 
-    @Option(name: .long, help: "Maximum number of minutes to wait for a job, up to 1440.")
+    @Option(name: .long, help: "Maximum minutes for the listener, or job execution with --routing-label, up to 1440.")
     var timeout = 120
+
+    @Option(name: .long, help: "Run only a job targeting this unique yieldd-request- label.")
+    var routingLabel: String? = nil
+
+    @Option(name: .long, help: "Maximum minutes to pick up a reserved job; requires --routing-label.")
+    var pickupTimeout: Int? = nil
 
     @OptionGroup
     var machine: RunnerMachineOptions
@@ -24,6 +30,22 @@ struct RunnerTestCommand: ParsableCommand {
         }
         guard timeout <= Self.maximumTimeoutMinutes else {
             throw ValidationError("--timeout must not exceed \(Self.maximumTimeoutMinutes) minutes.")
+        }
+        _ = try assignment()
+    }
+
+    func assignment() throws -> RunnerAssignment? {
+        guard let routingLabel else {
+            guard pickupTimeout == nil else { throw ValidationError("--pickup-timeout requires --routing-label.") }
+            return nil
+        }
+        guard (1...Self.maximumTimeoutMinutes).contains(pickupTimeout ?? 5) else {
+            throw ValidationError("--pickup-timeout must be between 1 and 1440 minutes.")
+        }
+        do {
+            return try RunnerAssignment(routingLabel: routingLabel, pickupTimeout: TimeInterval(pickupTimeout ?? 5) * 60)
+        } catch {
+            throw ValidationError(describeError(error))
         }
     }
 
@@ -36,10 +58,14 @@ struct RunnerTestCommand: ParsableCommand {
 
     private func run(repository: GitHubRepository, leaseStore: RunnerLeaseStore) throws {
         let signalMonitor = try SignalMonitor()
+        let assignment = try assignment()
+        let startupDeadline = assignment.map { _ in RunnerStartupDeadline(checkCancellation: signalMonitor.check) }
+        let check = startupDeadline.map { $0.check } ?? signalMonitor.check
         let locator = ExecutableLocator()
-        let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
+        let executor = ProcessExecutor(checkCancellation: check)
         let backend = try machine.makeBackend(
-            leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor
+            leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor,
+            checkCancellation: check
         )
         let github = GitHubRunnerClient(
             ghURL: try locator.locate("gh"),
@@ -51,6 +77,8 @@ struct RunnerTestCommand: ParsableCommand {
                 print("Runner \(id.value) is waiting for available host memory.")
             case .waitingForGitHubCleanup, .leaseCleanupFailed:
                 reportRunnerRecoveryState(state)
+            case .listenerStarted, .jobStarted, .listenerExited, .capacityReleased, .cleanupCompleted:
+                reportRunnerServiceState(state, platform: backend.platform, output: .terminal)
             case .preparing, .waitingForJob, .cleaningUp:
                 break
             }
@@ -60,10 +88,12 @@ struct RunnerTestCommand: ParsableCommand {
             github: github,
             memoryAdmission: RunnerMemoryAdmission(),
             jobTimeout: TimeInterval(timeout) * 60,
-            checkCancellation: signalMonitor.check,
+            checkCancellation: check,
             recoveryWait: signalMonitor.wait,
             stateChanged: stateChanged,
-            leaseStore: leaseStore
+            leaseStore: leaseStore,
+            assignment: assignment,
+            startupDeadline: startupDeadline
         )
 
         let recovery = RunnerRecovery(
@@ -80,7 +110,7 @@ struct RunnerTestCommand: ParsableCommand {
 
         let id = backend.platform.makeTestRunnerID()
         print("Starting ephemeral runner \(id.value) for \(repository.fullName).")
-        print("Waiting for one job labeled '\(backend.platform.runnerLabel)'.")
+        print("Waiting for one job labeled '\(routingLabel ?? backend.platform.runnerLabel)'.")
 
         try session.run(id: id, repository: repository)
         print("Runner job completed and cleanup passed.")
