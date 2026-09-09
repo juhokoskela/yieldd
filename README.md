@@ -20,6 +20,8 @@ container system start
 
 `yieldd doctor` never starts or changes the container system.
 
+For macOS-only checks, use the signed application with `doctor --template /absolute/path/VM.bundle`. This checks virtualization support, signing entitlement, template files and location, memory capacity, and GitHub authentication without requiring Apple Container. It does not boot a guest; use `machine-test` for SSH, GUI, and simulator validation.
+
 Authenticate the GitHub CLI if needed:
 
 ```sh
@@ -101,6 +103,10 @@ macOS runners have the `yieldd-macos` label and no default labels. Their names s
 
 Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched.
 
+## Standalone recovery
+
+Run `yieldd recover` to clean up abandoned registrations and disposable macOS clones without starting new runner machines or uninstalling an agent. Stop any active yieldd service first: recovery takes the same exclusive ownership lock as runner commands. It needs no template or slot configuration. With no leases, it sweeps unleased clones without requiring `gh` or `container`; otherwise `gh` is required, and Linux leases also need a working Container system. A Linux failure does not prevent independent macOS cleanup. Failed cleanup records remain for a later retry.
+
 ## Foreground runner service
 
 To keep serving jobs until the process is stopped, run:
@@ -160,6 +166,8 @@ Check the registration, configured slots, and active runner leases with:
 ```sh
 ~/Applications/yieldd.app/Contents/MacOS/yieldd agent status
 ```
+
+The status command reads persisted configuration and cleanup leases. It does not query live guest health, determine whether a job is running, or establish available capacity.
 
 If macOS reports that approval is required, enable `yieldd` under System Settings > General > Login Items & Extensions. Agent logs are available through unified logging:
 

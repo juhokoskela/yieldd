@@ -141,6 +141,7 @@ func agentStatusReportsLeasesBeforeReturningInvalidConfiguration() throws {
 
     #expect(lines.first == "macOS could not resolve the local agent registration.")
     #expect(lines.contains("Active runner leases:"))
+    #expect(lines.contains("Lease records are persisted cleanup obligations, not live runner health or job status."))
     #expect(lines.contains("- \(id.value) (owner/repository)"))
 }
 
