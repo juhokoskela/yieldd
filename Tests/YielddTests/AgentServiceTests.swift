@@ -205,21 +205,23 @@ func agentUninstallTreatsConfirmedMissingServiceAsAlreadyStopped() async throws 
     #expect(recovered)
 }
 
-@Test
-func agentStatusReportsMacOSSlotsAndTemplate() throws {
+@Test(arguments: [false, true])
+func agentStatusReportsMacOSSlotsAndTemplate(mixed: Bool) throws {
     let fixture = try AgentServiceFixture(status: .enabled)
     defer { fixture.remove() }
     let configuration = try AgentConfiguration(
-        repositories: [], macOSRepositories: [GitHubRepository("owner/mac"), GitHubRepository("owner/mac")],
+        repositories: mixed ? [GitHubRepository("owner/linux")] : [],
+        macOSRepositories: [GitHubRepository("owner/mac"), GitHubRepository("owner/mac")],
         macOSTemplateURL: fixture.directory.appendingPathComponent("Template.bundle"),
-        containerURL: nil, ghURL: fixture.configuration.ghURL
+        containerURL: mixed ? fixture.configuration.containerURL : nil, ghURL: fixture.configuration.ghURL
     )
     try fixture.store.save(configuration)
     var lines: [String] = []
     try reportAgentStatus(store: fixture.store, service: fixture.service, output: { lines.append($0) })
-    #expect(lines.contains("macOS repositories: owner/mac, owner/mac"))
+    #expect(lines.filter { $0 == "- owner/mac (macOS)" }.count == 2)
+    #expect(lines.contains("- owner/linux (linux)") == mixed)
     #expect(lines.contains("macOS template: \(try #require(configuration.runners.macOSTemplateURL).path)"))
-    #expect(!lines.contains { $0.hasPrefix("container:") })
+    #expect(lines.contains { $0.hasPrefix("container:") } == mixed)
 }
 
 @Test
@@ -242,30 +244,85 @@ func agentInstallRejectsChangedMacOSTemplateWhileEnabled() throws {
     #expect(fixture.registerCalls == 0)
 }
 
-@Test(arguments: [RunnerPlatform.linux, .macOS], [nil, RunnerPlatform.linux, .macOS])
-func agentStartsContainerOnlyForLinuxSlotsOrLeases(platform: RunnerPlatform, leasePlatform: RunnerPlatform?) throws {
+@Test(arguments: [false, true])
+func agentUninstallRecoversMacOSLeasesWithoutContainer(mixed: Bool) async throws {
     let fixture = try AgentServiceFixture(status: .enabled)
     defer { fixture.remove() }
     let repository = try GitHubRepository("owner/repo")
     let configuration = try AgentConfiguration(
-        repositories: platform == .linux ? [repository] : [],
-        macOSRepositories: platform == .macOS ? [repository] : [],
-        macOSTemplateURL: platform == .macOS ? fixture.directory.appendingPathComponent("Missing.bundle") : nil,
-        containerURL: fixture.configuration.containerURL, ghURL: fixture.configuration.ghURL
+        repositories: mixed ? [repository] : [], macOSRepositories: [repository],
+        macOSTemplateURL: fixture.directory.appendingPathComponent("Missing.bundle"),
+        containerURL: URL(fileURLWithPath: "/missing/container"), ghURL: fixture.configuration.ghURL
     )
     let leases = try RunnerLeaseStore(directory: fixture.directory)
-    if let leasePlatform {
-        try leases.save(RunnerLease(runnerID: RunnerID(value: "yieldd-abandoned"), repository: repository, platform: leasePlatform))
+    let id = RunnerID(value: "yieldd-abandoned")
+    try leases.save(RunnerLease(runnerID: id, repository: repository, platform: .macOS))
+    let clone = try MacOSRunnerCloneStore(stateDirectory: fixture.directory).bundleURL(for: id)
+    try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
+    try fixture.store.save(configuration)
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-abandoned","busy":false}]}]"#)),
+        .success(processResult()),
+    ])
+    try await uninstallAgent(store: fixture.store, service: fixture.service, recover: {
+        try recoverAgentRunners(store: fixture.store, stop: RunnerPoolStop(), executor: executor)
+    })
+    #expect(try leases.load().isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: clone.path))
+    #expect(executor.requests.count == 2)
+    #expect(executor.requests.allSatisfy { $0.executableURL == configuration.ghURL })
+    #expect(executor.requests.last?.arguments.contains("DELETE") == true)
+    #expect(!FileManager.default.fileExists(atPath: fixture.store.fileURL.path))
+}
+
+@Test(arguments: [false, true])
+func agentRecoveryKeepsLinuxFailuresIndependentOfMacOSCleanup(missingContainerPath: Bool) throws {
+    let fixture = try AgentServiceFixture(status: .notRegistered)
+    defer { fixture.remove() }
+    let repository = try GitHubRepository("owner/repo")
+    let configuration = try AgentConfiguration(
+        repositories: [], macOSRepositories: [repository],
+        macOSTemplateURL: fixture.directory.appendingPathComponent("Missing.bundle"),
+        containerURL: missingContainerPath ? nil : URL(fileURLWithPath: "/usr/bin/true"),
+        ghURL: fixture.configuration.ghURL
+    )
+    try fixture.store.save(configuration)
+    let leases = try RunnerLeaseStore(directory: fixture.directory)
+    let linuxIDs = [RunnerID(value: "yieldd-a-linux"), RunnerID(value: "yieldd-b-linux")]
+    for id in linuxIDs { try leases.save(RunnerLease(runnerID: id, repository: repository)) }
+    let macID = RunnerID(value: "yieldd-z-macos")
+    try leases.save(RunnerLease(runnerID: macID, repository: repository, platform: .macOS))
+    let clone = try MacOSRunnerCloneStore(stateDirectory: fixture.directory).bundleURL(for: macID)
+    try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
+    let outcomes: [Result<ProcessResult, any Error>] = (missingContainerPath ? [] : [.failure(TestFailure.create)]) + [
+        .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-z-macos","busy":false}]}]"#)),
+        .success(processResult()),
+    ]
+    let executor = RecordingProcessExecutor(outcomes: outcomes)
+    let error = try #require(#expect(throws: RunnerSessionError.self) {
+        try recoverAgentRunners(store: fixture.store, stop: RunnerPoolStop(), executor: executor)
+    })
+    guard case let .cleanupFailed(failures) = error else {
+        Issue.record("Expected independent Linux cleanup failures")
+        return
     }
-    let needsContainer = platform == .linux || leasePlatform == .linux
-    let executor = RecordingProcessExecutor(outcomes: needsContainer ? [.success(processResult())] : [])
-    try startAgentContainerIfNeeded(configuration: configuration, leaseStore: leases, executor: executor)
-    #expect(executor.requests.count == (needsContainer ? 1 : 0))
-    if needsContainer {
-        let request = try #require(executor.requests.first)
-        #expect(request.executableURL == configuration.containerURL)
-        #expect(request.arguments == ["system", "start", "--disable-kernel-install", "--timeout", "60"])
+    #expect(failures.count == 2)
+    for failure in failures {
+        guard case let RunnerRecoveryError.linuxBackendUnavailable(underlying) = failure.error else {
+            Issue.record("Expected Linux preparation failure")
+            continue
+        }
+        if missingContainerPath {
+            #expect(underlying as? AgentConfigurationError == .containerPathNotRecorded)
+        } else {
+            #expect(underlying as? TestFailure == .create)
+        }
     }
+    #expect(try leases.load().map(\.runnerID) == linuxIDs)
+    #expect(!FileManager.default.fileExists(atPath: clone.path))
+    #expect(executor.requests.filter { $0.executableURL == configuration.containerURL }.count == (missingContainerPath ? 0 : 1))
+    #expect(executor.requests.last?.arguments.contains("DELETE") == true)
+    #expect(try fixture.store.load() == configuration)
 }
 
 private final class AgentServiceFixture {

@@ -72,22 +72,6 @@ func agentConfigurationEnforcesRepositoryAndExecutableInvariants() throws {
     let containerURL = URL(fileURLWithPath: "/usr/local/bin/container")
     let ghURL = URL(fileURLWithPath: "/opt/homebrew/bin/gh")
 
-    let emptyError = try #require(#expect(throws: ValidationError.self) {
-        try AgentConfiguration(
-            repositories: [],
-            containerURL: containerURL,
-            ghURL: ghURL
-        )
-    })
-    #expect(emptyError.message == "At least one runner repository is required.")
-    let countError = try #require(#expect(throws: ValidationError.self) {
-        try AgentConfiguration(
-            repositories: Array(repeating: repository, count: RunnerPool.maximumSlots + 1),
-            containerURL: containerURL,
-            ghURL: ghURL
-        )
-    })
-    #expect(countError.message == "Supports at most 16 runner slots.")
     #expect(throws: AgentConfigurationError.missingContainerExecutable) {
         try AgentConfiguration(repositories: [repository], containerURL: nil, ghURL: ghURL)
     }
@@ -141,16 +125,6 @@ func agentInstallCommandRejectsTooManySlots() {
         #expect(String(describing: error).contains(
             "at most \(RunnerPool.maximumSlots) runner slots"
         ))
-    }
-}
-
-@Test
-func agentInstallCommandRejectsInvalidRepository() throws {
-    var command = try AgentInstallCommand.parse(["owner/repository"])
-    command.runners.repositories = ["not-a-repository"]
-
-    #expect(throws: GitHubRepositoryError.invalidFormat("not-a-repository")) {
-        try command.runners.validate()
     }
 }
 
@@ -243,7 +217,7 @@ func agentConfigurationLoadsLegacyLinuxSlots() throws {
     try validStoredConfiguration.write(to: store.fileURL)
     let configuration = try store.load()
     #expect(configuration.runners.slots.map(\.platform) == [.linux])
-    #expect(configuration.macOSRepositories.isEmpty)
+    #expect(configuration.runners.repositories(for: .macOS).isEmpty)
     #expect(configuration.runners.macOSTemplateURL == nil)
     #expect(configuration.containerURL?.path == "/usr/local/bin/container")
 }
@@ -268,23 +242,6 @@ func agentConfigurationRoundTripsMacOSSlots(mixed: Bool) throws {
     #expect(loaded.runners.macOSTemplateURL == fixture.templateURL.resolvingSymlinksInPath())
     #expect(loaded.runners.slots.map(\.platform) == (mixed ? [.linux, .macOS, .macOS] : [.macOS, .macOS]))
     try loaded.requireExecutables()
-}
-
-@Test
-func agentMacOSPreflightOnlyResolvesGitHubCLI() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let command = try AgentInstallCommand.parse([
-        "--macos", "owner/repo", "--macos", "owner/repo",
-        "--macos-template", fixture.templateURL.path, "--preflight-only",
-    ])
-    var tools: [String] = []
-    try command.run(locateExecutable: { name in
-        tools.append(name)
-        return URL(fileURLWithPath: "/usr/bin/true")
-    }, stateDirectory: fixture.rootURL)
-    #expect(tools == ["gh"])
-    #expect(!FileManager.default.fileExists(atPath: fixture.rootURL.appendingPathComponent("agent.json").path))
 }
 
 @Test(arguments: [false, true])
@@ -337,7 +294,7 @@ func agentPreflightValidatesCombinedReservations(hostGiB: Int, mixed: Bool) thro
         #expect(resolvedTools.isEmpty)
     } else {
         try preflight()
-        #expect(resolvedTools == (mixed ? ["container", "gh"] : ["gh"]))
+        #expect(resolvedTools == ["container", "gh"])
     }
     #expect(!FileManager.default.fileExists(atPath: fixture.rootURL.appendingPathComponent("agent.json").path))
 }
@@ -349,6 +306,47 @@ private func macOSStoredConfiguration(
         "repositories": [String](), "macOSRepositories": repositories,
         "macOSTemplate": template, "githubCLIExecutable": "/usr/bin/gh",
     ])
+}
+
+@Test(arguments: [false, true])
+func agentConfigurationRecordsOptionalContainerOutsideLaunchdPath(available: Bool) throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let tools = fixture.rootURL.appendingPathComponent("bin")
+    try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+    for name in available ? ["gh", "container"] : ["gh"] {
+        let url = tools.appendingPathComponent(name)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+    let runners = try RunnerServiceConfiguration(
+        repositories: [], macOSRepositories: [GitHubRepository("owner/repo")], macOSTemplateURL: fixture.templateURL
+    )
+    let configuration = try AgentConfiguration.resolve(runners: runners, locateExecutable: ExecutableLocator(searchPath: tools.path).locate)
+    #expect(configuration.runners == runners)
+    #expect(configuration.containerURL == (available ? tools.appendingPathComponent("container") : nil))
+    let store = try AgentConfigurationStore(directory: fixture.rootURL)
+    try store.save(configuration)
+    let saved = try store.load()
+    #expect(saved == configuration)
+    if available {
+        let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+        let prepare = agentContainerPreparation(configuration: saved, executor: executor)
+        #expect(try prepare() == saved.containerURL)
+        #expect(try prepare() == saved.containerURL)
+        #expect(executor.requests.count == 1)
+        #expect(executor.requests.first?.executableURL == saved.containerURL)
+    }
+}
+
+@Test
+func macOSAgentDoesNotRequireAStaleContainerPath() throws {
+    let configuration = try AgentConfiguration(
+        repositories: [], macOSRepositories: [GitHubRepository("owner/repo")],
+        macOSTemplateURL: URL(fileURLWithPath: "/missing/template"),
+        containerURL: URL(fileURLWithPath: "/missing/container"), ghURL: URL(fileURLWithPath: "/usr/bin/true")
+    )
+    try configuration.requireExecutables()
 }
 
 private let validStoredConfiguration = storedConfiguration()

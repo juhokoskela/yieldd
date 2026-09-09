@@ -22,6 +22,8 @@ func serviceOptionsPreserveMixedAndRepeatedSlots() throws {
 
 @Test(arguments: [
     ([], "At least one runner repository is required."),
+    (["not-a-repository"], "Repository must use the owner/name format accepted by GitHub."),
+    (["--macos", "not-a-repository", "--macos-template", "/tmp/template"], "Repository must use the owner/name format accepted by GitHub."),
     (["--macos", "owner/repo"], "--macos and --macos-template must be supplied together."),
     (["owner/repo", "--macos-template", "/tmp/template"], "--macos and --macos-template must be supplied together."),
     (["--macos", "owner/repo", "--macos-template", ""], "--macos-template must not be empty."),
@@ -53,7 +55,11 @@ func serviceRejectsManagedTemplateBeforeRecovery(symlink: Bool) throws {
     let error = try #require(#expect(throws: MacOSVirtualizationBackendError.self) {
         try runRunnerService(
             configuration: configuration, leaseStore: store, containerURL: nil,
-            ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), output: .terminal
+            ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), output: .terminal,
+            prepareContainer: {
+                Issue.record("Template validation must precede Container startup")
+                throw TestFailure.unexpectedProcessRequest
+            }
         )
     })
     guard case .templateInsideCloneRoot = error else {

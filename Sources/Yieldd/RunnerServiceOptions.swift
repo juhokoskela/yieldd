@@ -39,6 +39,10 @@ struct RunnerServiceConfiguration: Equatable, Sendable {
 
     var requiresLinux: Bool { slots.contains { $0.platform == .linux } }
 
+    func repositories(for platform: RunnerPlatform) -> [GitHubRepository] {
+        slots.filter { $0.platform == platform }.map(\.repository)
+    }
+
     var memoryReservationBytes: UInt64 {
         slots.reduce(0) { $0 + $1.platform.memoryReservationBytes }
     }

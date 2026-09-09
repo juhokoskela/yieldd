@@ -50,7 +50,8 @@ func runRunnerService(
     ghURL: URL,
     stop: RunnerPoolStop,
     output: RunnerServiceOutput,
-    memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
+    memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission(),
+    prepareContainer: (() throws -> URL)? = nil
 ) throws {
     try memoryAdmission.validateCapacity(reserving: configuration.memoryReservationBytes)
     if let templateURL = configuration.macOSTemplateURL {
@@ -60,10 +61,12 @@ func runRunnerService(
         try VirtualizationEntitlement.requireCurrentProcess()
     }
 
+    let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+    let resolveContainer = prepareContainer ?? { try containerURL ?? ExecutableLocator().locate("container") }
     do {
         let recovery = makeRunnerRecovery(
-            leaseStore: leaseStore, containerURL: containerURL, ghURL: ghURL,
-            stop: stop, stateChanged: { reportRunnerRecoveryState($0, output: output) }
+            leaseStore: leaseStore, resolveContainer: resolveContainer, ghURL: ghURL,
+            stop: stop, executor: executor, stateChanged: { reportRunnerRecoveryState($0, output: output) }
         )
         for recoveredID in try recovery.run() {
             output.info("Cleaned up abandoned runner \(recoveredID.value).")
@@ -75,6 +78,7 @@ func runRunnerService(
         return
     }
 
+    let preparedContainerURL = try configuration.requiresLinux ? resolveContainer() : nil
     let slot = configuration.slots.count == 1 ? "slot" : "slots"
     let names = configuration.slots.map { "\($0.repository.fullName) (\($0.platform.rawValue))" }.joined(separator: ", ")
     output.info("Serving \(configuration.slots.count) ephemeral runner \(slot) for \(names).")
@@ -83,7 +87,7 @@ func runRunnerService(
         let repository = slot.repository
         let session = try makeRunnerSession(
             platform: slot.platform, templateURL: configuration.macOSTemplateURL,
-            leaseStore: leaseStore, containerURL: containerURL, ghURL: ghURL,
+            leaseStore: leaseStore, containerURL: preparedContainerURL, ghURL: ghURL,
             stop: stop, memoryAdmission: memoryAdmission,
             stateChanged: { reportRunnerServiceState($0, platform: slot.platform, output: output) }
         )
@@ -162,18 +166,15 @@ func makeRunnerSession(
 
 func makeRunnerRecovery(
     leaseStore: RunnerLeaseStore,
-    containerURL: URL?,
+    resolveContainer: @escaping () throws -> URL,
     ghURL: URL,
     stop: RunnerPoolStop,
+    executor: any ProcessExecuting,
     stateChanged: @escaping (RunnerSessionState) -> Void
 ) -> RunnerRecovery {
-    let executor = ProcessExecutor(
-        checkCancellation: stop.check,
-        maximumExecutionDeadline: stop.executionDeadline
-    )
     return RunnerRecovery(
         linuxBackend: {
-            AppleContainerBackend(containerURL: try containerURL ?? ExecutableLocator().locate("container"), executor: executor)
+            AppleContainerBackend(containerURL: try resolveContainer(), executor: executor)
         },
         github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
         leaseStore: leaseStore,

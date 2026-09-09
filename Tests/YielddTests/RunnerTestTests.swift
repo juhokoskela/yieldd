@@ -505,7 +505,7 @@ func macOSRecoveryDoesNotDependOnLinuxTools(hasLinuxLease: Bool) throws {
         }
         #expect(failures[0].step == .machine)
         #expect((underlying as? TestFailure) == .create)
-        #expect(describeError(error).contains("Restore the container executable"))
+        #expect(describeError(error).contains("Linux lease recovery could not prepare Apple Container"))
     } else {
         #expect(try recovery.run() == [macID])
     }

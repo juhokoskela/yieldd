@@ -52,12 +52,16 @@ func reportAgentStatus(
     var configurationError: (any Error)?
     do {
         let configuration = try store.load()
-        output("Repositories: \(configuration.repositories.map(\.fullName).joined(separator: ", "))")
+        output("Runner slots:")
+        for slot in configuration.runners.slots {
+            output("- \(slot.repository.fullName) (\(slot.platform.rawValue))")
+        }
         if let templateURL = configuration.runners.macOSTemplateURL {
-            output("macOS repositories: \(configuration.macOSRepositories.map(\.fullName).joined(separator: ", "))")
             output("macOS template: \(templateURL.path)")
         }
-        if let containerURL = configuration.containerURL { output("container: \(containerURL.path)") }
+        if let containerURL = configuration.containerURL {
+            output("container: \(containerURL.path)")
+        }
         output("gh: \(configuration.ghURL.path)")
     } catch AgentConfigurationError.missing {
         output("Configuration: not installed")

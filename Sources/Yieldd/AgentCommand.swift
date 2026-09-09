@@ -120,16 +120,10 @@ struct AgentInstallCommand: ParsableCommand {
     ) throws {
         let slots = try runners.serviceConfiguration()
         try memoryAdmission.validateCapacity(reserving: slots.memoryReservationBytes)
-        let configuration = try AgentConfiguration(
-            repositories: slots.slots.filter { $0.platform == .linux }.map(\.repository),
-            macOSRepositories: slots.slots.filter { $0.platform == .macOS }.map(\.repository),
-            macOSTemplateURL: slots.macOSTemplateURL,
-            containerURL: slots.requiresLinux ? locateExecutable("container") : nil,
-            ghURL: locateExecutable("gh")
-        )
-        let directory = try stateDirectory ?? yielddApplicationSupportDirectory()
+        let configuration = try AgentConfiguration.resolve(runners: slots, locateExecutable: locateExecutable)
+        let store = try AgentConfigurationStore(directory: stateDirectory)
         if let templateURL = configuration.runners.macOSTemplateURL {
-            try validateRunnerServiceTemplate(templateURL, stateDirectory: directory)
+            try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory)
         }
         guard !preflightOnly else {
             // Machine-readable result consumed by install-local-agent.sh.
@@ -140,7 +134,7 @@ struct AgentInstallCommand: ParsableCommand {
         let service = try localAgentService()
         try installAgent(
             configuration: configuration,
-            store: AgentConfigurationStore(directory: directory),
+            store: store,
             service: service
         )
         print(registrationStatusDescription(service.status()))
@@ -181,7 +175,8 @@ struct AgentUninstallCommand: AsyncParsableCommand {
             store: store,
             service: service,
             recover: {
-                try recoverAgentRunners(store: store)
+                let stop = try RunnerPoolStop.monitoringSignals()
+                try recoverAgentRunners(store: store, stop: stop, executor: ProcessExecutor(checkCancellation: stop.check))
             }
         )
         print("Local agent unregistered and configuration removed.")
@@ -207,13 +202,7 @@ struct AgentRunCommand: ParsableCommand {
             let configuration = try store.load()
             try configuration.requireExecutables()
             try withRunnerOwnership(in: store.directory) { leaseStore in
-                let memoryAdmission = RunnerMemoryAdmission()
-                try memoryAdmission.validateCapacity(reserving: configuration.runners.memoryReservationBytes)
                 let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
-                if let templateURL = configuration.runners.macOSTemplateURL {
-                    try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory)
-                }
-                try startAgentContainerIfNeeded(configuration: configuration, leaseStore: leaseStore, executor: executor)
                 try runRunnerService(
                     configuration: configuration.runners,
                     leaseStore: leaseStore,
@@ -221,7 +210,7 @@ struct AgentRunCommand: ParsableCommand {
                     ghURL: configuration.ghURL,
                     stop: stop,
                     output: .agentLog,
-                    memoryAdmission: memoryAdmission
+                    prepareContainer: agentContainerPreparation(configuration: configuration, executor: executor)
                 )
             }
         } catch where isCancellation(error) {
@@ -233,7 +222,7 @@ struct AgentRunCommand: ParsableCommand {
     }
 }
 
-private func recoverAgentRunners(store: AgentConfigurationStore) throws {
+func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, executor: any ProcessExecuting) throws {
     try withRunnerOwnership(in: store.directory) { leaseStore in
         if try leaseStore.load().isEmpty {
             try MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).removeUnleased(keeping: [])
@@ -241,16 +230,12 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
         }
 
         let configuration = try store.load()
-        try configuration.requireExecutables()
-        let stop = try RunnerPoolStop.monitoringSignals()
-        try startAgentContainerIfNeeded(
-            configuration: configuration, leaseStore: leaseStore, executor: ProcessExecutor(checkCancellation: stop.check)
-        )
         let recovery = makeRunnerRecovery(
             leaseStore: leaseStore,
-            containerURL: configuration.containerURL,
+            resolveContainer: agentContainerPreparation(configuration: configuration, executor: executor),
             ghURL: configuration.ghURL,
             stop: stop,
+            executor: executor,
             stateChanged: { reportRunnerRecoveryState($0) }
         )
         for id in try recovery.run() {
@@ -259,19 +244,24 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
     }
 }
 
-func startAgentContainerIfNeeded(
-    configuration: AgentConfiguration, leaseStore: RunnerLeaseStore, executor: any ProcessExecuting
-) throws {
-    let hasLinuxLease = try leaseStore.load().contains { $0.platform == .linux }
-    guard configuration.runners.requiresLinux || hasLinuxLease else { return }
-    let containerURL: URL
-    do {
-        containerURL = try configuration.containerURL ?? ExecutableLocator().locate("container")
-    } catch {
-        if isCancellation(error) { throw error }
-        throw RunnerRecoveryError.linuxBackendUnavailable(error)
+func agentContainerPreparation(
+    configuration: AgentConfiguration, executor: any ProcessExecuting
+) -> () throws -> URL {
+    // Startup and recovery call this synchronously, before concurrent runner slots begin.
+    var prepared: Result<URL, any Error>?
+    return {
+        if let prepared { return try prepared.get() }
+        let result = Result {
+            guard let url = configuration.containerURL else { throw AgentConfigurationError.containerPathNotRecorded }
+            guard FileManager.default.isExecutableFile(atPath: url.path) else {
+                throw AgentConfigurationError.executableUnavailable(path: url.path)
+            }
+            try AppleContainerSystem(containerURL: url, executor: executor).start()
+            return url
+        }
+        prepared = result
+        return try result.get()
     }
-    try AppleContainerSystem(containerURL: containerURL, executor: executor).start()
 }
 
 private extension RunnerServiceOutput {

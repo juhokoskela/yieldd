@@ -135,11 +135,17 @@ Scripts/install-local-agent.sh --macos OWNER/REPOSITORY --macos OWNER/REPOSITORY
   --macos-template /absolute/path/VM.bundle
 ```
 
-Add positional repositories to include Linux slots. All slots share the same host-memory budget described above.
+Add positional repositories to include Linux slots.
 
 Before replacing any existing installation at `~/Applications/yieldd.app`, the script builds and verifies an ad-hoc-signed application and validates its configuration and template files. It builds the Linux guest image only when Linux slots are configured. It then waits for the previous agent to stop and recover active runners, installs the new application, and registers a per-user LaunchAgent through `SMAppService`. The ad-hoc signature is intended for local builds only; distributable releases will need Developer ID signing and notarization.
 
-The saved configuration includes each platform's repository slots, the resolved absolute template path, `gh`, and `container` when Linux slots are configured. Existing Linux-only configuration files remain supported. Status reports the macOS slots and template path. At startup, the agent validates the template before recovery, starts Apple Container without interactive kernel installation when Linux slots or abandoned Linux leases require it, recovers abandoned runners, and serves the configured slots. A macOS-only agent does not otherwise need `container`; recovering an old Linux lease still requires restoring it. Uninstall recovery does not require the macOS template to remain available.
+The saved configuration includes each platform's repository slots, the resolved absolute template path, and the absolute paths to `gh` and, when available, `container`. Linux slots require `container` at installation; macOS-only installations record it when found so later Linux lease recovery does not depend on launchd's PATH. Existing Linux-only configuration files remain supported. Status lists each slot's platform and the template path.
+
+At startup, the shared service path validates capacity, template files, and the virtualization entitlement before Container startup or recovery. Recovery prepares Apple Container only for actual Linux leases, without interactive kernel installation. A Linux preparation failure retains those leases but does not prevent independent macOS cleanup. After recovery, configured Linux slots also require Container to start. An unused, stale Container path does not block a macOS-only agent.
+
+A missing or unmounted template deliberately prevents new service startup, including startup recovery. Use `agent uninstall` to disable the agent and recover leases without that template. Uninstall ignores configured slots when deciding whether Container is needed. If an older macOS-only configuration has no saved Container path and Linux leases remain, uninstall disables the agent but retains the failed leases and configuration. Run `agent install` with the same slots and `container` on your shell's PATH to record its absolute path, then retry cleanup.
+
+The installer invokes the previously installed binary's uninstall command. When migrating from an older Linux agent to macOS-only slots, keep `container` at its previously configured path until that uninstall succeeds; fixes in the new binary cannot change the old binary's cleanup behavior.
 
 launchd gives the agent 60 seconds to stop. `yieldd` uses a 50-second shutdown budget for its runner processes and cleanup commands so launchd does not kill it halfway through cleanup. Any lease that cannot be cleared within that budget remains available for recovery on the next launch.
 
