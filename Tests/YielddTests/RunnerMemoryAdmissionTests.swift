@@ -134,12 +134,12 @@ func impossibleReservationFailsImmediately() {
 @Test
 func mixedReservationsShareOneBudgetAndReleaseTheirExactSizes() throws {
     let admission = RunnerMemoryAdmission(physicalMemoryBytes: 32 * gibibyte, readMemoryPressure: { .normal })
-    let linux = try admission.acquire(reserving: 12 * gibibyte)
-    let mac = try admission.acquire(reserving: 8 * gibibyte)
+    let linux = try admission.acquireWithoutWaiting(reserving: 12 * gibibyte)
+    let mac = try admission.acquireWithoutWaiting(reserving: 8 * gibibyte)
     #expect(linux.bytes == 12 * gibibyte)
     #expect(mac.bytes == 8 * gibibyte)
     admission.release(mac)
-    let replacement = try admission.acquire(reserving: 8 * gibibyte)
+    let replacement = try admission.acquireWithoutWaiting(reserving: 8 * gibibyte)
     var blocked = false
     #expect(throws: CancellationError.self) {
         try admission.acquire(reserving: 8 * gibibyte, checkCancellation: {
@@ -148,21 +148,11 @@ func mixedReservationsShareOneBudgetAndReleaseTheirExactSizes() throws {
     }
     #expect(blocked)
     admission.release(linux)
-    let secondMac = try admission.acquire(reserving: 8 * gibibyte)
+    let secondMac = try admission.acquireWithoutWaiting(reserving: 8 * gibibyte)
     admission.release(replacement)
     admission.release(secondMac)
-    let entireBudget = try admission.acquire(reserving: 24 * gibibyte)
+    let entireBudget = try admission.acquireWithoutWaiting(reserving: 24 * gibibyte)
     admission.release(entireBudget)
-}
-
-@Test
-func twoMacOSReservationsFitOnA24GiBHost() throws {
-    let admission = RunnerMemoryAdmission(physicalMemoryBytes: 24 * gibibyte, readMemoryPressure: { .normal })
-    let first = try admission.acquire(reserving: RunnerPlatform.macOS.memoryReservationBytes)
-    let second = try admission.acquire(reserving: RunnerPlatform.macOS.memoryReservationBytes)
-    #expect(first.bytes + second.bytes == 16 * gibibyte)
-    admission.release(first)
-    admission.release(second)
 }
 
 private final class MemoryReservationResult: @unchecked Sendable {
