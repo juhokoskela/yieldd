@@ -1,0 +1,57 @@
+name: Nested runner smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner-name:
+        description: Expected nested runner name. Rejects pickup by an existing yieldd runner.
+        type: string
+        required: true
+      outcome:
+        description: Exercise success, job failure, or cancellation while sleeping.
+        type: choice
+        default: success
+        options: [success, failure, cancellation]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: yieldd
+    timeout-minutes: 5
+    steps:
+      - name: Verify nested job identity and environment
+        shell: bash
+        env:
+          EXPECTED_RUNNER: ${{ inputs.runner-name }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = "$EXPECTED_RUNNER"
+          test "$GITHUB_RUN_ID" = "$EXPECTED_RUN_ID"
+          test "$GITHUB_WORKFLOW" = 'Nested runner smoke test'
+          if printenv 'INPUT_JIT-CONFIG' >/dev/null; then exit 1; fi
+          test -z "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}"
+          case "$HOME" in */yieldd-bootstrap-*/home) ;; *) exit 1 ;; esac
+          printf 'Nested runner: %s\nOriginal workflow run: %s\n' "$RUNNER_NAME" "$GITHUB_RUN_ID"
+          printf 'nested job state\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'YIELDD_NESTED_ENV=isolated\n' >> "$GITHUB_ENV"
+      - name: Check out through the nested job token
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Exercise the requested result
+        shell: bash
+        env:
+          EXPECTED_OUTCOME: ${{ inputs.outcome }}
+        run: |
+          set -euo pipefail
+          test "$YIELDD_NESTED_ENV" = isolated
+          test -f Package.swift
+          case "$EXPECTED_OUTCOME" in
+            success) echo 'Nested workload passed.' ;;
+            failure) echo 'Intentional nested workload failure.' >&2; exit 7 ;;
+            cancellation) echo 'Cancel this workload run now.'; sleep 240 ;;
+            *) exit 2 ;;
+          esac

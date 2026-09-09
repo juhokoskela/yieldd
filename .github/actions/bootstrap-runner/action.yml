@@ -1,0 +1,12 @@
+name: Bootstrap one yieldd runner
+description: Run a single-use nested runner on disposable, trusted fallback compute.
+inputs:
+  jit-config:
+    description: Single-use encoded JIT configuration supplied through a secret.
+    required: true
+  runner-name:
+    description: Expected name in the JIT configuration.
+    required: true
+runs:
+  using: node24
+  main: index.cjs
