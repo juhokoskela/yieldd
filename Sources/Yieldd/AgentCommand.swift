@@ -34,8 +34,7 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
     mutating func validate() throws {
         do {
-            try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
-            try MacOSGuestSSH.validateTemplate(at: templateURL)
+            try MacOSVirtualizationBackend.validateTemplate(at: templateURL)
         } catch {
             throw ValidationError(describeError(error))
         }
@@ -43,9 +42,7 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
     mutating func run() throws {
         try withRunnerOwnership { leaseStore in
-            let signalMonitor = try SignalMonitor(
-                signals: [SIGINT, SIGTERM, SIGHUP]
-            )
+            let signalMonitor = try SignalMonitor()
             let memoryAdmission = RunnerMemoryAdmission()
             let reservation = try memoryAdmission.acquire(
                 reserving: MacOSVirtualMachineLifecycle.memoryBytes,

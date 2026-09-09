@@ -35,7 +35,7 @@ struct RunnerTestCommand: ParsableCommand {
     }
 
     private func run(repository: GitHubRepository, leaseStore: RunnerLeaseStore) throws {
-        let signalMonitor = try SignalMonitor(signals: [SIGINT, SIGTERM, SIGHUP])
+        let signalMonitor = try SignalMonitor()
         let locator = ExecutableLocator()
         let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
         let backend = try machine.makeBackend(

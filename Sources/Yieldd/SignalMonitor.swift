@@ -10,7 +10,7 @@ final class SignalMonitor: @unchecked Sendable {
     private let previousHandlers: [(signal: Int32, handler: sig_t?)]
 
     init(
-        signals: [Int32] = [SIGINT, SIGTERM],
+        signals: [Int32] = [SIGINT, SIGTERM, SIGHUP],
         signalReceived: @escaping @Sendable (Int32) -> Void = { _ in }
     ) throws {
         guard signalMonitorInstallation.acquire() else {

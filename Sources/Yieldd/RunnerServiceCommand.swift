@@ -59,6 +59,7 @@ func runRunnerService(
             templateURL, stateDirectory: leaseStore.directory
         )
         try VirtualizationEntitlement.requireCurrentProcess()
+        try MacOSVirtualMachineLifecycle.requireSupportedHost()
     }
 
     let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
@@ -79,22 +80,34 @@ func runRunnerService(
     }
 
     let preparedContainerURL = try configuration.requiresLinux ? resolveContainer() : nil
-    let slot = configuration.slots.count == 1 ? "slot" : "slots"
-    let names = configuration.slots.map { "\($0.repository.fullName) (\($0.platform.rawValue))" }.joined(separator: ", ")
-    output.info("Serving \(configuration.slots.count) ephemeral runner \(slot) for \(names).")
+    let slots = try configuration.slots.map { slot in
+        let backend: RunnerSlotBackend
+        switch slot.platform {
+        case .linux:
+            guard let containerURL = preparedContainerURL else { throw RunnerServiceConfigurationError.missingContainerExecutable }
+            backend = .linux(containerURL: containerURL)
+        case .macOS:
+            guard let templateURL = configuration.macOSTemplateURL else {
+                throw RunnerServiceConfigurationError.templatePairRequired
+            }
+            backend = .macOS(templateURL: templateURL)
+        }
+        return (repository: slot.repository, backend: backend)
+    }
+    output.info(runnerServiceBanner(configuration))
 
-    try RunnerPool(stop: stop) { slot, stop in
+    try RunnerPool(stop: stop).run(slots: slots) { slot, stop in
         let repository = slot.repository
+        let platform = slot.backend.platform
         let session = try makeRunnerSession(
-            platform: slot.platform, templateURL: configuration.macOSTemplateURL,
-            leaseStore: leaseStore, containerURL: preparedContainerURL, ghURL: ghURL,
+            backend: slot.backend, leaseStore: leaseStore, ghURL: ghURL,
             stop: stop, memoryAdmission: memoryAdmission,
-            stateChanged: { reportRunnerServiceState($0, platform: slot.platform, output: output) }
+            stateChanged: { reportRunnerServiceState($0, platform: platform, output: output) }
         )
         try RunnerService(
             session: session,
             makeRunnerID: {
-                RunnerID(value: "\(slot.platform.runnerLabel)-\(UUID().uuidString.lowercased())")
+                platform.makeServiceRunnerID()
             },
             checkForStop: stop.check,
             waitUntilStopped: stop.wait,
@@ -113,14 +126,30 @@ func runRunnerService(
                 }
             }
         ).run(repository: repository)
-    }.run(slots: configuration.slots)
+    }
+}
+
+func runnerServiceBanner(_ configuration: RunnerServiceConfiguration) -> String {
+    let slotNoun = configuration.slots.count == 1 ? "slot" : "slots"
+    let names = configuration.slots.map { "\($0.repository.fullName) (\($0.platform.rawValue.lowercased()))" }.joined(separator: ", ")
+    return "Serving \(configuration.slots.count) ephemeral runner \(slotNoun) for \(names)."
+}
+
+enum RunnerSlotBackend: Sendable {
+    case linux(containerURL: URL)
+    case macOS(templateURL: URL)
+
+    var platform: RunnerPlatform {
+        switch self {
+        case .linux: .linux
+        case .macOS: .macOS
+        }
+    }
 }
 
 func makeRunnerSession(
-    platform: RunnerPlatform,
-    templateURL: URL?,
+    backend slotBackend: RunnerSlotBackend,
     leaseStore: RunnerLeaseStore,
-    containerURL: URL?,
     ghURL: URL,
     stop: RunnerPoolStop,
     memoryAdmission: RunnerMemoryAdmission,
@@ -131,20 +160,19 @@ func makeRunnerSession(
         maximumExecutionDeadline: stop.executionDeadline
     )
     let backend: any RunnerBackend
-    switch platform {
-    case .linux:
+    switch slotBackend {
+    case let .linux(containerURL):
         backend = AppleContainerBackend(
-            containerURL: try containerURL ?? ExecutableLocator().locate("container"),
+            containerURL: containerURL,
             executor: executor,
             dockerReadiness: DockerReadiness(
                 wait: stop.wait,
                 checkCancellation: stop.check
             )
         )
-    case .macOS:
-        // RunnerServiceConfiguration requires a template whenever a macOS slot exists.
+    case let .macOS(templateURL):
         backend = try MacOSVirtualizationBackend(
-            templateURL: templateURL!,
+            templateURL: templateURL,
             cloneRootURL: MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).rootURL,
             executor: executor, checkCancellation: stop.check, wait: stop.wait,
             maximumExecutionDeadline: stop.executionDeadline
@@ -189,8 +217,7 @@ func validateRunnerServiceTemplate(_ templateURL: URL, stateDirectory: URL) thro
         templateURL,
         cloneRootURL: MacOSRunnerCloneStore(stateDirectory: stateDirectory).rootURL
     )
-    try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
-    try MacOSGuestSSH.validateTemplate(at: templateURL)
+    try MacOSVirtualizationBackend.validateTemplate(at: templateURL)
 }
 
 func reportRunnerServiceState(_ state: RunnerSessionState, platform: RunnerPlatform, output: RunnerServiceOutput) {

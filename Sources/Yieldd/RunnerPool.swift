@@ -5,17 +5,15 @@ struct RunnerPool: Sendable {
     static let maximumSlots = 16
 
     private let stop: RunnerPoolStop
-    private let runSlot: @Sendable (RunnerSlot, RunnerPoolStop) throws -> Void
 
-    init(
-        stop: RunnerPoolStop,
-        runSlot: @escaping @Sendable (RunnerSlot, RunnerPoolStop) throws -> Void
-    ) {
+    init(stop: RunnerPoolStop) {
         self.stop = stop
-        self.runSlot = runSlot
     }
 
-    func run(slots: [RunnerSlot]) throws {
+    func run<Slot: Sendable>(
+        slots: [Slot],
+        runSlot: @escaping @Sendable (Slot, RunnerPoolStop) throws -> Void
+    ) throws {
         precondition(!slots.isEmpty)
 
         let group = DispatchGroup()
@@ -60,7 +58,7 @@ final class RunnerPoolStop: @unchecked Sendable {
         shutdownTimeout: TimeInterval? = nil
     ) throws -> RunnerPoolStop {
         let stop = RunnerPoolStop(shutdownTimeout: shutdownTimeout)
-        stop.signalMonitor = try SignalMonitor(signals: [SIGINT, SIGTERM, SIGHUP], signalReceived: { [weak stop] _ in
+        stop.signalMonitor = try SignalMonitor(signalReceived: { [weak stop] _ in
             stop?.request()
         })
         return stop

@@ -26,10 +26,12 @@ func serviceOptionsPreserveMixedAndRepeatedSlots() throws {
     (["--macos", "not-a-repository", "--macos-template", "/tmp/template"], "Repository must use the owner/name format accepted by GitHub."),
     (["--macos", "owner/repo"], "--macos and --macos-template must be supplied together."),
     (["owner/repo", "--macos-template", "/tmp/template"], "--macos and --macos-template must be supplied together."),
-    (["--macos", "owner/repo", "--macos-template", ""], "--macos-template must not be empty."),
+    (["--macos", "owner/repo", "--macos-template", ""], "--macos-template must be an absolute path."),
+    (["--macos", "owner/repo", "--macos-template", "/tmp/a", "--macos-template", "/tmp/b"], "Supply --macos-template only once."),
+    (["--macos", "owner/repo", "--macos-template", "/tmp/a", "--macos-template", "/tmp/a"], "Supply --macos-template only once."),
     (["--macos", "owner/repo", "--macos-template", "relative.bundle"], "--macos-template must be an absolute path."),
     (["--macos", "owner/repo", "--macos-template", "./relative.bundle"], "--macos-template must be an absolute path."),
-    (["--macos", "owner/repo", "--macos", "owner/repo", "--macos", "owner/repo", "--macos-template", "/tmp/template"], "Supports at most 2 macOS runner slots."),
+    (["--macos", "owner/repo", "--macos", "owner/repo", "--macos", "owner/repo", "--macos-template", "/tmp/template"], "The runner service supports at most 2 macOS runner slots."),
 ])
 func serviceOptionsRejectInvalidSlotConfigurations(arguments: [String], message: String) throws {
     let error = try #require(#expect(throws: (any Error).self) { try RunnerServiceCommand.parse(arguments) })
@@ -74,9 +76,8 @@ func serviceSessionSelectsBackendAndJobLabel(platform: RunnerPlatform) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let session = try makeRunnerSession(
-        platform: platform, templateURL: platform == .macOS ? fixture.templateURL : nil,
+        backend: platform == .macOS ? .macOS(templateURL: fixture.templateURL) : .linux(containerURL: URL(fileURLWithPath: "/missing/container")),
         leaseStore: RunnerLeaseStore(directory: fixture.rootURL),
-        containerURL: platform == .linux ? URL(fileURLWithPath: "/missing/container") : nil,
         ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(),
         memoryAdmission: RunnerMemoryAdmission(), stateChanged: { _ in }
     )
@@ -118,6 +119,7 @@ func serviceRejectsOversubscribedMixedSlotsBeforeRecovery() throws {
 }
 
 @Test(arguments: [
+    (8, 1, 0, false),
     (24, 0, 2, true),
     (24, 1, 1, false),
     (24, 2, 0, false),
@@ -145,6 +147,81 @@ func serviceCapacityCoversEveryConfiguredSlot(hostGiB: Int, linux: Int, macOS: I
             try admission.validateCapacity(reserving: configuration.memoryReservationBytes)
         }
     }
+}
+
+@Test(arguments: ["https://example.com/template.bundle", "file:relative.bundle"])
+func serviceConfigurationRejectsNonAbsoluteFileURLs(value: String) throws {
+    let url = try #require(URL(string: value))
+    #expect(throws: RunnerServiceConfigurationError.invalidTemplateURL) {
+        try RunnerServiceConfiguration(
+            repositories: [], macOSRepositories: [GitHubRepository("owner/repo")], macOSTemplateURL: url
+        )
+    }
+}
+
+@Test
+func serviceRejectsMissingEntitlementBeforeRecovery() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let leases = try RunnerLeaseStore(directory: fixture.rootURL)
+    let lease = RunnerLease(runnerID: RunnerID(value: "yieldd-abandoned"), repository: try GitHubRepository("owner/repo"))
+    try leases.save(lease)
+    let orphan = try MacOSRunnerCloneStore(stateDirectory: fixture.rootURL).bundleURL(for: RunnerID(value: "yieldd-orphan"))
+    try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+    let messages = ServiceMessages()
+    let error = try #require(#expect(throws: MacOSVirtualizationProbeError.self) {
+        try runRunnerService(
+            configuration: RunnerServiceConfiguration(repositories: [], macOSRepositories: [lease.repository], macOSTemplateURL: fixture.templateURL),
+            leaseStore: leases, containerURL: nil, ghURL: URL(fileURLWithPath: "/missing/gh"),
+            stop: RunnerPoolStop(),
+            output: RunnerServiceOutput(info: messages.append, warning: messages.append, error: messages.append),
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024)
+        )
+    })
+    guard case .missingEntitlement = error else {
+        Issue.record("Expected missing virtualization entitlement, got \(error)")
+        return
+    }
+    #expect(try leases.load() == [lease])
+    #expect(FileManager.default.fileExists(atPath: orphan.path))
+    #expect(messages.values.isEmpty)
+}
+
+@Test
+func serviceRecoveryReportsMissingContainerAndRetainsLinuxLease() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let leases = try RunnerLeaseStore(directory: fixture.rootURL)
+    let lease = RunnerLease(runnerID: RunnerID(value: "yieldd-abandoned"), repository: try GitHubRepository("owner/repo"))
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let recovery = makeRunnerRecovery(
+        leaseStore: leases, resolveContainer: { try ExecutableLocator(searchPath: fixture.rootURL.path).locate("container") },
+        ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), executor: executor, stateChanged: { _ in }
+    )
+    #expect(try recovery.run().isEmpty)
+    try leases.save(lease)
+    let error = try #require(#expect(throws: RunnerSessionError.self) { try recovery.run() })
+    #expect(describeError(error).contains("Linux lease recovery could not prepare Apple Container"))
+    #expect(describeError(error).contains("Could not find executable container"))
+    #expect(try leases.load() == [lease])
+    #expect(executor.requests.isEmpty)
+}
+
+@Test(arguments: [RunnerPlatform.linux, .macOS])
+func serviceRunnerNamesMatchTheirPlatform(platform: RunnerPlatform) {
+    let id = platform.makeServiceRunnerID()
+    #expect(id.value.hasPrefix("\(platform.runnerLabel)-"))
+    #expect(id.value.count <= 64)
+    #expect(id.isValid)
+}
+
+@Test
+func serviceBannerNamesBothPlatforms() throws {
+    let configuration = try RunnerServiceConfiguration(
+        repositories: [GitHubRepository("owner/linux")], macOSRepositories: [GitHubRepository("owner/mac")],
+        macOSTemplateURL: URL(fileURLWithPath: "/tmp/template.bundle")
+    )
+    #expect(runnerServiceBanner(configuration) == "Serving 2 ephemeral runner slots for owner/linux (linux), owner/mac (macos).")
 }
 
 private final class ServiceMessages: @unchecked Sendable {

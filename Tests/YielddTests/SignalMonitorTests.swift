@@ -16,7 +16,6 @@ func signalMonitorHandlesTimeoutFailedInstallAndCaughtSignal() throws {
 
     let delivery = RecordedSignal()
     let monitor = try SignalMonitor(
-        signals: [SIGHUP],
         signalReceived: delivery.record
     )
     try monitor.wait(for: 0)
