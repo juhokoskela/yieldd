@@ -68,6 +68,29 @@ func localAgentInstallerPreflightsBeforeReplacingAndBuildsOnlyForLinux(result: S
     #expect(remaining == ["yieldd.app"])
 }
 
+@Test(arguments: [false, true])
+func agentPreflightBinaryEmitsInstallerProtocolToken(linux: Bool) throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let bin = fixture.rootURL.appendingPathComponent("bin")
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+    for name in linux ? ["gh", "container"] : ["gh"] {
+        let executable = bin.appendingPathComponent(name)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+    }
+    let arguments = linux ? ["owner/repo"] : ["--macos", "owner/repo", "--macos-template", fixture.templateURL.path]
+    let request = ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+        arguments: ["PATH=\(bin.path)", repositoryRoot.appendingPathComponent(".build/debug/yieldd").path,
+                    "agent", "install", "--preflight-only"] + arguments,
+        timeout: 15
+    )
+    let result = try ProcessExecutor().execute(request).requireSuccess(for: request)
+    #expect(result.stdoutText == (linux ? "linux\n" : "macos\n"))
+    #expect(result.stderr.isEmpty)
+}
+
 private struct InstallerFixture {
     let rootURL = FileManager.default.temporaryDirectory.appendingPathComponent("yieldd-installer-\(UUID().uuidString)")
     var logURL: URL { rootURL.appendingPathComponent("events") }

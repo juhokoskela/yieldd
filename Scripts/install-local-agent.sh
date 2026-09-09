@@ -61,16 +61,16 @@ codesign --verify --strict "$staged_application"
 guest_platform=$("$staged_application/Contents/MacOS/yieldd" agent install \
     --preflight-only "$@")
 case "$guest_platform" in
-    linux)
-        stop_builder=true
-        remove_staged_image=true
-        container build -t "$staged_image" "$repository_directory/Guest"
-        container builder stop
-        stop_builder=false
-        ;;
-    macos) ;;
+    linux|macos) ;;
     *) echo "Unexpected agent preflight result: $guest_platform" >&2; exit 1 ;;
 esac
+if [ "$guest_platform" = linux ]; then
+    stop_builder=true
+    remove_staged_image=true
+    container build -t "$staged_image" "$repository_directory/Guest"
+    container builder stop
+    stop_builder=false
+fi
 
 if [ -e "$installed_application" ]; then
     installed_executable="$installed_application/Contents/MacOS/yieldd"
