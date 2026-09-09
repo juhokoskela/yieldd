@@ -12,7 +12,7 @@ struct MachineTestCommand: ParsableCommand {
 
     mutating func run() throws {
         try withRunnerOwnership { leaseStore in
-            let signalMonitor = try SignalMonitor(signals: [SIGINT, SIGTERM, SIGHUP])
+            let signalMonitor = try SignalMonitor()
             let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
             let backend = try machine.makeBackend(
                 leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor
@@ -42,7 +42,7 @@ struct MachineTestCommand: ParsableCommand {
 
             try MachineTestRunner(
                 backend: backend,
-                memoryAdmission: RunnerMemoryAdmission(reservationBytes: backend.platform.memoryReservationBytes),
+                memoryAdmission: RunnerMemoryAdmission(),
                 checkCancellation: signalMonitor.check,
                 waitingForMemory: {
                     print("Machine test is waiting for available host memory.")
@@ -75,6 +75,7 @@ struct MachineTestRunner {
 
     func run(id: RunnerID) throws {
         let reservation = try memoryAdmission.acquire(
+            reserving: backend.platform.memoryReservationBytes,
             checkCancellation: checkCancellation,
             onBlocked: waitingForMemory
         )

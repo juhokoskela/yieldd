@@ -7,8 +7,7 @@ private let machineTestID = RunnerID(value: "yieldd-test-machine")
 
 private func machineTestMemoryAdmission() -> RunnerMemoryAdmission {
     RunnerMemoryAdmission(
-        physicalMemoryBytes: 4,
-        reservationBytes: 1,
+        physicalMemoryBytes: 4 * AppleContainerBackend.memoryBytes,
         readMemoryPressure: { .normal }
     )
 }

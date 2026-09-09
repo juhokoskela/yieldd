@@ -34,8 +34,7 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
     mutating func validate() throws {
         do {
-            try MacOSVirtualizationProbeClone.validateTemplate(at: templateURL)
-            try MacOSGuestSSH.validateTemplate(at: templateURL)
+            try MacOSVirtualizationBackend.validateTemplate(at: templateURL)
         } catch {
             throw ValidationError(describeError(error))
         }
@@ -43,13 +42,10 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
     mutating func run() throws {
         try withRunnerOwnership { leaseStore in
-            let signalMonitor = try SignalMonitor(
-                signals: [SIGINT, SIGTERM, SIGHUP]
-            )
-            let memoryAdmission = RunnerMemoryAdmission(
-                reservationBytes: MacOSVirtualMachineLifecycle.memoryBytes
-            )
+            let signalMonitor = try SignalMonitor()
+            let memoryAdmission = RunnerMemoryAdmission()
             let reservation = try memoryAdmission.acquire(
+                reserving: MacOSVirtualMachineLifecycle.memoryBytes,
                 checkCancellation: signalMonitor.check,
                 onBlocked: {
                     print("Virtualization probe is waiting for available host memory.")
@@ -209,7 +205,7 @@ struct AgentRunCommand: ParsableCommand {
                     )
                 ).start()
                 try runRunnerService(
-                    repositories: configuration.repositories,
+                    configuration: RunnerServiceConfiguration(repositories: configuration.repositories),
                     leaseStore: leaseStore,
                     containerURL: configuration.containerURL,
                     ghURL: configuration.ghURL,
@@ -238,9 +234,10 @@ private func recoverAgentRunners(store: AgentConfigurationStore) throws {
         let stop = try RunnerPoolStop.monitoringSignals()
         let recovery = makeRunnerRecovery(
             leaseStore: leaseStore,
-            containerURL: configuration.containerURL,
+            resolveContainer: { configuration.containerURL },
             ghURL: configuration.ghURL,
             stop: stop,
+            executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline),
             stateChanged: { reportRunnerRecoveryState($0) }
         )
         for id in try recovery.run() {

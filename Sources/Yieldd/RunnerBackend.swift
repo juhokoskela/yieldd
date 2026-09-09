@@ -34,6 +34,10 @@ enum RunnerPlatform: String, Codable, Sendable {
         }
     }
 
+    func makeServiceRunnerID() -> RunnerID {
+        RunnerID(value: "\(runnerLabel)-\(UUID().uuidString.lowercased())")
+    }
+
     func makeTestRunnerID() -> RunnerID {
         RunnerID(value: "\(runnerLabel)-test-\(UUID().uuidString.lowercased())")
     }

@@ -6,14 +6,13 @@ import Testing
 
 private let runnerTestID = RunnerID(value: "yieldd-test-runner")
 private let runnerTestRepository = try! GitHubRepository("owner/repository")
-private let runnerTestMemoryBytes: UInt64 = 1_024
+private let runnerTestMemoryBytes = AppleContainerBackend.memoryBytes
 
 private func runnerTestMemoryAdmission(
     pressure: HostMemoryPressure = .normal
 ) -> RunnerMemoryAdmission {
     RunnerMemoryAdmission(
-        physicalMemoryBytes: 4_096,
-        reservationBytes: runnerTestMemoryBytes,
+        physicalMemoryBytes: 4 * runnerTestMemoryBytes,
         readMemoryPressure: { pressure }
     )
 }
@@ -21,7 +20,6 @@ private func runnerTestMemoryAdmission(
 private func singleRunnerMemoryAdmission() -> RunnerMemoryAdmission {
     RunnerMemoryAdmission(
         physicalMemoryBytes: runnerTestMemoryBytes * 4 / 3 + 1,
-        reservationBytes: runnerTestMemoryBytes,
         readMemoryPressure: { .normal }
     )
 }
@@ -90,7 +88,7 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
     ])
     #expect(!events.values.description.contains("registration-token"))
     #expect(try leaseStore.load().isEmpty)
-    let nextReservation = try memoryAdmission.acquire()
+    let nextReservation = try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes)
     memoryAdmission.release(nextReservation)
 }
 
@@ -670,7 +668,6 @@ func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
     var waitedForCapacity = false
     let memoryAdmission = RunnerMemoryAdmission(
         physicalMemoryBytes: runnerTestMemoryBytes * 4 / 3 + 1,
-        reservationBytes: runnerTestMemoryBytes,
         readMemoryPressure: { .normal }
     )
     let session = EphemeralRunnerSession(
@@ -693,7 +690,7 @@ func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
         repository: runnerTestRepository
     )])
     #expect(throws: CancellationError.self) {
-        try memoryAdmission.acquire(checkCancellation: {
+        try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes, checkCancellation: {
             if waitedForCapacity {
                 throw CancellationError()
             }
@@ -992,8 +989,7 @@ func cancellationWhileWaitingForMemorySkipsMachineCleanupAndLeasePersistence() t
     var blocked = false
     var states: [RunnerSessionState] = []
     let memoryAdmission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 4,
-        reservationBytes: 3,
+        physicalMemoryBytes: 4 * runnerTestMemoryBytes,
         readMemoryPressure: { .critical }
     )
 
@@ -1032,12 +1028,11 @@ func insufficientHostMemoryFailsBeforeProvisioning() throws {
     let events = RunnerTestEventRecorder()
     let memoryAdmission = RunnerMemoryAdmission(
         physicalMemoryBytes: 2,
-        reservationBytes: 3,
         readMemoryPressure: { .normal }
     )
 
     #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
-        requiredBytes: 3,
+        requiredBytes: runnerTestMemoryBytes,
         budgetBytes: 2
     )) {
         try EphemeralRunnerSession(
@@ -1056,8 +1051,7 @@ func insufficientHostMemoryFailsBeforeProvisioning() throws {
 func memoryAdmissionPrecedesRegistrationTokenCreation() {
     let events = RunnerTestEventRecorder()
     let memoryAdmission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 4,
-        reservationBytes: 3,
+        physicalMemoryBytes: 4 * runnerTestMemoryBytes,
         readMemoryPressure: {
             events.values.append(.memoryAdmission)
             return .normal
@@ -1155,6 +1149,7 @@ func leaseSynchronizationFailureClearsPublishedLeaseBeforeReturning(platform: Ru
     #expect(try readStore.load().isEmpty)
     var blocked = false
     let reservation = try memoryAdmission.acquire(
+        reserving: platform.memoryReservationBytes,
         checkCancellation: { if blocked { throw CancellationError() } },
         onBlocked: { blocked = true }
     )
@@ -1206,7 +1201,7 @@ func backendProvisioningFailureReleasesMemoryAfterDestroyingMachine() throws {
         .create(runnerTestID, .full),
         .destroy(runnerTestID),
     ])
-    memoryAdmission.release(try memoryAdmission.acquire())
+    memoryAdmission.release(try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes))
 }
 
 @Test
@@ -1281,7 +1276,7 @@ func registrationTokenFailureReleasesReservedMachineCapacity() throws {
     #expect(events.values == [
         .createRegistrationToken(runnerTestRepository),
     ])
-    let nextReservation = try memoryAdmission.acquire()
+    let nextReservation = try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes)
     memoryAdmission.release(nextReservation)
 }
 

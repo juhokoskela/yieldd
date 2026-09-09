@@ -176,8 +176,8 @@ func macOSBackendRunsThroughTheExistingSession() throws {
         makeMachine: { _, _ in machine }
     )
     let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024,
-        reservationBytes: MacOSVirtualMachineLifecycle.memoryBytes, readMemoryPressure: { .normal }
+        physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024,
+        readMemoryPressure: { .normal }
     )
     try EphemeralRunnerSession(
         backend: backend, github: github, memoryAdmission: admission, jobTimeout: 60
@@ -189,7 +189,7 @@ func macOSBackendRunsThroughTheExistingSession() throws {
     #expect(executor.requests[2].arguments.last == "'/Users/runner/bin/yieldd-configure-runner' 'owner/repo' 'yieldd-macos-test'")
     #expect(executor.requests[3].arguments.last == "'/Users/runner/bin/yieldd-runner-control' 'run'")
     #expect(executor.requests[3].arguments.contains("runner@192.168.64.2"))
-    let reservation = try admission.acquire()
+    let reservation = try admission.acquireWithoutWaiting(reserving: RunnerPlatform.macOS.memoryReservationBytes)
     admission.release(reservation)
 }
 
@@ -241,7 +241,7 @@ func macOSBackendTerminalFailurePreservesSessionErrorAndReleasesReservation() th
         makeMachine: { _, _ in ProbeVirtualMachine(stateAfterStart: .failed(TestFailure.runnerJob)) }
     )
     let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 12, reservationBytes: 8, readMemoryPressure: { .normal }
+        physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024, readMemoryPressure: { .normal }
     )
     do {
         try EphemeralRunnerSession(
@@ -256,6 +256,7 @@ func macOSBackendTerminalFailurePreservesSessionErrorAndReleasesReservation() th
     #expect(try fixture.cloneRootContents().isEmpty)
     var blocked = false
     let reservation = try admission.acquire(
+        reserving: MacOSVirtualMachineLifecycle.memoryBytes,
         checkCancellation: { if blocked { throw TestFailure.cancelled } },
         onBlocked: { blocked = true }
     )

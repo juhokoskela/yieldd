@@ -19,26 +19,20 @@ struct RunnerServiceCommand: ParsableCommand {
         abstract: "Continuously run ephemeral GitHub Actions runners."
     )
 
-    @Argument(help: "Repositories in owner/name form. Repeat a repository to give it another runner slot.")
-    var repositories: [String]
-
-    mutating func validate() throws {
-        guard repositories.count <= RunnerPool.maximumSlots else {
-            throw ValidationError("serve supports at most \(RunnerPool.maximumSlots) runner slots.")
-        }
-    }
+    @OptionGroup
+    var runners: RunnerServiceOptions
 
     mutating func run() throws {
-        let repositories = try repositories.map(GitHubRepository.init)
+        let configuration = try runners.serviceConfiguration()
         let locator = ExecutableLocator()
-        let containerURL = try locator.locate("container")
+        let containerURL = try configuration.requiresLinux ? locator.locate("container") : nil
         let ghURL = try locator.locate("gh")
         let stop = try RunnerPoolStop.monitoringSignals()
         defer { print("Stopping yieldd.") }
         print("Press Ctrl+C to stop.")
         try withRunnerOwnership { leaseStore in
             try runRunnerService(
-                repositories: repositories,
+                configuration: configuration,
                 leaseStore: leaseStore,
                 containerURL: containerURL,
                 ghURL: ghURL,
@@ -50,43 +44,30 @@ struct RunnerServiceCommand: ParsableCommand {
 }
 
 func runRunnerService(
-    repositories: [GitHubRepository],
+    configuration: RunnerServiceConfiguration,
     leaseStore: RunnerLeaseStore,
-    containerURL: URL,
+    containerURL: URL?,
     ghURL: URL,
     stop: RunnerPoolStop,
     output: RunnerServiceOutput,
     memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
 ) throws {
-    let sessionStateChanged: @Sendable (RunnerSessionState) -> Void = { state in
-        switch state {
-        case let .preparing(id):
-            output.info("Preparing ephemeral runner \(id.value).")
-        case let .waitingForMemory(id):
-            output.info("Runner \(id.value) is waiting for available host memory.")
-        case let .waitingForJob(id):
-            output.info("Runner \(id.value) is waiting for one job labeled '\(RunnerPlatform.linux.runnerLabel)'.")
-        case .waitingForGitHubCleanup, .leaseCleanupFailed:
-            reportRunnerRecoveryState(state, output: output)
-        case let .cleaningUp(id):
-            output.info("Cleaning up runner \(id.value).")
-        }
-    }
-    let makeSession: @Sendable () -> EphemeralRunnerSession = {
-        makeRunnerSession(
-            leaseStore: leaseStore,
-            containerURL: containerURL,
-            ghURL: ghURL,
-            stop: stop,
-            memoryAdmission: memoryAdmission,
-            stateChanged: sessionStateChanged
+    try memoryAdmission.validateCapacity(reserving: configuration.memoryReservationBytes)
+    if let templateURL = configuration.macOSTemplateURL {
+        try validateRunnerServiceTemplate(
+            templateURL, stateDirectory: leaseStore.directory
         )
+        try VirtualizationEntitlement.requireCurrentProcess()
+        try MacOSVirtualMachineLifecycle.requireSupportedHost()
     }
 
     do {
         let recovery = makeRunnerRecovery(
-            leaseStore: leaseStore, containerURL: containerURL, ghURL: ghURL,
-            stop: stop, stateChanged: sessionStateChanged
+            leaseStore: leaseStore,
+            resolveContainer: { try containerURL ?? ExecutableLocator().locate("container") },
+            ghURL: ghURL, stop: stop,
+            executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline),
+            stateChanged: { reportRunnerRecoveryState($0, output: output) }
         )
         for recoveredID in try recovery.run() {
             output.info("Cleaned up abandoned runner \(recoveredID.value).")
@@ -98,17 +79,34 @@ func runRunnerService(
         return
     }
 
-    try memoryAdmission.validateCapacity()
+    let slots = try configuration.slots.map { slot in
+        let backend: RunnerSlotBackend
+        switch slot.platform {
+        case .linux:
+            guard let containerURL else { throw RunnerServiceConfigurationError.missingContainerExecutable }
+            backend = .linux(containerURL: containerURL)
+        case .macOS:
+            guard let templateURL = configuration.macOSTemplateURL else {
+                throw RunnerServiceConfigurationError.templatePairRequired
+            }
+            backend = .macOS(templateURL: templateURL)
+        }
+        return (repository: slot.repository, backend: backend)
+    }
+    output.info(runnerServiceBanner(configuration))
 
-    let slot = repositories.count == 1 ? "slot" : "slots"
-    let names = repositories.map(\.fullName).joined(separator: ", ")
-    output.info("Serving \(repositories.count) ephemeral runner \(slot) for \(names).")
-
-    try RunnerPool(stop: stop) { repository, stop in
+    try RunnerPool(stop: stop).run(slots: slots) { slot, stop in
+        let repository = slot.repository
+        let platform = slot.backend.platform
+        let session = try makeRunnerSession(
+            backend: slot.backend, leaseStore: leaseStore, ghURL: ghURL,
+            stop: stop, memoryAdmission: memoryAdmission,
+            stateChanged: { reportRunnerServiceState($0, platform: platform, output: output) }
+        )
         try RunnerService(
-            session: makeSession(),
+            session: session,
             makeRunnerID: {
-                RunnerID(value: "yieldd-\(UUID().uuidString.lowercased())")
+                platform.makeServiceRunnerID()
             },
             checkForStop: stop.check,
             waitUntilStopped: stop.wait,
@@ -127,30 +125,60 @@ func runRunnerService(
                 }
             }
         ).run(repository: repository)
-    }.run(repositories: repositories)
+    }
+}
+
+func runnerServiceBanner(_ configuration: RunnerServiceConfiguration) -> String {
+    let slotNoun = configuration.slots.count == 1 ? "slot" : "slots"
+    let names = configuration.slots.map { "\($0.repository.fullName) (\($0.platform.rawValue.lowercased()))" }.joined(separator: ", ")
+    return "Serving \(configuration.slots.count) ephemeral runner \(slotNoun) for \(names)."
+}
+
+enum RunnerSlotBackend: Sendable {
+    case linux(containerURL: URL)
+    case macOS(templateURL: URL)
+
+    var platform: RunnerPlatform {
+        switch self {
+        case .linux: .linux
+        case .macOS: .macOS
+        }
+    }
 }
 
 func makeRunnerSession(
+    backend slotBackend: RunnerSlotBackend,
     leaseStore: RunnerLeaseStore,
-    containerURL: URL,
     ghURL: URL,
     stop: RunnerPoolStop,
     memoryAdmission: RunnerMemoryAdmission,
     stateChanged: @escaping (RunnerSessionState) -> Void
-) -> EphemeralRunnerSession {
+) throws -> EphemeralRunnerSession {
     let executor = ProcessExecutor(
         checkCancellation: stop.check,
         maximumExecutionDeadline: stop.executionDeadline
     )
-    return EphemeralRunnerSession(
-        backend: AppleContainerBackend(
+    let backend: any RunnerBackend
+    switch slotBackend {
+    case let .linux(containerURL):
+        backend = AppleContainerBackend(
             containerURL: containerURL,
             executor: executor,
             dockerReadiness: DockerReadiness(
                 wait: stop.wait,
                 checkCancellation: stop.check
             )
-        ),
+        )
+    case let .macOS(templateURL):
+        backend = try MacOSVirtualizationBackend(
+            templateURL: templateURL,
+            cloneRootURL: MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).rootURL,
+            executor: executor, checkCancellation: stop.check, wait: stop.wait,
+            maximumExecutionDeadline: stop.executionDeadline
+        )
+    }
+    return EphemeralRunnerSession(
+        backend: backend,
         github: GitHubRunnerClient(
             ghURL: ghURL,
             executor: executor
@@ -165,23 +193,45 @@ func makeRunnerSession(
 
 func makeRunnerRecovery(
     leaseStore: RunnerLeaseStore,
-    containerURL: URL,
+    resolveContainer: @escaping () throws -> URL,
     ghURL: URL,
     stop: RunnerPoolStop,
+    executor: any ProcessExecuting,
     stateChanged: @escaping (RunnerSessionState) -> Void
 ) -> RunnerRecovery {
-    let executor = ProcessExecutor(
-        checkCancellation: stop.check,
-        maximumExecutionDeadline: stop.executionDeadline
-    )
     return RunnerRecovery(
-        linuxBackend: { AppleContainerBackend(containerURL: containerURL, executor: executor) },
+        linuxBackend: {
+            AppleContainerBackend(containerURL: try resolveContainer(), executor: executor)
+        },
         github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
         leaseStore: leaseStore,
         recoveryWait: stop.wait,
         checkCancellation: stop.check,
         stateChanged: stateChanged
     )
+}
+
+func validateRunnerServiceTemplate(_ templateURL: URL, stateDirectory: URL) throws {
+    try MacOSVirtualizationBackend.validateTemplateLocation(
+        templateURL,
+        cloneRootURL: MacOSRunnerCloneStore(stateDirectory: stateDirectory).rootURL
+    )
+    try MacOSVirtualizationBackend.validateTemplate(at: templateURL)
+}
+
+func reportRunnerServiceState(_ state: RunnerSessionState, platform: RunnerPlatform, output: RunnerServiceOutput) {
+    switch state {
+    case let .preparing(id):
+        output.info("Preparing ephemeral runner \(id.value).")
+    case let .waitingForMemory(id):
+        output.info("Runner \(id.value) is waiting for available host memory.")
+    case let .waitingForJob(id):
+        output.info("Runner \(id.value) is waiting for one job labeled '\(platform.runnerLabel)'.")
+    case .waitingForGitHubCleanup, .leaseCleanupFailed:
+        reportRunnerRecoveryState(state, output: output)
+    case let .cleaningUp(id):
+        output.info("Cleaning up runner \(id.value).")
+    }
 }
 
 func reportRunnerRecoveryState(_ state: RunnerSessionState, output: RunnerServiceOutput = .terminal) {

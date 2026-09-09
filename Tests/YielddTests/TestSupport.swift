@@ -1,6 +1,15 @@
 import Foundation
 @testable import Yieldd
 
+extension RunnerMemoryAdmission {
+    func acquireWithoutWaiting(reserving bytes: UInt64) throws -> RunnerMemoryReservation {
+        var blocked = false
+        return try acquire(reserving: bytes, checkCancellation: {
+            if blocked { throw TestFailure.memoryAllocation }
+        }, onBlocked: { blocked = true })
+    }
+}
+
 final class RecordingProcessExecutor: ProcessExecuting {
     private(set) var requests: [ProcessRequest] = []
     private var outcomes: [Result<ProcessResult, any Error>]
