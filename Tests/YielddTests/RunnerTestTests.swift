@@ -641,10 +641,12 @@ func templateInsideCloneRootIsRejectedBeforeRecovery(symlink: Bool) throws {
         _ = try MacOSVirtualizationBackend(
             templateURL: symlink ? alias : template, cloneRootURL: clones.rootURL, executor: executor
         )
-        _ = try RunnerRecovery(
-            linuxBackend: { RunnerTestBackend(events: events) },
-            github: RunnerTestGitHub(events: events), leaseStore: leaseStore
-        ).run()
+        try recoverAbandonedRunners(
+            leaseStore: leaseStore,
+            makeGitHub: { RunnerTestGitHub(events: events) },
+            makeLinuxBackend: { RunnerTestBackend(events: events) },
+            checkCancellation: {}, wait: { _ in }
+        )
     })
     guard case .templateInsideCloneRoot = error else {
         Issue.record("Expected template location rejection")

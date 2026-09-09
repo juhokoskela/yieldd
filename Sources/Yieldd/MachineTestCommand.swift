@@ -15,28 +15,20 @@ struct MachineTestCommand: ParsableCommand {
             let signalMonitor = try SignalMonitor()
             let executor = ProcessExecutor(checkCancellation: signalMonitor.check)
             let backend = try machine.makeBackend(
-                leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor
+                leaseStore: leaseStore, executor: executor,
+                checkCancellation: signalMonitor.check, wait: signalMonitor.wait
             )
             if backend.platform == .macOS {
-                if try leaseStore.load().isEmpty {
-                    try MacOSRunnerCloneStore(stateDirectory: leaseStore.directory)
-                        .removeUnleased(keeping: [], checkCancellation: signalMonitor.check)
-                } else {
-                    let locator = ExecutableLocator()
-                    let recovery = RunnerRecovery(
-                        linuxBackend: {
-                            AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor)
-                        },
-                        github: GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor),
-                        leaseStore: leaseStore,
-                        recoveryWait: signalMonitor.wait,
-                        checkCancellation: signalMonitor.check,
-                        stateChanged: { reportRunnerRecoveryState($0) }
-                    )
-                    for id in try recovery.run() {
-                        print("Cleaned up abandoned runner \(id.value).")
-                    }
-                }
+                let locator = ExecutableLocator()
+                try recoverAbandonedRunners(
+                    leaseStore: leaseStore,
+                    makeGitHub: { GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor) },
+                    makeLinuxBackend: {
+                        AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor)
+                    },
+                    checkCancellation: signalMonitor.check,
+                    wait: signalMonitor.wait
+                )
             }
             let id = backend.platform.makeTestRunnerID()
 

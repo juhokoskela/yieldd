@@ -64,8 +64,8 @@ struct RunnerTestCommand: ParsableCommand {
         let locator = ExecutableLocator()
         let executor = ProcessExecutor(checkCancellation: check)
         let backend = try machine.makeBackend(
-            leaseStore: leaseStore, signalMonitor: signalMonitor, executor: executor,
-            checkCancellation: check
+            leaseStore: leaseStore, executor: executor,
+            checkCancellation: check, wait: signalMonitor.wait
         )
         let github = GitHubRunnerClient(
             ghURL: try locator.locate("gh"),
