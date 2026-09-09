@@ -114,7 +114,7 @@ Add macOS slots with repeatable `--macos OWNER/REPOSITORY` options and one `--ma
   --macos OWNER/MACOS-REPO --macos-template /absolute/path/VM.bundle
 ```
 
-Omit positional repositories for a macOS-only service, which does not require `container` unless abandoned Linux leases need recovery. The service permits at most two macOS slots and sixteen total slots. All slots share one memory budget: Linux reserves 12 GiB per live machine and macOS reserves 8 GiB. Two macOS slots fit within the 18 GiB budget of a 24 GiB host; a Linux and macOS slot together require 20 GiB, so they must take turns on that host. Each reservation is released only after its machine is confirmed absent.
+Omit positional repositories for a macOS-only service, which does not require `container` unless abandoned Linux leases need recovery. The template path must be absolute. The service permits at most two macOS slots and sixteen total slots, provided their combined reservations fit within 75% of host physical memory. Linux reserves 12 GiB per live machine and macOS reserves 8 GiB. Two macOS slots fit within the 18 GiB budget of a 24 GiB host; a Linux and macOS slot together require 20 GiB, so that configuration is rejected before recovery or runner startup. Idle runners retain their reservations while waiting for jobs; slots do not rotate to make room for another platform. Each reservation is released only after its machine is confirmed absent.
 
 This is a foreground command, not a daemon. Ctrl+C, SIGTERM, and closing the terminal (SIGHUP) interrupt every active slot and attempt cleanup before `yieldd` exits. The service does not impose `runner-test`'s two-hour job timeout.
 

@@ -21,7 +21,7 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
         self.readMemoryPressure = readMemoryPressure
     }
 
-    func validateCapacity(reserving reservationBytes: UInt64 = AppleContainerBackend.memoryBytes) throws {
+    func validateCapacity(reserving reservationBytes: UInt64) throws {
         precondition(reservationBytes > 0)
         guard reservationBytes <= budgetBytes else {
             throw RunnerMemoryAdmissionError.insufficientHostMemory(
@@ -32,7 +32,7 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
     }
 
     func acquire(
-        reserving reservationBytes: UInt64 = AppleContainerBackend.memoryBytes,
+        reserving reservationBytes: UInt64,
         checkCancellation: () throws -> Void = {},
         onBlocked: () -> Void = {}
     ) throws -> RunnerMemoryReservation {
@@ -42,13 +42,9 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
         while true {
             try checkCancellation()
             let allocation: RunnerMemoryAllocation? = condition.withLock {
-                switch admissionDecision(reserving: reservationBytes) {
-                case let .admit(allocation):
-                    reservedBytes += reservationBytes
-                    return allocation
-                case .wait:
-                    return nil
-                }
+                guard let allocation = availableAllocation(reserving: reservationBytes) else { return nil }
+                reservedBytes += reservationBytes
+                return allocation
             }
             if let allocation {
                 return RunnerMemoryReservation(allocation: allocation, bytes: reservationBytes)
@@ -74,25 +70,20 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
         }
     }
 
-    private func admissionDecision(reserving reservationBytes: UInt64) -> AdmissionDecision {
+    private func availableAllocation(reserving reservationBytes: UInt64) -> RunnerMemoryAllocation? {
         guard reservationBytes <= budgetBytes - reservedBytes else {
-            return .wait
+            return nil
         }
 
         switch readMemoryPressure() {
         case .normal:
-            return .admit(.full)
+            return .full
         case .warning, .unknown:
-            return .admit(.constrained)
+            return .constrained
         case .critical:
-            return .wait
+            return nil
         }
     }
-}
-
-private enum AdmissionDecision {
-    case admit(RunnerMemoryAllocation)
-    case wait
 }
 
 enum RunnerMemoryAdmissionError: Error, Equatable, LocalizedError {
@@ -102,7 +93,7 @@ enum RunnerMemoryAdmissionError: Error, Equatable, LocalizedError {
         switch self {
         case let .insufficientHostMemory(requiredBytes, budgetBytes):
             "Runner provisioning requires a \(formatBytes(requiredBytes)) memory reservation, "
-                + "but this host permits \(formatBytes(budgetBytes))."
+                + "but this host permits \(formatBytes(budgetBytes)). Configure fewer runner slots or use a host with more memory."
         }
     }
 }

@@ -88,7 +88,7 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
     ])
     #expect(!events.values.description.contains("registration-token"))
     #expect(try leaseStore.load().isEmpty)
-    let nextReservation = try memoryAdmission.acquire()
+    let nextReservation = try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes)
     memoryAdmission.release(nextReservation)
 }
 
@@ -690,7 +690,7 @@ func sessionCleanupFailureKeepsTheLeaseAndMemoryReservation() throws {
         repository: runnerTestRepository
     )])
     #expect(throws: CancellationError.self) {
-        try memoryAdmission.acquire(checkCancellation: {
+        try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes, checkCancellation: {
             if waitedForCapacity {
                 throw CancellationError()
             }
@@ -1149,6 +1149,7 @@ func leaseSynchronizationFailureClearsPublishedLeaseBeforeReturning(platform: Ru
     #expect(try readStore.load().isEmpty)
     var blocked = false
     let reservation = try memoryAdmission.acquire(
+        reserving: platform.memoryReservationBytes,
         checkCancellation: { if blocked { throw CancellationError() } },
         onBlocked: { blocked = true }
     )
@@ -1200,7 +1201,7 @@ func backendProvisioningFailureReleasesMemoryAfterDestroyingMachine() throws {
         .create(runnerTestID, .full),
         .destroy(runnerTestID),
     ])
-    memoryAdmission.release(try memoryAdmission.acquire())
+    memoryAdmission.release(try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes))
 }
 
 @Test
@@ -1275,7 +1276,7 @@ func registrationTokenFailureReleasesReservedMachineCapacity() throws {
     #expect(events.values == [
         .createRegistrationToken(runnerTestRepository),
     ])
-    let nextReservation = try memoryAdmission.acquire()
+    let nextReservation = try memoryAdmission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes)
     memoryAdmission.release(nextReservation)
 }
 

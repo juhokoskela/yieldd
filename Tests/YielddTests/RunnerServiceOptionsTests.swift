@@ -25,6 +25,8 @@ func serviceOptionsPreserveMixedAndRepeatedSlots() throws {
     (["--macos", "owner/repo"], "--macos and --macos-template must be supplied together."),
     (["owner/repo", "--macos-template", "/tmp/template"], "--macos and --macos-template must be supplied together."),
     (["--macos", "owner/repo", "--macos-template", ""], "--macos-template must not be empty."),
+    (["--macos", "owner/repo", "--macos-template", "relative.bundle"], "--macos-template must be an absolute path."),
+    (["--macos", "owner/repo", "--macos-template", "./relative.bundle"], "--macos-template must be an absolute path."),
     (["--macos", "owner/repo", "--macos", "owner/repo", "--macos", "owner/repo", "--macos-template", "/tmp/template"], "Supports at most 2 macOS runner slots."),
 ])
 func serviceOptionsRejectInvalidSlotConfigurations(arguments: [String], message: String) throws {
@@ -77,6 +79,64 @@ func serviceSessionSelectsBackendAndJobLabel(platform: RunnerPlatform) throws {
         output: RunnerServiceOutput(info: messages.append, warning: messages.append, error: messages.append)
     )
     #expect(messages.values == ["Runner yieldd-test is waiting for one job labeled '\(platform.runnerLabel)'."])
+}
+
+@Test
+func serviceRejectsOversubscribedMixedSlotsBeforeRecovery() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let leases = try RunnerLeaseStore(directory: fixture.rootURL)
+    let repository = try GitHubRepository("owner/repo")
+    let orphan = try MacOSRunnerCloneStore(stateDirectory: fixture.rootURL)
+        .bundleURL(for: RunnerID(value: "yieldd-abandoned"))
+    try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+    let messages = ServiceMessages()
+    #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
+        requiredBytes: 20 * 1_024 * 1_024 * 1_024, budgetBytes: 18 * 1_024 * 1_024 * 1_024
+    )) {
+        try runRunnerService(
+            configuration: RunnerServiceConfiguration(
+                repositories: [repository], macOSRepositories: [repository], macOSTemplateURL: fixture.templateURL
+            ),
+            leaseStore: leases, containerURL: URL(fileURLWithPath: "/missing/container"),
+            ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(),
+            output: RunnerServiceOutput(info: messages.append, warning: messages.append, error: messages.append),
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024)
+        )
+    }
+    #expect(messages.values.isEmpty)
+    #expect(try leases.load().isEmpty)
+    #expect(FileManager.default.fileExists(atPath: orphan.path))
+}
+
+@Test(arguments: [
+    (24, 0, 2, true),
+    (24, 1, 1, false),
+    (24, 2, 0, false),
+    (32, 1, 1, true),
+    (32, 2, 0, true),
+    (32, 1, 2, false),
+])
+func serviceCapacityCoversEveryConfiguredSlot(hostGiB: Int, linux: Int, macOS: Int, fits: Bool) throws {
+    let gibibyte: UInt64 = 1_024 * 1_024 * 1_024
+    let repository = try GitHubRepository("owner/repo")
+    let configuration = try RunnerServiceConfiguration(
+        repositories: Array(repeating: repository, count: linux),
+        macOSRepositories: Array(repeating: repository, count: macOS),
+        macOSTemplateURL: macOS > 0 ? URL(fileURLWithPath: "/tmp/template.bundle") : nil
+    )
+    let requiredBytes = UInt64(linux * 12 + macOS * 8) * gibibyte
+    #expect(configuration.memoryReservationBytes == requiredBytes)
+    let admission = RunnerMemoryAdmission(physicalMemoryBytes: UInt64(hostGiB) * gibibyte)
+    if fits {
+        try admission.validateCapacity(reserving: configuration.memoryReservationBytes)
+    } else {
+        #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
+            requiredBytes: requiredBytes, budgetBytes: UInt64(hostGiB) * gibibyte * 3 / 4
+        )) {
+            try admission.validateCapacity(reserving: configuration.memoryReservationBytes)
+        }
+    }
 }
 
 private final class ServiceMessages: @unchecked Sendable {
