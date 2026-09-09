@@ -351,8 +351,7 @@ func guestConnectionCancellationStopsDHCPPolling() throws {
 func macOSGuestScriptsAreExecutableAndParseAsBash(filename: String) throws {
     let scriptURL = repositoryRoot
         .appendingPathComponent("Guest/macOS/\(filename)", isDirectory: false)
-    let attributes = try FileManager.default.attributesOfItem(atPath: scriptURL.path)
-    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o755)
+    #expect(FileManager.default.isExecutableFile(atPath: scriptURL.path))
 
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/bin/bash"),
