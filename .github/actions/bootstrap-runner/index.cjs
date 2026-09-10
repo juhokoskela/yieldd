@@ -56,14 +56,14 @@ function signalGroup(pid, signal) {
     }
 }
 
-function runProcess(executable, args, { cwd, env, signal, graceMilliseconds = 10000 }) {
+function runProcess(executable, args, { cwd, env, signal, graceMilliseconds = 5000 }) {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
         const child = spawn(executable, args, { cwd, env, detached: true, stdio: 'inherit' });
         let escalation;
         const stop = () => {
             signalGroup(child.pid, 'SIGINT');
-            escalation ??= setTimeout(() => signalGroup(child.pid, 'SIGKILL'), graceMilliseconds);
+            escalation = setTimeout(() => signalGroup(child.pid, 'SIGKILL'), graceMilliseconds);
         };
         signal.addEventListener('abort', stop, { once: true });
         const finish = error => {
@@ -110,9 +110,7 @@ async function bootstrap(encoded, name, signal) {
         await verifyArchive(archive, checksum);
         signal.throwIfAborted();
         await runProcess('/usr/bin/tar', ['-xzf', archive, '-C', runner], options);
-        const startedHook = join(home, 'started.sh');
         const completedHook = join(home, 'completed.sh');
-        await writeFile(startedHook, '#!/bin/sh\n: > "$HOME/job-started"\n', { mode: 0o700 });
         await writeFile(completedHook, '#!/bin/sh\n: > "$HOME/job-completed"\n', { mode: 0o700 });
         console.log('Starting one nested runner. The original workflow owns its job logs and conclusion.');
         await runProcess(join(runner, 'bin/Runner.Listener'), ['run'], {
@@ -121,11 +119,9 @@ async function bootstrap(encoded, name, signal) {
                 ...env,
                 // Runner 2.337.0 consumes and removes this variable before executing jobs.
                 ACTIONS_RUNNER_INPUT_JITCONFIG: encoded,
-                ACTIONS_RUNNER_HOOK_JOB_STARTED: startedHook,
                 ACTIONS_RUNNER_HOOK_JOB_COMPLETED: completedHook,
             },
         });
-        await access(join(home, 'job-started'));
         await access(join(home, 'job-completed'));
         console.log('Nested runner exited after a job. Check the original workflow for its result.');
     } finally {

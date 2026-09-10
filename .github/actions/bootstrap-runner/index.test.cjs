@@ -1,8 +1,11 @@
 const assert = require('node:assert/strict');
-const { mkdtemp, writeFile, readFile, rm } = require('node:fs/promises');
+const { spawn } = require('node:child_process');
+const { once } = require('node:events');
+const { mkdtemp, writeFile, readFile, stat, rm } = require('node:fs/promises');
 const { createHash } = require('node:crypto');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
+const { createInterface } = require('node:readline');
 const { test } = require('node:test');
 const { validateConfiguration, runnerEnvironment, runProcess, verifyArchive } = require('./index.cjs');
 
@@ -123,6 +126,61 @@ test('cancellation escalates for a child ignoring INT and preserves its identity
         clearTimeout(deadline);
         controller.abort(reason);
         await processResult?.catch(() => {});
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('default cancellation grace leaves time for supervisor cleanup before the outer kill', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'yieldd-bootstrap-test-'));
+    const supervisor = spawn(process.execPath, ['-e', `
+        const { runProcess } = require(process.argv[1]);
+        const { rm } = require('node:fs/promises');
+        const controller = new AbortController();
+        for (const signal of ['SIGINT', 'SIGTERM']) {
+            process.on(signal, () => controller.abort(new Error('cancelled')));
+        }
+        runProcess(process.execPath, ['-e', \`
+            process.on('SIGINT', () => {});
+            process.on('SIGTERM', () => {});
+            console.log(process.pid);
+            setInterval(() => {}, 1000);
+        \`], { env: {}, signal: controller.signal })
+            .catch(() => { process.exitCode = 1; })
+            .finally(() => rm(process.argv[2], { recursive: true, force: true }));
+    `, require.resolve('./index.cjs'), directory], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const exited = once(supervisor, 'exit');
+    const lines = createInterface({ input: supervisor.stdout });
+    const readinessDeadline = setTimeout(() => supervisor.kill('SIGKILL'), 5000);
+    let terminate;
+    let kill;
+    let childPID;
+    try {
+        const [line] = await Promise.race([
+            once(lines, 'line'),
+            exited.then(() => { throw new Error('Supervisor exited before child readiness'); }),
+        ]);
+        assert.match(line, /^[0-9]+$/u);
+        childPID = Number(line);
+        assert.ok(childPID > 1);
+        clearTimeout(readinessDeadline);
+        supervisor.kill('SIGINT');
+        terminate = setTimeout(() => supervisor.kill('SIGTERM'), 7500);
+        kill = setTimeout(() => supervisor.kill('SIGKILL'), 10000);
+        assert.deepEqual(await exited, [1, null], 'Supervisor must exit before the outer process kills it');
+        await assert.rejects(stat(directory), { code: 'ENOENT' });
+        assert.throws(() => process.kill(childPID, 0), { code: 'ESRCH' });
+    } finally {
+        clearTimeout(readinessDeadline);
+        clearTimeout(terminate);
+        clearTimeout(kill);
+        lines.close();
+        supervisor.kill('SIGKILL');
+        await exited;
+        if (childPID) {
+            try { process.kill(-childPID, 'SIGKILL'); } catch (error) {
+                if (error.code !== 'ESRCH') throw error;
+            }
+        }
         await rm(directory, { recursive: true, force: true });
     }
 });
