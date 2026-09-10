@@ -109,6 +109,8 @@ Run `yieldd recover` to clean up abandoned registrations and disposable macOS cl
 
 ## Reserved single-job tests
 
+The [nested runner bootstrap prototype](Docs/runner-bootstrap-prototype.md) explores fallback compute while leaving the original workload on `runs-on: yieldd`. It is manual and restricted to trusted jobs on disposable hosts; it does not yet implement a coordinator or scale sets.
+
 To exercise job-specific routing before connecting a coordinator, queue a trusted job whose `runs-on` matches a unique label, then run:
 
 ```sh

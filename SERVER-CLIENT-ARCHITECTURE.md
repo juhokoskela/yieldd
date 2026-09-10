@@ -79,9 +79,11 @@ Fairness, priorities, per-repository concurrency limits, and separate device poo
 
 An unavailable Mac must not leave a job waiting for GitHub's self-hosted-runner timeout. The server should choose the hosted backend when no eligible Mac is online, all slots remain busy past the configured wait, or repeated assignments fail.
 
-GitHub does not treat `runs-on: yieldd` as an automatic alternative to a hosted runner. The backend therefore needs to be selected before the workload enters a yieldd-only queue. A small hosted routing job could reserve `yieldd` capacity and provide the workload job's `runs-on` value. Other GitHub-native approaches should be tested before this becomes part of the public workflow contract.
+GitHub does not treat `runs-on: yieldd` as an automatic alternative to a hosted runner. The intended interface keeps that selector unchanged: yieldd supplies compute behind it instead of rewriting the queued job's target.
 
-The exact fallback mechanism remains an open design question. It should be proven with a minimal workflow before building the server around it.
+The proposed label-based fallback dispatches a separate bootstrap workflow on a user-configured runner target. That job starts an ephemeral yieldd listener on the provided machine, which can then receive the original queued workload. The [nested runner prototype](Docs/runner-bootstrap-prototype.md) tests this boundary using repository JIT configuration before adding scale sets or server-driven dispatch. The fallback label has no default and may target GitHub-hosted compute or another provider that permits this arrangement.
+
+This is not yet a verified deployment model. The prototype must establish nested job context, credential handling, cancellation, and cleanup on disposable hosts. The server will also need bounded provisioning, durable bootstrap identities, and reconciliation between original jobs, registrations, and bootstrap runs. Missing pickup acknowledgement must never trigger duplicate workload execution.
 
 ## Standalone and connected modes
 
