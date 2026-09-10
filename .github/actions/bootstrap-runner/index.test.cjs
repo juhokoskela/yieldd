@@ -7,6 +7,28 @@ const { test } = require('node:test');
 const { validateConfiguration, runnerEnvironment, runProcess, verifyArchive } = require('./index.cjs');
 
 const name = 'yieldd-bootstrap-test';
+function encodeSettings(settings) {
+    return Buffer.from(JSON.stringify({
+        '.runner': Buffer.from(JSON.stringify(settings)).toString('base64'),
+    })).toString('base64');
+}
+
+test('accepts upstream JIT settings while enforcing runner identity and isolation', () => {
+    // Sanitized decoded .runner from https://github.com/actions/actions-runner-controller/discussions/3289.
+    const settings = require('./fixtures/jit-runner-settings.json');
+    validateConfiguration(encodeSettings(settings), name);
+    for (const ephemeral of [true, 'True', 'true', 'TRUE', ' True ']) {
+        validateConfiguration(encodeSettings({ ...settings, Ephemeral: ephemeral }), name);
+    }
+    for (const changed of [
+        { AgentName: 'other' }, { WorkFolder: '/tmp/shared' },
+        ...[false, 'False', 'false', '', null, 'yes'].map(Ephemeral => ({ Ephemeral })),
+        { agentName: 'other' }, { ephemeral: false }, { workFolder: '/tmp/shared' },
+    ]) {
+        assert.throws(() => validateConfiguration(encodeSettings({ ...settings, ...changed }), name), /JIT configuration/);
+    }
+});
+
 function configuration(settings = {}, files = {}) {
     return Buffer.from(JSON.stringify({
         '.runner': Buffer.from(JSON.stringify({

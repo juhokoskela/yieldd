@@ -23,8 +23,17 @@ function validateConfiguration(encoded, name) {
         if (!files || Array.isArray(files) || Object.keys(files).some(key => !/^\.[a-z_]+$/u.test(key))) {
             throw new Error();
         }
-        const settings = JSON.parse(Buffer.from(files['.runner'], 'base64').toString('utf8'));
-        if (settings.agentName !== name || settings.ephemeral !== true || settings.workFolder !== '_work') {
+        const decoded = JSON.parse(Buffer.from(files['.runner'], 'base64').toString('utf8'));
+        const settings = new Map();
+        for (const [key, value] of Object.entries(decoded)) {
+            // Runner settings are case-insensitive; reject ambiguous aliases before passing the original payload on.
+            const property = key.toLowerCase();
+            if (settings.has(property)) throw new Error();
+            settings.set(property, value);
+        }
+        const ephemeral = settings.get('ephemeral');
+        if (settings.get('agentname') !== name || settings.get('workfolder') !== '_work' ||
+            !(ephemeral === true || (typeof ephemeral === 'string' && ephemeral.trim().toLowerCase() === 'true'))) {
             throw new Error();
         }
     } catch {
