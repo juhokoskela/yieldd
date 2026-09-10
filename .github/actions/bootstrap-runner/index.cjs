@@ -4,6 +4,7 @@ const { createReadStream } = require('node:fs');
 const { mkdtemp, mkdir, writeFile, access, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
+const { setTimeout: delay } = require('node:timers/promises');
 
 const version = '2.337.0';
 const packages = {
@@ -77,7 +78,10 @@ function runProcess(executable, args, { cwd, env, signal, graceMilliseconds = 50
         child.once('exit', (code, exitSignal) => {
             // The listener can exit while descendants remain; never leave its group running.
             signalGroup(child.pid, 'SIGKILL');
-            finish(code === 0 ? null : new Error(`Bootstrap process exited with ${exitSignal || `status ${code}`}.`));
+            finish(code === 0 ? null : Object.assign(
+                new Error(`Bootstrap process exited with ${exitSignal || `status ${code}`}.`),
+                { exitCode: code },
+            ));
         });
     });
 }
@@ -86,6 +90,24 @@ async function verifyArchive(path, expected) {
     const hash = createHash('sha256');
     for await (const chunk of createReadStream(path)) hash.update(chunk);
     if (hash.digest('hex') !== expected) throw new Error('Runner archive checksum mismatch.');
+}
+
+async function runListener(runner, options) {
+    while (true) {
+        try {
+            await runProcess(join(runner, 'bin/Runner.Listener'), ['run'], options);
+            return;
+        } catch (error) {
+            if (options.signal.aborted || error.exitCode !== 2) throw error;
+        }
+        console.log('Runner listener exited with status 2; retrying in five seconds.');
+        try {
+            await delay(5000, undefined, { signal: options.signal });
+        } catch (error) {
+            options.signal.throwIfAborted();
+            throw error;
+        }
+    }
 }
 
 async function bootstrap(encoded, name, signal) {
@@ -113,7 +135,7 @@ async function bootstrap(encoded, name, signal) {
         const completedHook = join(home, 'completed.sh');
         await writeFile(completedHook, '#!/bin/sh\n: > "$HOME/job-completed"\n', { mode: 0o700 });
         console.log('Starting one nested runner. The original workflow owns its job logs and conclusion.');
-        await runProcess(join(runner, 'bin/Runner.Listener'), ['run'], {
+        await runListener(runner, {
             ...options,
             env: {
                 ...env,
@@ -146,4 +168,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { validateConfiguration, runnerEnvironment, runProcess, verifyArchive };
+module.exports = { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive };

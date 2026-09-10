@@ -13,7 +13,7 @@ The prototype uses repository-scoped JIT configuration, not a scale set. It test
 - A 15-minute supervisor deadline covers download and listener execution; the bootstrap job has a 20-minute limit. Cancellation signals the owned process group, then escalates after five seconds to leave time for cleanup before GitHub's outer cancellation deadline. Processes that deliberately leave that group and force-killed bootstrap processes rely on host disposal for cleanup.
 - The supervisor deletes its private runner files but cannot deregister an abandoned runner: it has no GitHub admin credential. Inspect and remove any surviving registration after interruption or failed startup.
 
-The bootstrap downloads runner 2.337.0 and verifies its pinned platform-specific SHA-256. It passes the JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`, which that runner version consumes and removes before job execution. No broad GitHub credential is sent to the bootstrap. Do not publish encoded JIT credentials as workflow inputs, artifacts, command arguments, or logs.
+The bootstrap downloads runner 2.337.0 and verifies its pinned platform-specific SHA-256. It passes the JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`, which that runner version consumes and removes before job execution. Listener exit status 2 triggers a retry after five seconds within the original 15-minute deadline. Other nonzero statuses stop the bootstrap. No broad GitHub credential is sent to the bootstrap. Do not publish encoded JIT credentials as workflow inputs, artifacts, command arguments, or logs.
 
 ## Prepare and dispatch
 

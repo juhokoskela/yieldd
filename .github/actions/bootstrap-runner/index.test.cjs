@@ -1,13 +1,13 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { mkdtemp, writeFile, readFile, stat, rm } = require('node:fs/promises');
+const { mkdtemp, mkdir, writeFile, readFile, stat, rm } = require('node:fs/promises');
 const { createHash } = require('node:crypto');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { createInterface } = require('node:readline');
 const { test } = require('node:test');
-const { validateConfiguration, runnerEnvironment, runProcess, verifyArchive } = require('./index.cjs');
+const { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive } = require('./index.cjs');
 
 const name = 'yieldd-bootstrap-test';
 function encodeSettings(settings) {
@@ -87,6 +87,62 @@ test('an already cancelled request never launches a process', () => {
     assert.throws(() => runProcess('/nonexistent-yieldd-test', [], {
         env: {}, signal: controller.signal,
     }), error => error === reason);
+});
+
+async function fakeListener(t, statuses) {
+    const runner = await mkdtemp(join(tmpdir(), 'yieldd-bootstrap-test-'));
+    t.after(() => rm(runner, { recursive: true, force: true }));
+    await mkdir(join(runner, 'bin'));
+    await writeFile(join(runner, 'bin/Runner.Listener'), `#!${process.execPath}
+        const fs = require('node:fs');
+        const assert = require('node:assert/strict');
+        assert.equal(process.argv[2], 'run');
+        assert.equal(process.env.ACTIONS_RUNNER_INPUT_JITCONFIG, 'test-only-config');
+        const previous = fs.existsSync('attempts') ? fs.readFileSync('attempts', 'utf8') : '';
+        const attempts = previous ? JSON.parse(previous) : [];
+        attempts.push(Date.now());
+        fs.writeFileSync('attempts', JSON.stringify(attempts));
+        process.exit(${JSON.stringify(statuses)}[attempts.length - 1] ?? 7);
+    `, { mode: 0o700 });
+    return {
+        runner,
+        options: { cwd: runner, env: { ACTIONS_RUNNER_INPUT_JITCONFIG: 'test-only-config' } },
+        attempts: async () => JSON.parse(await readFile(join(runner, 'attempts'), 'utf8')),
+    };
+}
+
+test('listener retries status 2 after five seconds using the same runner directory', async t => {
+    const { runner, options, attempts } = await fakeListener(t, [2, 0]);
+    await runListener(runner, { ...options, signal: AbortSignal.timeout(15000) });
+    const started = await attempts();
+    assert.equal(started.length, 2);
+    assert.ok(started[1] - started[0] >= 5000);
+});
+
+test('listener terminal failures do not retry', async t => {
+    for (const code of [1, 5, 7]) {
+        const { runner, options, attempts } = await fakeListener(t, [code, 0]);
+        await assert.rejects(runListener(runner, {
+            ...options, signal: AbortSignal.timeout(15000),
+        }), new RegExp(`status ${code}`));
+        assert.equal((await attempts()).length, 1);
+    }
+});
+
+test('cancellation during listener retry delay preserves its reason and prevents restart', async t => {
+    const { runner, options, attempts } = await fakeListener(t, [2, 0]);
+    const controller = new AbortController();
+    const reason = new Error('bootstrap deadline reached');
+    t.mock.method(console, 'log', message => {
+        if (message === 'Runner listener exited with status 2; retrying in five seconds.') {
+            setImmediate(() => controller.abort(reason));
+        }
+    });
+    const deadline = setTimeout(() => controller.abort(new Error('Retry was not reported')), 10000);
+    try {
+        await assert.rejects(runListener(runner, { ...options, signal: controller.signal }), error => error === reason);
+        assert.equal((await attempts()).length, 1);
+    } finally { clearTimeout(deadline); }
 });
 
 test('cancellation escalates for a child ignoring INT and preserves its identity', async () => {
