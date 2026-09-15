@@ -56,3 +56,25 @@ jobs:
           persist-credentials: false
       - name: Test without GitHub credentials or runner registration
         run: node --test .github/actions/bootstrap-runner/index.test.cjs
+
+  coordinator:
+    name: Coordinator contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Server
+    steps:
+      - name: Check out
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: Server/go.mod
+          cache-dependency-path: Server/go.sum
+      - name: Test and vet
+        run: |
+          go test -race ./...
+          go vet ./...
