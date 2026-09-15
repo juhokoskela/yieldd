@@ -276,6 +276,22 @@ func (g *githubAPI) runnerBusy(ctx context.Context, repository string, id int) (
 	}
 	err := g.request(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runners/%d", repository, id), nil, &runner)
 	if hasHTTPStatus(err, http.StatusNotFound) {
+		var listing struct {
+			Runners *[]struct {
+				ID int `json:"id"`
+			} `json:"runners"`
+		}
+		if err := g.request(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runners?per_page=1", repository), nil, &listing); err != nil {
+			return false, fmt.Errorf("verify runner access: %w", err)
+		}
+		if listing.Runners == nil {
+			return false, errors.New("invalid runner listing while verifying access")
+		}
+		for _, listed := range *listing.Runners {
+			if listed.ID == id {
+				return false, errors.New("runner lookup and listing disagree; retry cleanup")
+			}
+		}
 		return false, nil
 	}
 	if err != nil {

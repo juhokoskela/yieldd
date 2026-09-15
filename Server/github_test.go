@@ -296,7 +296,7 @@ func TestRunnerStatusRequiresExplicitMatchingIdentity(t *testing.T) {
 		{`{}`, 200, false, true},
 		{`{"id":8,"busy":false}`, 200, false, true},
 		{`{"id":7,"busy":null}`, 200, false, true},
-		{``, 404, false, false},
+		{``, 404, false, true},
 		{``, 403, false, true},
 	} {
 		t.Run(fmt.Sprint(tc.status)+tc.body, func(t *testing.T) {
@@ -323,6 +323,34 @@ func TestWorkflowAgeRequiresConsistentServerTimestamps(t *testing.T) {
 			run := &workflowRun{CreatedAt: tc.created, observedAt: tc.observed}
 			if _, err := run.age(); err == nil {
 				t.Fatal("invalid server timestamps accepted")
+			}
+		})
+	}
+}
+
+func TestRunner404RequiresAccessibleRunnerList(t *testing.T) {
+	for _, mode := range []string{"absent", "access-lost", "still-listed", "invalid-list"} {
+		t.Run(mode, func(t *testing.T) {
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/repos/example/application/actions/runners/7" || mode == "access-lost" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.URL.Path != "/repos/example/application/actions/runners" {
+					t.Error(r.URL.Path)
+				}
+				switch mode {
+				case "absent":
+					fmt.Fprint(w, `{"runners":[]}`)
+				case "still-listed":
+					fmt.Fprint(w, `{"runners":[{"id":7,"busy":true}]}`)
+				case "invalid-list":
+					fmt.Fprint(w, `{}`)
+				}
+			})
+			busy, err := api.runnerBusy(t.Context(), "example/application", 7)
+			if busy || (err == nil) != (mode == "absent") {
+				t.Fatal("runner absence was not verified", busy, err)
 			}
 		})
 	}

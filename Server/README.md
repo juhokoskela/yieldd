@@ -48,6 +48,8 @@ If dispatch fails before the HTTP transport consumes any payload bytes, the coor
 
 A secret-deletion 404 does not clear the lease by itself. Cleanup verifies that the named secret is absent and that the Secrets API remains accessible. Lost access or inconsistent responses retain the cleanup obligation.
 
+Likewise, a runner-status 404 requires a successful runner listing from the application repository before cleanup can treat the runner as absent. A failed access check cannot establish that the runner is idle.
+
 To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with `--recover`:
 
 ```sh
