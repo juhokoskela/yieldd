@@ -7,7 +7,59 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
+
+func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
+	for _, mode := range []string{"cancel", "deadline"} {
+		for _, recoverOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/recover=%v", mode, recoverOnly), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					c, w, store := newFixture(t)
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					wantErr := context.Canceled
+					w.afterSecret = cancel
+					if mode == "deadline" {
+						wantErr = context.DeadlineExceeded
+						w.afterSecret = func() { time.Sleep(61 * time.Second) }
+					}
+					w.dispatchErr = wantErr
+					if _, err := c.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
+						t.Fatal("lost cancellation identity", err)
+					}
+					saved, err := store.load(testConfig)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if saved.Lease == nil || saved.Lease.DispatchIntent || saved.Lease.JIT != "private-jit" || saved.Lease.RunnerID != 7 {
+						t.Fatal("expired context recorded dispatch or lost resumable credentials")
+					}
+					if c.state.Lease.DispatchIntent || w.dispatched != 0 || w.secret != "private-jit" {
+						t.Fatal("dispatch attempted after upload exhausted its context")
+					}
+					c.state, w.afterSecret, w.dispatchErr = saved, nil, nil
+					if recoverOnly {
+						if done, err := c.reconcile(t.Context(), true); err != nil || !done {
+							t.Fatal(done, err)
+						}
+						if c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 {
+							t.Fatal("could not recover undispatched attempt")
+						}
+					} else {
+						if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+							t.Fatal(err)
+						}
+						if w.dispatched != 1 || w.findCalls != 0 || c.state.Lease.RunID != 99 {
+							t.Fatal("restart could not resume provisioning")
+						}
+					}
+				})
+			})
+		}
+	}
+}
 
 type bootstrapWithDispatchAPI struct {
 	bootstrapAPI

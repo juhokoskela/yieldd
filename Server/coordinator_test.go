@@ -28,6 +28,7 @@ type fakeWorld struct {
 	generateErr, dispatchErr, secretErr, deleteErr error
 	busy                                           bool
 	beforeGenerate, beforeDispatch                 func()
+	afterSecret                                    func()
 	cancelErr                                      error
 	beforeCancel                                   func()
 	findCalls, getCalls                            int
@@ -59,6 +60,9 @@ func (f *fakeWorld) putSecret(_ context.Context, _, value string) error {
 		return f.secretErr
 	}
 	f.secret = value
+	if f.afterSecret != nil {
+		f.afterSecret()
+	}
 	return nil
 }
 func (f *fakeWorld) deleteSecret(context.Context, string) error {

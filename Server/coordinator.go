@@ -108,6 +108,9 @@ func (c *coordinator) prepare(ctx context.Context) error {
 	if err := c.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
 		return fmt.Errorf("store bootstrap credential: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	l.JIT = ""
 	l.DispatchIntent = true
 	if err := c.save(c.state); err != nil {
