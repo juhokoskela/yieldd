@@ -392,6 +392,18 @@ func TestEveryPreDispatchPersistenceBarrierPreventsDispatch(t *testing.T) {
 			}
 			c.state = saved
 			c.save = store.save
+			if failAt == 3 {
+				if !saved.Lease.CleanupIntent {
+					t.Fatal("failed dispatch intent was not moved to cleanup")
+				}
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+					t.Fatal(err)
+				}
+				if c.state.Lease != nil || w.dispatched != 0 || w.runner != nil || w.secret != "" {
+					t.Fatal("failed intent resumed provisioning")
+				}
+				return
+			}
 			if failAt == 2 {
 				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
 					t.Fatal("unknown registration retried")

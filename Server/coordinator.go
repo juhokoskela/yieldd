@@ -111,7 +111,8 @@ func (c *coordinator) prepare(ctx context.Context) error {
 	l.JIT = ""
 	l.DispatchIntent = true
 	if err := c.save(c.state); err != nil {
-		return err
+		// Rename may have published intent before directory sync failed.
+		return errors.Join(err, c.beginCleanup(""))
 	}
 	if err := ctx.Err(); err != nil {
 		// The durable save can outlast the deadline. No dispatch was attempted.

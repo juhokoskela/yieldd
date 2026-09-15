@@ -142,6 +142,37 @@ func TestUnattemptedDispatchCleanupSaveFailureRetainsObligation(t *testing.T) {
 	}
 }
 
+func TestPublishedDispatchIntentSaveFailureEntersCleanup(t *testing.T) {
+	c, w, store := newFixture(t)
+	failure := errors.New("directory sync failed after rename")
+	c.save = func(s *state) error {
+		if err := store.save(s); err != nil {
+			return err
+		}
+		if s.Lease != nil && s.Lease.DispatchIntent && !s.Lease.CleanupIntent {
+			return failure
+		}
+		return nil
+	}
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	saved, err := store.load(testConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Lease == nil || !saved.Lease.CleanupIntent || w.dispatched != 0 || w.runner == nil || w.secret == "" {
+		t.Fatal("published but unattempted dispatch did not enter cleanup")
+	}
+	c.state, c.save = saved, store.save
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if c.state.Lease != nil || w.dispatched != 0 || w.findCalls != 0 || w.runner != nil || w.secret != "" {
+		t.Fatal("restart did not directly clean up the undispatched attempt")
+	}
+}
+
 type bootstrapWithRunAPI struct {
 	bootstrapAPI
 	api *githubAPI
