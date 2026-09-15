@@ -210,6 +210,9 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 			return match, nil
 		}
 	}
+	if match != nil {
+		return match, nil
+	}
 	return nil, errors.New("bootstrap run search exceeded its page limit")
 }
 

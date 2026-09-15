@@ -206,6 +206,36 @@ func TestRunSearchIgnoresCoordinatorClock(t *testing.T) {
 	}
 }
 
+func TestFullRunSearchPreservesDiscoveredMatch(t *testing.T) {
+	for _, matchPage := range []int{0, 1, 10} {
+		t.Run(fmt.Sprint(matchPage), func(t *testing.T) {
+			calls := 0
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Query().Get("page") != fmt.Sprint(calls) {
+					t.Error("search did not advance pages")
+				}
+				runs := make([]workflowRun, 100)
+				if calls == matchPage {
+					runs[0] = workflowRun{ID: 99, DisplayTitle: "Bootstrap " + fixtureRunner, Status: "completed"}
+				}
+				json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
+			})
+			run, err := api.findRun(t.Context(), &lease{Name: fixtureRunner})
+			if calls != 10 {
+				t.Fatal("search did not respect page budget", calls)
+			}
+			if matchPage == 0 {
+				if err == nil || run != nil {
+					t.Fatal("exhausted search claimed an authoritative absence", run, err)
+				}
+			} else if err != nil || run == nil || run.ID != 99 {
+				t.Fatal("full final page discarded matching run", run, err)
+			}
+		})
+	}
+}
+
 func TestRunnerStatusRequiresExplicitMatchingIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		body        string
