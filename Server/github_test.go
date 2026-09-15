@@ -101,7 +101,7 @@ func TestCredentialAndDispatchHTTPContract(t *testing.T) {
 			if r.URL.Path != "/repos/example/infrastructure/actions/secrets/"+l.secretName() {
 				t.Error(r.URL.Path)
 			}
-			w.WriteHeader(404)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Error(r.Method)
 		}
@@ -137,6 +137,55 @@ func TestDispatchDoesNotRetryOrFollowRedirects(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "private-jit") || strings.Contains(err.Error(), "server-only-token") {
 				t.Fatal("response leaked", err)
+			}
+		})
+	}
+}
+
+func TestSecretDeletionVerifiesAbsenceAndAccess(t *testing.T) {
+	for _, mode := range []string{"deleted", "absent", "read-only", "access-lost", "still-listed", "invalid-list"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method == "DELETE" {
+					if mode == "deleted" {
+						w.WriteHeader(http.StatusNoContent)
+					} else {
+						w.WriteHeader(http.StatusNotFound)
+					}
+					return
+				}
+				if mode == "access-lost" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.URL.Path == "/repos/example/infrastructure/actions/secrets/TEST_SECRET" {
+					if mode == "read-only" {
+						fmt.Fprint(w, `{"name":"TEST_SECRET"}`)
+					} else {
+						w.WriteHeader(http.StatusNotFound)
+					}
+					return
+				}
+				if r.URL.Path != "/repos/example/infrastructure/actions/secrets" {
+					t.Error(r.URL.Path)
+				}
+				switch mode {
+				case "absent":
+					fmt.Fprint(w, `{"secrets":[]}`)
+				case "still-listed":
+					fmt.Fprint(w, `{"secrets":[{"name":"TEST_SECRET"}]}`)
+				default:
+					fmt.Fprint(w, `{}`)
+				}
+			})
+			err := api.deleteSecret(t.Context(), "TEST_SECRET")
+			if (err == nil) != (mode == "deleted" || mode == "absent") {
+				t.Fatal("secret absence was not verified", err)
+			}
+			if mode == "deleted" && calls != 1 {
+				t.Fatal("successful deletion made extra requests", calls)
 			}
 		})
 	}

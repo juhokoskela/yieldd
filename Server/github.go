@@ -160,10 +160,31 @@ func (g *githubAPI) putSecret(ctx context.Context, name, value string) error {
 
 func (g *githubAPI) deleteSecret(ctx context.Context, name string) error {
 	err := g.request(ctx, "DELETE", g.path("secrets/"+name), nil, nil)
-	if hasHTTPStatus(err, http.StatusNotFound) {
-		return nil
+	if !hasHTTPStatus(err, http.StatusNotFound) {
+		return err
 	}
-	return err
+	if err := g.request(ctx, "GET", g.path("secrets/"+name), nil, nil); err == nil {
+		return errors.New("secret still exists after deletion returned 404; restore Secrets write access and retry cleanup")
+	} else if !hasHTTPStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("verify secret absence: %w", err)
+	}
+	var listing struct {
+		Secrets *[]struct {
+			Name string `json:"name"`
+		} `json:"secrets"`
+	}
+	if err := g.request(ctx, "GET", g.path("secrets?per_page=1"), nil, &listing); err != nil {
+		return fmt.Errorf("verify Secrets access: %w", err)
+	}
+	if listing.Secrets == nil {
+		return errors.New("invalid secret listing while verifying access")
+	}
+	for _, secret := range *listing.Secrets {
+		if secret.Name == name {
+			return errors.New("secret lookup and listing disagree; retry cleanup")
+		}
+	}
+	return nil
 }
 
 func (g *githubAPI) dispatch(ctx context.Context, l *lease, fallback string) (int64, error) {
