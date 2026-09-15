@@ -40,6 +40,8 @@ The bootstrap supervisor has a 15-minute execution limit. The coordinator reques
 
 An API or bootstrap failure stops this first version for operator attention. It does not rerun the application workflow. A missing registration response requires explicit recovery. Confirmed dispatch rejections (HTTP 400, 401, 403, 404, 422, or 429) enter cleanup without searching for a nonexistent workflow. Timeouts, server errors, and malformed success responses remain ambiguous. An unconfirmed dispatch remains blocked after five minutes rather than starting a replacement. If GitHub never exposes a matching run, even recovery retains that obligation: investigate the dispatch before making any manual state change.
 
+If a recorded workflow returns 404, cleanup requires the registration API to independently confirm that its runner is absent. The coordinator retains an unknown conclusion rather than claiming success. If the runner still exists, restore workflow access or verify termination and remove that registration before retrying recovery. A missing workflow alone does not prove that execution stopped.
+
 To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with `--recover`:
 
 ```sh

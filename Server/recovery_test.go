@@ -340,6 +340,38 @@ func TestFailedBootstrapConclusionSurvivesInterruptedCleanup(t *testing.T) {
 	}
 }
 
+func TestMissingWorkflowRequiresAbsentRunnerBeforeCleanup(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		for _, recoverOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("registered=%v/recover=%v", registered, recoverOnly), func(t *testing.T) {
+				c, w, store := newFixture(t)
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+					t.Fatal(err)
+				}
+				saved, err := store.load(testConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.state = saved
+				w.getErr = &apiError{status: http.StatusNotFound}
+				if !registered {
+					w.runner = nil
+				}
+				done, err := c.reconcile(t.Context(), recoverOnly)
+				if registered {
+					if err == nil || done || c.state.Lease.CleanupIntent || w.secret == "" || w.runner == nil {
+						t.Fatal("missing workflow allowed cleanup of a registered runner", done, err)
+					}
+					return
+				}
+				if !done || (err != nil) == recoverOnly || c.state.Lease != nil || w.secret != "" || w.dispatched != 1 {
+					t.Fatal("missing workflow did not clean up while preserving unknown conclusion", done, err)
+				}
+			})
+		}
+	}
+}
+
 func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 	for _, mode := range []string{"running", "read-failed", "wrong-id", "wrong-title", "missing", "non-conflict"} {
 		t.Run(mode, func(t *testing.T) {

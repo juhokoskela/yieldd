@@ -167,6 +167,9 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 		}
 	} else {
 		run, err = c.bootstrap.getRun(ctx, l.RunID)
+		if hasHTTPStatus(err, 404) {
+			return c.recoverMissingRun(ctx, recoverOnly)
+		}
 		if err != nil {
 			return false, err
 		}
@@ -205,6 +208,20 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 		}
 	}
 	if err := c.beginCleanup(run.Conclusion); err != nil {
+		return false, err
+	}
+	return c.finishCleanup(ctx, recoverOnly)
+}
+
+func (c *coordinator) recoverMissingRun(ctx context.Context, recoverOnly bool) (bool, error) {
+	runner, err := c.runners.GetRunnerByName(ctx, c.state.Lease.Name)
+	if err != nil {
+		return false, &sdkError{"check runner for missing workflow", err}
+	}
+	if runner != nil {
+		return false, errors.New("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover")
+	}
+	if err := c.beginCleanup("unknown"); err != nil {
 		return false, err
 	}
 	return c.finishCleanup(ctx, recoverOnly)
