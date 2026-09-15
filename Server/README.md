@@ -8,7 +8,7 @@ The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scales
 
 ## Setup
 
-Use a Linux or macOS coordinator with Go 1.26.3 or newer. Run one coordinator for this repository and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same label during the experiment.
+Use a Linux or macOS coordinator with Go 1.27.1 or newer. Run one coordinator for this repository and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same label during the experiment.
 
 The infrastructure repository must contain the `runner-bootstrap.yml` workflow and the per-bootstrap credential selector on `main`. The coordinator generates names such as `yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef`; the workflow reads the corresponding `YIELDD_JIT_0123456789ABCDEF0123456789ABCDEF` secret. The old shared `YIELDD_BOOTSTRAP_JIT` secret is not used.
 
