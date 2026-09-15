@@ -116,7 +116,7 @@ func run() error {
 		return err
 	}
 	slog.Info("Serving scale set", "repository", cfg.Repository, "scale_set", saved.ScaleSetID, "capacity", 1, "fallback", cfg.Fallback)
-	if err := messages.Run(ctx, worker); err != nil && !errors.Is(err, context.Canceled) {
+	if err := messages.Run(ctx, worker); err != nil && !onlyCancellation(err) {
 		var provisioning *provisioningError
 		if errors.As(err, &provisioning) {
 			return provisioning
