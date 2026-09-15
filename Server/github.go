@@ -25,10 +25,19 @@ func stringsUpperUUID(name string) string {
 }
 
 type workflowRun struct {
-	ID           int64  `json:"id"`
-	DisplayTitle string `json:"display_title"`
-	Status       string `json:"status"`
-	Conclusion   string `json:"conclusion"`
+	ID           int64     `json:"id"`
+	DisplayTitle string    `json:"display_title"`
+	Status       string    `json:"status"`
+	Conclusion   string    `json:"conclusion"`
+	CreatedAt    time.Time `json:"created_at"`
+	observedAt   time.Time
+}
+
+func (r *workflowRun) age() (time.Duration, error) {
+	if r.CreatedAt.IsZero() || r.observedAt.IsZero() || r.observedAt.Before(r.CreatedAt) {
+		return 0, errors.New("workflow age is unavailable or invalid; retry with --recover to request cancellation")
+	}
+	return r.observedAt.Sub(r.CreatedAt), nil
 }
 
 type apiError struct{ status int }
@@ -65,6 +74,11 @@ type githubAPI struct {
 }
 
 func (g *githubAPI) request(ctx context.Context, method, path string, body, output any) error {
+	_, err := g.requestWithHeaders(ctx, method, path, body, output)
+	return err
+}
+
+func (g *githubAPI) requestWithHeaders(ctx context.Context, method, path string, body, output any) (http.Header, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var data []byte
@@ -72,12 +86,12 @@ func (g *githubAPI) request(ctx context.Context, method, path string, body, outp
 		var err error
 		data, err = json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	request, err := http.NewRequestWithContext(ctx, method, g.base+path, bytes.NewReader(data))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+g.token)
 	request.Header.Set("Accept", "application/vnd.github+json")
@@ -85,26 +99,26 @@ func (g *githubAPI) request(ctx context.Context, method, path string, body, outp
 	request.Header.Set("Content-Type", "application/json")
 	response, err := g.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("GitHub request failed: %w", err)
+		return nil, fmt.Errorf("GitHub request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return &apiError{response.StatusCode}
+		return response.Header, &apiError{response.StatusCode}
 	}
 	if output == nil {
-		return nil
+		return response.Header, nil
 	}
 	data, err = io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
 	if err != nil {
-		return err
+		return response.Header, err
 	}
 	if len(data) > 2<<20 {
-		return errors.New("GitHub response exceeded size limit")
+		return response.Header, errors.New("GitHub response exceeded size limit")
 	}
 	if err := json.Unmarshal(data, output); err != nil {
-		return errors.New("invalid GitHub response")
+		return response.Header, errors.New("invalid GitHub response")
 	}
-	return nil
+	return response.Header, nil
 }
 
 func (g *githubAPI) path(suffix string) string {
@@ -168,7 +182,8 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 			Runs []workflowRun `json:"workflow_runs"`
 		}
 		query := url.Values{"event": {"workflow_dispatch"}, "branch": {"main"}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
-		if err := g.request(ctx, "GET", g.path("workflows/runner-bootstrap.yml/runs?")+query.Encode(), nil, &result); err != nil {
+		headers, err := g.requestWithHeaders(ctx, "GET", g.path("workflows/runner-bootstrap.yml/runs?")+query.Encode(), nil, &result)
+		if err != nil {
 			return nil, err
 		}
 		for _, run := range result.Runs {
@@ -178,6 +193,7 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 			if match != nil && match.ID != run.ID {
 				return nil, errors.New("multiple bootstrap runs match the provisioning lease")
 			}
+			run.observedAt, _ = http.ParseTime(headers.Get("Date"))
 			match = &run
 		}
 		if len(result.Runs) < 100 {
@@ -189,9 +205,11 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 
 func (g *githubAPI) getRun(ctx context.Context, id int64) (*workflowRun, error) {
 	var run workflowRun
-	if err := g.request(ctx, "GET", g.path(fmt.Sprintf("runs/%d", id)), nil, &run); err != nil {
+	headers, err := g.requestWithHeaders(ctx, "GET", g.path(fmt.Sprintf("runs/%d", id)), nil, &run)
+	if err != nil {
 		return nil, err
 	}
+	run.observedAt, _ = http.ParseTime(headers.Get("Date"))
 	return &run, nil
 }
 

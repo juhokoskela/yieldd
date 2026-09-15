@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -137,6 +138,65 @@ func TestUnattemptedDispatchCleanupSaveFailureRetainsObligation(t *testing.T) {
 	}
 	if w.dispatched != 0 || w.runner == nil || w.secret == "" {
 		t.Fatal("failed cleanup save dispatched or removed resources")
+	}
+}
+
+type bootstrapWithRunAPI struct {
+	bootstrapAPI
+	api *githubAPI
+}
+
+func (b bootstrapWithRunAPI) getRun(ctx context.Context, id int64) (*workflowRun, error) {
+	return b.api.getRun(ctx, id)
+}
+
+func (b bootstrapWithRunAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error) {
+	return b.api.findRun(ctx, l)
+}
+
+func TestRestartUsesServerTimeForBootstrapAge(t *testing.T) {
+	serverNow := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
+		for _, age := range []time.Duration{time.Minute, 26 * time.Minute} {
+			for _, discover := range []bool{false, true} {
+				t.Run(fmt.Sprintf("skew=%v/age=%v/discover=%v", skew, age, discover), func(t *testing.T) {
+					c, w, store := newFixture(t)
+					c.now = func() time.Time { return serverNow.Add(skew) }
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+						t.Fatal(err)
+					}
+					if discover {
+						c.state.Lease.RunID = 0
+						if err := store.save(c.state); err != nil {
+							t.Fatal(err)
+						}
+					}
+					saved, err := store.load(testConfig)
+					if err != nil {
+						t.Fatal(err)
+					}
+					c.state = saved
+					c.now = func() time.Time { return serverNow.Add(-skew) }
+					api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
+						response.Header().Set("Date", serverNow.Format(http.TimeFormat))
+						run := map[string]any{"id": 99, "display_title": "Bootstrap " + saved.Lease.Name, "status": "queued", "created_at": serverNow.Add(-age)}
+						if discover {
+							json.NewEncoder(response).Encode(map[string]any{"workflow_runs": []any{run}})
+						} else {
+							json.NewEncoder(response).Encode(run)
+						}
+					})
+					c.bootstrap = bootstrapWithRunAPI{bootstrapAPI: w, api: api}
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+						t.Fatal(err)
+					}
+					cancelled := w.events[len(w.events)-1] == "cancel"
+					if cancelled != (age > 25*time.Minute) || w.dispatched != 1 || c.state.Lease == nil || w.secret == "" {
+						t.Fatal("host clock changed cancellation or cleanup", w.events)
+					}
+				})
+			}
+		}
 	}
 }
 

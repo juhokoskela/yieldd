@@ -79,7 +79,7 @@ func (f *fakeWorld) dispatch(_ context.Context, l *lease, _ string) (int64, erro
 	if f.beforeDispatch != nil {
 		f.beforeDispatch()
 	}
-	f.run = &workflowRun{ID: 99, DisplayTitle: "Bootstrap " + l.Name, Status: "queued"}
+	f.run = &workflowRun{ID: 99, DisplayTitle: "Bootstrap " + l.Name, Status: "queued", CreatedAt: time.Unix(100000, 0), observedAt: time.Unix(100000, 0)}
 	if f.dispatchErr != nil {
 		return 0, f.dispatchErr
 	}
@@ -442,7 +442,7 @@ func TestQueuedBootstrapDeadlineRetainsLeaseUntilTermination(t *testing.T) {
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	c.now = func() time.Time { return time.Unix(100000, 0).Add(26 * time.Minute) }
+	w.run.observedAt = w.run.CreatedAt.Add(26 * time.Minute)
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}

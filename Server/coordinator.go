@@ -160,10 +160,7 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 			return false, err
 		}
 		if run == nil {
-			if c.now().Sub(l.Created) > 5*time.Minute {
-				return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, no replacement dispatched", l.Name)
-			}
-			return false, nil
+			return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, retry reconciliation later without redispatching", l.Name)
 		}
 	} else {
 		run, err = c.bootstrap.getRun(ctx, l.RunID)
@@ -185,8 +182,14 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 	}
 	if run.Status != "completed" {
 		// Queue time is not covered by the workflow job timeout. Do not leave a queued bootstrap indefinitely.
-		if !recoverOnly && c.now().Sub(l.Created) <= 25*time.Minute {
-			return false, nil
+		if !recoverOnly {
+			age, err := run.age()
+			if err != nil {
+				return false, err
+			}
+			if age <= 25*time.Minute {
+				return false, nil
+			}
 		}
 		err := c.bootstrap.cancelRun(ctx, l.RunID)
 		if err == nil {
