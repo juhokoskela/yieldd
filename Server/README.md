@@ -32,13 +32,13 @@ The state directory is created with mode `0700`; existing permissive directories
 
 ## Lifecycle and recovery
 
-The service records intent before registration and dispatch. It uploads an encrypted, uniquely named GitHub secret, then dispatches the infrastructure workflow with only the runner name and fallback labels. Run discovery matches the unique bootstrap title and retains its numeric run ID. It never redispatches an uncertain request.
+The service records intent before registration and dispatch. It uploads an encrypted, uniquely named GitHub secret, then clears the local JIT value and records dispatch intent in one write. Dispatch inputs contain only the runner name and fallback labels. The request enables [`return_run_details`](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event), and the service persists the returned run ID. Title-based discovery is reserved for lost responses or a crash before that ID was saved. It never redispatches an uncertain request.
 
 SIGINT, SIGTERM, and SIGHUP stop the coordinator without canceling a running bootstrap. Restart with the same arguments and state directory to resume reconciliation. GitHub continues receiving the workload's logs and result independently of the coordinator.
 
-The bootstrap supervisor has a 15-minute execution limit. The coordinator requests cancellation after 25 minutes from provisioning intent, including time spent queued for fallback capacity. It waits for terminal workflow state before deleting credentials or an idle registration. Cleanup failures retain the lease. The infrastructure workflow supplies host disposal; the coordinator cannot verify a third-party provider's disposal guarantees.
+The bootstrap supervisor has a 15-minute execution limit. The coordinator requests cancellation after 25 minutes from provisioning intent, including time spent queued for fallback capacity. After an accepted or ambiguous dispatch, it waits for terminal workflow state before deleting credentials or an idle registration. A cancellation conflict triggers a fresh status read. Before any deletion, it persists cleanup intent and the known conclusion; every restart resumes cleanup, never provisioning, for that lease. Cleanup failures retain the lease. The infrastructure workflow supplies host disposal; the coordinator cannot verify a third-party provider's disposal guarantees.
 
-An API or bootstrap failure stops this first version for operator attention. It does not rerun the application workflow. A missing registration response requires explicit recovery. An unconfirmed dispatch remains blocked after five minutes rather than starting a replacement. If GitHub never exposes a matching run, even recovery retains that obligation: investigate the dispatch before making any manual state change.
+An API or bootstrap failure stops this first version for operator attention. It does not rerun the application workflow. A missing registration response requires explicit recovery. Confirmed dispatch rejections (HTTP 400, 401, 403, 404, 422, or 429) enter cleanup without searching for a nonexistent workflow. Timeouts, server errors, and malformed success responses remain ambiguous. An unconfirmed dispatch remains blocked after five minutes rather than starting a replacement. If GitHub never exposes a matching run, even recovery retains that obligation: investigate the dispatch before making any manual state change.
 
 To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with `--recover`:
 
@@ -52,6 +52,8 @@ go run . \
 ```
 
 Recovery does not delete the scale set or cancel the original application workflow. It refuses to remove a busy or mismatched runner. Changing configuration requires recovering the old state with its original arguments and choosing a separate state directory. Never delete an active lease to force a retry.
+
+This revision removes the prototype's `secret_stored` state field. Recover any outstanding lease with the previous binary before upgrading. Files containing the removed field are rejected rather than silently reinterpreted; a cleared state file remains compatible.
 
 ## Validation status
 

@@ -34,7 +34,30 @@ type workflowRun struct {
 type apiError struct{ status int }
 
 func (e *apiError) Error() string { return fmt.Sprintf("GitHub API returned HTTP %d", e.status) }
-func notFound(err error) bool     { var e *apiError; return errors.As(err, &e) && e.status == 404 }
+
+func hasHTTPStatus(err error, status int) bool {
+	var e *apiError
+	return errors.As(err, &e) && e.status == status
+}
+
+func dispatchRejected(err error) bool {
+	var e *apiError
+	if !errors.As(err, &e) {
+		return false
+	}
+	// Only explicit client rejections establish that no workflow was queued.
+	// Timeouts, redirects, server failures, and invalid success responses remain ambiguous.
+	switch e.status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *workflowRun) matches(l *lease) bool {
+	return r != nil && r.ID > 0 && (l.RunID == 0 || r.ID == l.RunID) && r.DisplayTitle == "Bootstrap "+l.Name
+}
 
 type githubAPI struct {
 	client                      *http.Client
@@ -114,17 +137,28 @@ func (g *githubAPI) putSecret(ctx context.Context, name, value string) error {
 
 func (g *githubAPI) deleteSecret(ctx context.Context, name string) error {
 	err := g.request(ctx, "DELETE", g.path("secrets/"+name), nil, nil)
-	if notFound(err) {
+	if hasHTTPStatus(err, http.StatusNotFound) {
 		return nil
 	}
 	return err
 }
 
-func (g *githubAPI) dispatch(ctx context.Context, l *lease, fallback string) error {
-	return g.request(ctx, "POST", g.path("workflows/runner-bootstrap.yml/dispatches"), struct {
-		Ref    string            `json:"ref"`
-		Inputs map[string]string `json:"inputs"`
-	}{"main", map[string]string{"runner-name": l.Name, "fallback-runner": fallback}}, nil)
+func (g *githubAPI) dispatch(ctx context.Context, l *lease, fallback string) (int64, error) {
+	var result struct {
+		RunID int64 `json:"workflow_run_id"`
+	}
+	err := g.request(ctx, "POST", g.path("workflows/runner-bootstrap.yml/dispatches"), struct {
+		Ref              string            `json:"ref"`
+		Inputs           map[string]string `json:"inputs"`
+		ReturnRunDetails bool              `json:"return_run_details"`
+	}{"main", map[string]string{"runner-name": l.Name, "fallback-runner": fallback}, true}, &result)
+	if err != nil {
+		return 0, err
+	}
+	if result.RunID <= 0 {
+		return 0, errors.New("dispatch response lacks a valid workflow run ID")
+	}
+	return result.RunID, nil
 }
 
 func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error) {
@@ -138,13 +172,13 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 			return nil, err
 		}
 		for _, run := range result.Runs {
-			if run.DisplayTitle == "Bootstrap "+l.Name {
-				if match != nil && match.ID != run.ID {
-					return nil, errors.New("multiple bootstrap runs match the provisioning lease")
-				}
-				copy := run
-				match = &copy
+			if run.DisplayTitle != "Bootstrap "+l.Name {
+				continue
 			}
+			if match != nil && match.ID != run.ID {
+				return nil, errors.New("multiple bootstrap runs match the provisioning lease")
+			}
+			match = &run
 		}
 		if len(result.Runs) < 100 {
 			return match, nil
@@ -171,7 +205,7 @@ func (g *githubAPI) runnerBusy(ctx context.Context, repository string, id int) (
 		Busy *bool `json:"busy"`
 	}
 	err := g.request(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runners/%d", repository, id), nil, &runner)
-	if notFound(err) {
+	if hasHTTPStatus(err, http.StatusNotFound) {
 		return false, nil
 	}
 	if err != nil {

@@ -82,20 +82,21 @@ func TestCredentialAndDispatchHTTPContract(t *testing.T) {
 				return
 			}
 			var body struct {
-				Ref    string
-				Inputs map[string]string
+				Ref              string
+				Inputs           map[string]string
+				ReturnRunDetails bool `json:"return_run_details"`
 			}
 			if err := json.Unmarshal(data, &body); err != nil {
 				t.Error(err)
 				return
 			}
-			if body.Ref != "main" || len(body.Inputs) != 2 || body.Inputs["runner-name"] != l.Name || body.Inputs["fallback-runner"] != `["self-hosted","disposable"]` {
+			if body.Ref != "main" || !body.ReturnRunDetails || len(body.Inputs) != 2 || body.Inputs["runner-name"] != l.Name || body.Inputs["fallback-runner"] != `["self-hosted","disposable"]` {
 				t.Error(string(data))
 			}
 			if strings.Contains(string(data), "private-jit") || strings.Contains(string(data), "server-only-token") {
 				t.Error("credential exposed in dispatch")
 			}
-			w.WriteHeader(204)
+			fmt.Fprint(w, `{"workflow_run_id":99,"run_url":"https://api.github.com/repos/example/infrastructure/actions/runs/99","html_url":"https://github.com/example/infrastructure/actions/runs/99"}`)
 		case "DELETE":
 			if r.URL.Path != "/repos/example/infrastructure/actions/secrets/"+l.secretName() {
 				t.Error(r.URL.Path)
@@ -108,8 +109,8 @@ func TestCredentialAndDispatchHTTPContract(t *testing.T) {
 	if err := api.putSecret(t.Context(), l.secretName(), "private-jit"); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.dispatch(t.Context(), l, `["self-hosted","disposable"]`); err != nil {
-		t.Fatal(err)
+	if id, err := api.dispatch(t.Context(), l, `["self-hosted","disposable"]`); err != nil || id != 99 {
+		t.Fatal(id, err)
 	}
 	if err := api.deleteSecret(t.Context(), l.secretName()); err != nil {
 		t.Fatal(err)
@@ -130,7 +131,7 @@ func TestDispatchDoesNotRetryOrFollowRedirects(t *testing.T) {
 				w.WriteHeader(status)
 				fmt.Fprint(w, "private-jit server-only-token")
 			})
-			err := api.dispatch(t.Context(), &lease{Name: fixtureRunner}, `"ubuntu-24.04"`)
+			_, err := api.dispatch(t.Context(), &lease{Name: fixtureRunner}, `"ubuntu-24.04"`)
 			if err == nil || calls != 1 {
 				t.Fatal(calls, err)
 			}
@@ -207,7 +208,42 @@ func TestResponseSizeAndCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := api.dispatch(ctx, &lease{Name: fixtureRunner}, `"ubuntu-24.04"`); !errors.Is(err, context.Canceled) {
+	if _, err := api.dispatch(ctx, &lease{Name: fixtureRunner}, `"ubuntu-24.04"`); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+func TestDispatchRejectionClassification(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		rejected bool
+	}{
+		{400, true}, {401, true}, {403, true}, {404, true}, {422, true}, {429, true},
+		{302, false}, {408, false}, {499, false}, {500, false}, {502, false}, {503, false}, {504, false},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status) })
+			id, err := api.dispatch(t.Context(), &lease{Name: fixtureRunner}, testConfig.Fallback)
+			if err == nil || id != 0 || dispatchRejected(fmt.Errorf("dispatch: %w", err)) != tc.rejected {
+				t.Fatal(id, err)
+			}
+		})
+	}
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded, io.ErrUnexpectedEOF} {
+		if dispatchRejected(err) {
+			t.Fatal("ambiguous transport error treated as rejection", err)
+		}
+	}
+}
+
+func TestInvalidDispatchSuccessRemainsAmbiguous(t *testing.T) {
+	for _, body := range []string{"", `{}`, `null`, `{"workflow_run_id":0}`, `{"workflow_run_id":-1}`, `{"workflow_run_id":"99"}`, `{"workflow_run_id":99`} {
+		t.Run(body, func(t *testing.T) {
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })
+			id, err := api.dispatch(t.Context(), &lease{Name: fixtureRunner}, testConfig.Fallback)
+			if err == nil || id != 0 || dispatchRejected(err) {
+				t.Fatal(id, err)
+			}
+		})
 	}
 }

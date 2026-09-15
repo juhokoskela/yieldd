@@ -62,7 +62,7 @@ func run() error {
 		return &sdkError{"initialize client", err}
 	}
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
-		Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
 	worker := &coordinator{lifetime: ctx, state: saved, save: store.save, runners: client, bootstrap: api, now: time.Now, logger: slog.Default()}
 	if recoverOnly {

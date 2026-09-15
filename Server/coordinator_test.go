@@ -28,6 +28,10 @@ type fakeWorld struct {
 	generateErr, dispatchErr, secretErr, deleteErr error
 	busy                                           bool
 	beforeGenerate, beforeDispatch                 func()
+	cancelErr                                      error
+	beforeCancel                                   func()
+	findCalls, getCalls                            int
+	getErr                                         error
 }
 
 func (f *fakeWorld) GenerateJitRunnerConfig(_ context.Context, s *scaleset.RunnerScaleSetJitRunnerSetting, id int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
@@ -65,20 +69,43 @@ func (f *fakeWorld) deleteSecret(context.Context, string) error {
 	f.secret = ""
 	return nil
 }
-func (f *fakeWorld) dispatch(_ context.Context, l *lease, _ string) error {
+func (f *fakeWorld) dispatch(_ context.Context, l *lease, _ string) (int64, error) {
 	f.events = append(f.events, "dispatch")
 	f.dispatched++
 	if f.beforeDispatch != nil {
 		f.beforeDispatch()
 	}
 	f.run = &workflowRun{ID: 99, DisplayTitle: "Bootstrap " + l.Name, Status: "queued"}
-	return f.dispatchErr
+	if f.dispatchErr != nil {
+		return 0, f.dispatchErr
+	}
+	return f.run.ID, nil
 }
-func (f *fakeWorld) findRun(context.Context, *lease) (*workflowRun, error) { return f.run, nil }
-func (f *fakeWorld) getRun(context.Context, int64) (*workflowRun, error)   { return f.run, nil }
+func (f *fakeWorld) findRun(context.Context, *lease) (*workflowRun, error) {
+	f.findCalls++
+	if f.run == nil {
+		return nil, nil
+	}
+	copy := *f.run
+	return &copy, nil
+}
+func (f *fakeWorld) getRun(context.Context, int64) (*workflowRun, error) {
+	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	if f.run == nil {
+		return nil, nil
+	}
+	copy := *f.run
+	return &copy, nil
+}
 func (f *fakeWorld) cancelRun(context.Context, int64) error {
 	f.events = append(f.events, "cancel")
-	return nil
+	if f.beforeCancel != nil {
+		f.beforeCancel()
+	}
+	return f.cancelErr
 }
 func (f *fakeWorld) runnerBusy(context.Context, string, int) (bool, error) { return f.busy, nil }
 
@@ -115,7 +142,7 @@ func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
 	}
 	w.beforeDispatch = func() {
 		s, err := store.load(testConfig)
-		if err != nil || !s.Lease.DispatchIntent || !s.Lease.SecretStored || s.Lease.JIT != "" {
+		if err != nil || !s.Lease.DispatchIntent || s.Lease.JIT != "" {
 			t.Fatal("dispatch intent not durable", err)
 		}
 	}
@@ -136,6 +163,10 @@ func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
 	if w.dispatched != 1 {
 		t.Fatal("duplicate dispatch", w.dispatched)
 	}
+	saved, err := store.load(testConfig)
+	if err != nil || saved.Lease.RunID != 99 || w.findCalls != 0 || w.getCalls != 3 {
+		t.Fatal("ordinary dispatch did not use its persisted run ID", err, w.findCalls, w.getCalls)
+	}
 }
 
 func TestRestartAfterLostDispatchResponseReconcilesWithoutRedispatch(t *testing.T) {
@@ -154,6 +185,9 @@ func TestRestartAfterLostDispatchResponseReconcilesWithoutRedispatch(t *testing.
 	}
 	if c.state.Lease.RunID != 99 || w.dispatched != 1 {
 		t.Fatal("lost response caused redispatch")
+	}
+	if w.findCalls != 1 {
+		t.Fatal("lost response did not use run discovery")
 	}
 }
 
@@ -328,7 +362,7 @@ func TestPersistenceFailurePreventsRegistration(t *testing.T) {
 }
 
 func TestEveryPreDispatchPersistenceBarrierPreventsDispatch(t *testing.T) {
-	for failAt := 1; failAt <= 4; failAt++ {
+	for failAt := 1; failAt <= 3; failAt++ {
 		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
 			c, w, store := newFixture(t)
 			failure := errors.New("disk full")

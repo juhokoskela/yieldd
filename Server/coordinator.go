@@ -20,7 +20,7 @@ type runnerAPI interface {
 type bootstrapAPI interface {
 	putSecret(context.Context, string, string) error
 	deleteSecret(context.Context, string) error
-	dispatch(context.Context, *lease, string) error
+	dispatch(context.Context, *lease, string) (int64, error)
 	findRun(context.Context, *lease) (*workflowRun, error)
 	getRun(context.Context, int64) (*workflowRun, error)
 	cancelRun(context.Context, int64) error
@@ -102,27 +102,29 @@ func (c *coordinator) prepare(ctx context.Context) error {
 	if l.RunnerID == 0 {
 		return errors.New("registration outcome is unknown; run with --recover before provisioning again")
 	}
-	if !l.SecretStored {
-		if l.JIT == "" {
-			return errors.New("JIT configuration is missing; run with --recover")
-		}
-		if err := c.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
-			return fmt.Errorf("store bootstrap credential: %w", err)
-		}
-		l.SecretStored = true
-		l.JIT = ""
-		if err := c.save(c.state); err != nil {
-			return err
-		}
+	if l.JIT == "" {
+		return errors.New("JIT configuration is missing; run with --recover")
 	}
+	if err := c.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
+		return fmt.Errorf("store bootstrap credential: %w", err)
+	}
+	l.JIT = ""
 	l.DispatchIntent = true
 	if err := c.save(c.state); err != nil {
 		return err
 	}
-	if err := c.bootstrap.dispatch(ctx, l, c.state.Config.Fallback); err != nil {
+	runID, err := c.bootstrap.dispatch(ctx, l, c.state.Config.Fallback)
+	if err != nil {
+		if dispatchRejected(err) {
+			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover to clean up: %w", err), c.beginCleanup("rejected"))
+		}
 		return fmt.Errorf("dispatch outcome is uncertain; restart to reconcile, not redispatch: %w", err)
 	}
-	c.logger.Info("Bootstrap dispatched", "runner", l.Name, "infrastructure", c.state.Config.Infrastructure)
+	l.RunID = runID
+	if err := c.save(c.state); err != nil {
+		return fmt.Errorf("record dispatched bootstrap: %w", err)
+	}
+	c.logger.Info("Bootstrap dispatched", "runner", l.Name, "run", runID, "infrastructure", c.state.Config.Infrastructure)
 	return nil
 }
 
@@ -131,9 +133,15 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 	if l == nil {
 		return true, nil
 	}
+	if l.CleanupIntent {
+		return c.finishCleanup(ctx, recoverOnly)
+	}
 	if !l.DispatchIntent {
 		if recoverOnly {
-			return true, c.cleanup(ctx)
+			if err := c.beginCleanup(""); err != nil {
+				return false, err
+			}
+			return c.finishCleanup(ctx, recoverOnly)
 		}
 		return false, c.prepare(ctx)
 	}
@@ -150,41 +158,86 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 			}
 			return false, nil
 		}
-		l.RunID = run.ID
-		if err := c.save(c.state); err != nil {
-			return false, err
-		}
 	} else {
 		run, err = c.bootstrap.getRun(ctx, l.RunID)
 		if err != nil {
 			return false, err
 		}
 	}
-	if run == nil || run.ID <= 0 || run.ID != l.RunID || run.DisplayTitle != "Bootstrap "+l.Name {
+	if !run.matches(l) {
 		return false, errors.New("bootstrap run identity does not match its lease")
+	}
+	if l.RunID == 0 {
+		l.RunID = run.ID
+		if err := c.save(c.state); err != nil {
+			return false, err
+		}
 	}
 	if run.Status != "completed" {
 		// Queue time is not covered by the workflow job timeout. Do not leave a queued bootstrap indefinitely.
-		if recoverOnly || c.now().Sub(l.Created) > 25*time.Minute {
-			if err := c.bootstrap.cancelRun(ctx, l.RunID); err != nil {
-				return false, fmt.Errorf("cancel bootstrap: %w", err)
-			}
-			c.logger.Info("Bootstrap cancellation requested; waiting for terminal state", "run", l.RunID)
+		if !recoverOnly && c.now().Sub(l.Created) <= 25*time.Minute {
+			return false, nil
 		}
-		return false, nil
+		err := c.bootstrap.cancelRun(ctx, l.RunID)
+		if err == nil {
+			c.logger.Info("Bootstrap cancellation requested; waiting for terminal state", "run", l.RunID)
+			return false, nil
+		}
+		if !hasHTTPStatus(err, 409) {
+			return false, fmt.Errorf("cancel bootstrap: %w", err)
+		}
+		run, err = c.bootstrap.getRun(ctx, l.RunID)
+		if err != nil {
+			return false, fmt.Errorf("recheck bootstrap after cancellation conflict: %w", err)
+		}
+		if !run.matches(l) {
+			return false, errors.New("bootstrap run identity does not match its lease")
+		}
+		if run.Status != "completed" {
+			return false, nil
+		}
 	}
+	if err := c.beginCleanup(run.Conclusion); err != nil {
+		return false, err
+	}
+	return c.finishCleanup(ctx, recoverOnly)
+}
+
+func (c *coordinator) beginCleanup(conclusion string) error {
+	l := c.state.Lease
+	if l.CleanupIntent {
+		return nil
+	}
+	nextLease := *l
+	nextLease.CleanupIntent = true
+	nextLease.Conclusion = conclusion
+	nextLease.JIT = ""
+	next := *c.state
+	next.Lease = &nextLease
+	if err := c.save(&next); err != nil {
+		return fmt.Errorf("persist cleanup intent: %w", err)
+	}
+	*l = nextLease
+	return nil
+}
+
+func (c *coordinator) finishCleanup(ctx context.Context, recoverOnly bool) (bool, error) {
+	l := c.state.Lease
 	if err := c.cleanup(ctx); err != nil {
 		return false, err
 	}
-	c.logger.Info("Bootstrap cleaned up", "run", run.ID, "conclusion", run.Conclusion)
-	if run.Conclusion != "success" && !recoverOnly {
-		return true, fmt.Errorf("bootstrap %d concluded %s; stopped after cleanup rather than automatically retrying the workload", run.ID, run.Conclusion)
+	c.logger.Info("Bootstrap cleaned up", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion)
+	if l.RunID != 0 && l.Conclusion != "success" && !recoverOnly {
+		return true, fmt.Errorf("bootstrap %d concluded %s; stopped after cleanup rather than automatically retrying the workload", l.RunID, l.Conclusion)
 	}
 	return true, nil
 }
 
 func (c *coordinator) cleanup(ctx context.Context) error {
 	l := c.state.Lease
+	if !l.CleanupIntent {
+		return errors.New("cleanup requires a persisted cleanup intent")
+	}
 	runner, err := c.runners.GetRunnerByName(ctx, l.Name)
 	if err != nil {
 		return &sdkError{"find runner for cleanup", err}
