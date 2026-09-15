@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -237,6 +238,61 @@ func TestRejectedDispatchRecoversAfterStateReload(t *testing.T) {
 				t.Fatal("rejected attempt was not cleaned up exactly once")
 			}
 		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestDispatchCancellationTracksPayloadConsumption(t *testing.T) {
+	for _, consumed := range []int{0, 1, -1} {
+		for _, recoverOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("consumed=%d/recover=%v", consumed, recoverOnly), func(t *testing.T) {
+				c, w, store := newFixture(t)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				var body io.ReadCloser
+				api := &githubAPI{base: "https://example.invalid", client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					body = r.Body
+					switch consumed {
+					case 1:
+						if _, err := io.ReadFull(body, make([]byte, 1)); err != nil {
+							t.Fatal(err)
+						}
+					case -1:
+						if _, err := io.Copy(io.Discard, body); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cancel()
+					return nil, r.Context().Err()
+				})}}
+				c.bootstrap = bootstrapWithDispatchAPI{bootstrapAPI: w, api: api}
+				if _, err := c.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, context.Canceled) {
+					t.Fatal("lost cancellation identity", err)
+				}
+				if n, _ := body.Read(make([]byte, 1)); n != 0 {
+					t.Fatal("transport could consume payload after cancellation was classified")
+				}
+				saved, err := store.load(testConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if saved.Lease.CleanupIntent != (consumed == 0) {
+					t.Fatal("cleanup intent does not reflect whether dispatch could have been sent")
+				}
+				c.state = saved
+				done, err := c.reconcile(t.Context(), recoverOnly)
+				if consumed == 0 {
+					if err != nil || !done || c.state.Lease != nil || w.runner != nil || w.secret != "" || w.findCalls != 0 {
+						t.Fatal("definitely unattempted dispatch did not recover directly", done, err)
+					}
+				} else if err == nil || done || c.state.Lease == nil || w.runner == nil || w.secret == "" {
+					t.Fatal("uncertain dispatch was cleaned up", done, err)
+				}
+			})
+		}
 	}
 }
 

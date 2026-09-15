@@ -122,6 +122,10 @@ func (c *coordinator) prepare(ctx context.Context) error {
 	}
 	runID, err := c.bootstrap.dispatch(ctx, l, c.state.Config.Fallback)
 	if err != nil {
+		var notSent *requestNotSent
+		if errors.As(err, &notSent) {
+			return errors.Join(err, c.beginCleanup(""))
+		}
 		if dispatchRejected(err) {
 			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover to clean up: %w", err), c.beginCleanup("rejected"))
 		}

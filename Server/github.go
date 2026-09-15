@@ -97,8 +97,18 @@ func (g *githubAPI) requestWithHeaders(ctx context.Context, method, path string,
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	request.Header.Set("Content-Type", "application/json")
+	var payload *requestPayload
+	if len(data) > 0 {
+		payload = &requestPayload{reader: bytes.NewReader(data)}
+		request.Body = payload
+		request.GetBody = nil
+	}
 	response, err := g.client.Do(request)
+	unread := payload != nil && payload.closeUnread()
 	if err != nil {
+		if unread {
+			return nil, &requestNotSent{fmt.Errorf("GitHub request payload was not sent: %w", err)}
+		}
 		return nil, fmt.Errorf("GitHub request failed: %w", err)
 	}
 	defer response.Body.Close()

@@ -42,6 +42,8 @@ An API or bootstrap failure stops this first version for operator attention. It 
 
 If a recorded workflow returns 404, cleanup requires the registration API to independently confirm that its runner is absent. The coordinator retains an unknown conclusion rather than claiming success. If the runner still exists, restore workflow access or verify termination and remove that registration before retrying recovery. A missing workflow alone does not prove that execution stopped.
 
+If dispatch fails before the HTTP transport consumes any payload bytes, the coordinator closes the body against late reads and persists cleanup intent. Once the transport has consumed any bytes, a cancellation or connection error remains ambiguous, even if delivery may have failed. It never treats a context error alone as evidence that dispatch did not happen.
+
 To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with `--recover`:
 
 ```sh
