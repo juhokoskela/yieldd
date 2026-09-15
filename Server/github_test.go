@@ -1,0 +1,213 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/nacl/box"
+)
+
+const fixtureRunner = "yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef"
+
+func testAPI(t *testing.T, handler http.HandlerFunc) *githubAPI {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &githubAPI{base: server.URL, token: "server-only-token", infrastructure: "example/infrastructure", client: client}
+}
+
+func TestCredentialAndDispatchHTTPContract(t *testing.T) {
+	public, private, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &lease{Name: fixtureRunner, Created: time.Now()}
+	// This fixture is also asserted by yieldd-infra's credential-name.test.cjs.
+	if l.secretName() != "YIELDD_JIT_0123456789ABCDEF0123456789ABCDEF" {
+		t.Fatal(l.secretName())
+	}
+	var methods []string
+	api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		if r.Header.Get("Authorization") != "Bearer server-only-token" {
+			t.Error("missing coordinator authentication")
+		}
+		switch r.Method {
+		case "GET":
+			if r.URL.Path != "/repos/example/infrastructure/actions/secrets/public-key" {
+				t.Error(r.URL.Path)
+			}
+			json.NewEncoder(w).Encode(map[string]string{"key_id": "key-1", "key": base64.StdEncoding.EncodeToString(public[:])})
+		case "PUT":
+			if r.URL.Path != "/repos/example/infrastructure/actions/secrets/"+l.secretName() {
+				t.Error(r.URL.Path)
+			}
+			var body struct {
+				KeyID string `json:"key_id"`
+				Value string `json:"encrypted_value"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+				return
+			}
+			encrypted, err := base64.StdEncoding.DecodeString(body.Value)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			plaintext, ok := box.OpenAnonymous(nil, encrypted, public, private)
+			if !ok || string(plaintext) != "private-jit" || body.KeyID != "key-1" {
+				t.Error("invalid sealed credential")
+			}
+			w.WriteHeader(201)
+		case "POST":
+			if r.URL.Path != "/repos/example/infrastructure/actions/workflows/runner-bootstrap.yml/dispatches" {
+				t.Error(r.URL.Path)
+			}
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			var body struct {
+				Ref    string
+				Inputs map[string]string
+			}
+			if err := json.Unmarshal(data, &body); err != nil {
+				t.Error(err)
+				return
+			}
+			if body.Ref != "main" || len(body.Inputs) != 2 || body.Inputs["runner-name"] != l.Name || body.Inputs["fallback-runner"] != `["self-hosted","disposable"]` {
+				t.Error(string(data))
+			}
+			if strings.Contains(string(data), "private-jit") || strings.Contains(string(data), "server-only-token") {
+				t.Error("credential exposed in dispatch")
+			}
+			w.WriteHeader(204)
+		case "DELETE":
+			if r.URL.Path != "/repos/example/infrastructure/actions/secrets/"+l.secretName() {
+				t.Error(r.URL.Path)
+			}
+			w.WriteHeader(404)
+		default:
+			t.Error(r.Method)
+		}
+	})
+	if err := api.putSecret(t.Context(), l.secretName(), "private-jit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.dispatch(t.Context(), l, `["self-hosted","disposable"]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.deleteSecret(t.Context(), l.secretName()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(methods, ",") != "GET,PUT,POST,DELETE" {
+		t.Fatal(methods)
+	}
+}
+
+func TestDispatchDoesNotRetryOrFollowRedirects(t *testing.T) {
+	for _, status := range []int{302, 429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			calls := 0
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Location", "/redirect")
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(status)
+				fmt.Fprint(w, "private-jit server-only-token")
+			})
+			err := api.dispatch(t.Context(), &lease{Name: fixtureRunner}, `"ubuntu-24.04"`)
+			if err == nil || calls != 1 {
+				t.Fatal(calls, err)
+			}
+			if strings.Contains(err.Error(), "private-jit") || strings.Contains(err.Error(), "server-only-token") {
+				t.Fatal("response leaked", err)
+			}
+		})
+	}
+}
+
+func TestRunSearchPaginatesAndRejectsDuplicateIdentities(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		t.Run(fmt.Sprint(duplicate), func(t *testing.T) {
+			calls := 0
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Query().Get("event") != "workflow_dispatch" || r.URL.Query().Get("branch") != "main" || r.URL.Query().Get("created") == "" {
+					t.Error(r.URL.RawQuery)
+				}
+				runs := []workflowRun{{ID: 99, DisplayTitle: "Bootstrap " + fixtureRunner, Status: "queued"}}
+				if r.URL.Query().Get("page") == "1" {
+					runs = make([]workflowRun, 100)
+					if duplicate {
+						runs[0] = workflowRun{ID: 98, DisplayTitle: "Bootstrap " + fixtureRunner}
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]any{"workflow_runs": runs})
+			})
+			run, err := api.findRun(t.Context(), &lease{Name: fixtureRunner, Created: time.Now()})
+			if calls != 2 {
+				t.Fatal(calls)
+			}
+			if duplicate {
+				if err == nil {
+					t.Fatal("accepted duplicate identity")
+				}
+				return
+			}
+			if err != nil || run == nil || run.ID != 99 {
+				t.Fatal(run, err)
+			}
+		})
+	}
+}
+
+func TestRunnerStatusRequiresExplicitMatchingIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		body        string
+		status      int
+		busy, fails bool
+	}{
+		{`{"id":7,"busy":true}`, 200, true, false},
+		{`{"id":7,"busy":false}`, 200, false, false},
+		{`{}`, 200, false, true},
+		{`{"id":8,"busy":false}`, 200, false, true},
+		{`{"id":7,"busy":null}`, 200, false, true},
+		{``, 404, false, false},
+		{``, 403, false, true},
+	} {
+		t.Run(fmt.Sprint(tc.status)+tc.body, func(t *testing.T) {
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status); fmt.Fprint(w, tc.body) })
+			busy, err := api.runnerBusy(t.Context(), "example/application", 7)
+			if (err != nil) != tc.fails || busy != tc.busy {
+				t.Fatal(busy, err)
+			}
+		})
+	}
+}
+
+func TestResponseSizeAndCancellation(t *testing.T) {
+	api := testAPI(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, strings.Repeat(" ", (2<<20)+1)) })
+	if _, err := api.getRun(t.Context(), 7); err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := api.dispatch(ctx, &lease{Name: fixtureRunner}, `"ubuntu-24.04"`); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
