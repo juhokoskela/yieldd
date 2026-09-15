@@ -12,17 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/nacl/box"
 )
 
 var runnerNamePattern = regexp.MustCompile(`^yieldd-bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
-func stringsUpperUUID(name string) string {
-	return strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(name, "yieldd-bootstrap-"), "-", ""))
-}
 
 type workflowRun struct {
 	ID           int64     `json:"id"`

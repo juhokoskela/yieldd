@@ -162,22 +162,21 @@ func TestRestartUsesServerTimeForBootstrapAge(t *testing.T) {
 			for _, discover := range []bool{false, true} {
 				t.Run(fmt.Sprintf("skew=%v/age=%v/discover=%v", skew, age, discover), func(t *testing.T) {
 					c, w, store := newFixture(t)
-					c.now = func() time.Time { return serverNow.Add(skew) }
 					if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 						t.Fatal(err)
 					}
+					c.state.Lease.Created = serverNow.Add(skew)
 					if discover {
 						c.state.Lease.RunID = 0
-						if err := store.save(c.state); err != nil {
-							t.Fatal(err)
-						}
+					}
+					if err := store.save(c.state); err != nil {
+						t.Fatal(err)
 					}
 					saved, err := store.load(testConfig)
 					if err != nil {
 						t.Fatal(err)
 					}
 					c.state = saved
-					c.now = func() time.Time { return serverNow.Add(-skew) }
 					api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
 						response.Header().Set("Date", serverNow.Format(http.TimeFormat))
 						run := map[string]any{"id": 99, "display_title": "Bootstrap " + saved.Lease.Name, "status": "queued", "created_at": serverNow.Add(-age)}

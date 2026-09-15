@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,7 +26,7 @@ type lease struct {
 }
 
 func (l lease) secretName() string {
-	return "YIELDD_JIT_" + stringsUpperUUID(l.Name)
+	return "YIELDD_JIT_" + strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(l.Name, "yieldd-bootstrap-"), "-", ""))
 }
 
 type state struct {

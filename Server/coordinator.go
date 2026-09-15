@@ -34,7 +34,6 @@ type coordinator struct {
 	save      func(*state) error
 	runners   runnerAPI
 	bootstrap bootstrapAPI
-	now       func() time.Time
 	logger    *slog.Logger
 }
 
@@ -67,18 +66,15 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 	if c.state.Lease != nil {
 		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent
 		done, err := c.reconcile(ctx, recoverOnly)
-		if err != nil {
+		if err != nil || !done {
 			return 1, err
 		}
-		if done {
-			return 0, nil
-		}
-		return 1, nil
+		return 0, nil
 	}
 	if count <= 0 {
 		return 0, nil
 	}
-	c.state.Lease = &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: c.now().UTC()}
+	c.state.Lease = &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
 	if err := c.save(c.state); err != nil {
 		return 0, err
 	}

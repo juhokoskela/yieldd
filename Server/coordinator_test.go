@@ -130,7 +130,7 @@ func newFixture(t *testing.T) (*coordinator, *fakeWorld, *stateStore) {
 		t.Fatal(err)
 	}
 	world := new(fakeWorld)
-	return &coordinator{lifetime: t.Context(), state: saved, save: store.save, runners: world, bootstrap: world, now: func() time.Time { return time.Unix(100000, 0) }, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, world, store
+	return &coordinator{lifetime: t.Context(), state: saved, save: store.save, runners: world, bootstrap: world, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, world, store
 }
 
 func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
@@ -202,7 +202,6 @@ func TestUnknownDispatchNeverRedispatchesOrDropsObligation(t *testing.T) {
 		t.Fatal("expected uncertain dispatch")
 	}
 	w.run = nil
-	c.now = func() time.Time { return time.Unix(100000, 0).Add(6 * time.Minute) }
 	for range 2 {
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
 			t.Fatal("unknown dispatch should stop")

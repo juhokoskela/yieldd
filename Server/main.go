@@ -64,7 +64,7 @@ func run() error {
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	worker := &coordinator{lifetime: ctx, state: saved, save: store.save, runners: client, bootstrap: api, now: time.Now, logger: slog.Default()}
+	worker := &coordinator{lifetime: ctx, state: saved, save: store.save, runners: client, bootstrap: api, logger: slog.Default()}
 	if recoverOnly {
 		for {
 			done, err := worker.reconcile(ctx, true)
