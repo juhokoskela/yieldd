@@ -116,6 +116,10 @@ func (c *coordinator) prepare(ctx context.Context) error {
 	if err := c.save(c.state); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		// The durable save can outlast the deadline. No dispatch was attempted.
+		return errors.Join(err, c.beginCleanup(""))
+	}
 	runID, err := c.bootstrap.dispatch(ctx, l, c.state.Config.Fallback)
 	if err != nil {
 		if dispatchRejected(err) {

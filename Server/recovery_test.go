@@ -61,6 +61,85 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 	}
 }
 
+func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
+	for _, mode := range []string{"cancel", "deadline"} {
+		for _, recoverOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/recover=%v", mode, recoverOnly), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					c, w, store := newFixture(t)
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					wantErr := context.Canceled
+					if mode == "deadline" {
+						wantErr = context.DeadlineExceeded
+						w.afterSecret = func() { time.Sleep(59 * time.Second) }
+					}
+					c.save = func(s *state) error {
+						if s.Lease != nil && s.Lease.DispatchIntent && !s.Lease.CleanupIntent {
+							if mode == "deadline" {
+								time.Sleep(2 * time.Second)
+							} else {
+								cancel()
+							}
+						}
+						return store.save(s)
+					}
+					w.dispatchErr = wantErr
+					if _, err := c.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
+						t.Fatal("lost cancellation identity", err)
+					}
+					saved, err := store.load(testConfig)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if saved.Lease == nil || !saved.Lease.CleanupIntent || saved.Lease.JIT != "" || saved.Lease.RunID != 0 {
+						t.Fatal("unattempted dispatch did not persist cleanup intent")
+					}
+					if w.dispatched != 0 || w.runner == nil || w.secret == "" {
+						t.Fatal("expired context attempted dispatch or deleted resources")
+					}
+					c.state, c.save = saved, store.save
+					if done, err := c.reconcile(t.Context(), recoverOnly); err != nil || !done {
+						t.Fatal(done, err)
+					}
+					if c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 || w.findCalls != 0 {
+						t.Fatal("restart did not clean up the unattempted dispatch directly")
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestUnattemptedDispatchCleanupSaveFailureRetainsObligation(t *testing.T) {
+	c, w, store := newFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	failure := errors.New("disk full")
+	c.save = func(s *state) error {
+		if s.Lease != nil && s.Lease.CleanupIntent {
+			return failure
+		}
+		if s.Lease != nil && s.Lease.DispatchIntent {
+			cancel()
+		}
+		return store.save(s)
+	}
+	if _, err := c.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, context.Canceled) || !errors.Is(err, failure) {
+		t.Fatal("lost cancellation or persistence error", err)
+	}
+	saved, err := store.load(testConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Lease == nil || !saved.Lease.DispatchIntent || saved.Lease.CleanupIntent || c.state.Lease.CleanupIntent {
+		t.Fatal("failed cleanup save lost the durable obligation")
+	}
+	if w.dispatched != 0 || w.runner == nil || w.secret == "" {
+		t.Fatal("failed cleanup save dispatched or removed resources")
+	}
+}
+
 type bootstrapWithDispatchAPI struct {
 	bootstrapAPI
 	api *githubAPI
