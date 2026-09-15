@@ -148,7 +148,7 @@ func TestRunSearchPaginatesAndRejectsDuplicateIdentities(t *testing.T) {
 			calls := 0
 			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
 				calls++
-				if r.URL.Query().Get("event") != "workflow_dispatch" || r.URL.Query().Get("branch") != "main" || r.URL.Query().Get("created") == "" {
+				if r.URL.Query().Get("event") != "workflow_dispatch" || r.URL.Query().Get("branch") != "main" || r.URL.Query().Has("created") {
 					t.Error(r.URL.RawQuery)
 				}
 				runs := []workflowRun{{ID: 99, DisplayTitle: "Bootstrap " + fixtureRunner, Status: "queued"}}
@@ -172,6 +172,35 @@ func TestRunSearchPaginatesAndRejectsDuplicateIdentities(t *testing.T) {
 			}
 			if err != nil || run == nil || run.ID != 99 {
 				t.Fatal(run, err)
+			}
+		})
+	}
+}
+
+func TestRunSearchIgnoresCoordinatorClock(t *testing.T) {
+	serverTime := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
+		t.Run(skew.String(), func(t *testing.T) {
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Has("created") {
+					// Model the server excluding a run older than the requested lower bound.
+					lower, err := time.Parse(time.RFC3339, strings.TrimPrefix(r.URL.Query().Get("created"), ">="))
+					if err != nil {
+						t.Error(err)
+					}
+					if serverTime.Before(lower) {
+						fmt.Fprint(w, `{"workflow_runs":[]}`)
+						return
+					}
+					t.Error("run discovery must not depend on the coordinator clock")
+				}
+				json.NewEncoder(w).Encode(map[string]any{"workflow_runs": []workflowRun{
+					{ID: 99, DisplayTitle: "Bootstrap " + fixtureRunner, Status: "completed", Conclusion: "success"},
+				}})
+			})
+			run, err := api.findRun(t.Context(), &lease{Name: fixtureRunner, Created: serverTime.Add(skew)})
+			if err != nil || run == nil || run.ID != 99 {
+				t.Fatal("clock skew hid the matching bootstrap", run, err)
 			}
 		})
 	}

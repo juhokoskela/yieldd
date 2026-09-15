@@ -167,7 +167,7 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 		var result struct {
 			Runs []workflowRun `json:"workflow_runs"`
 		}
-		query := url.Values{"event": {"workflow_dispatch"}, "branch": {"main"}, "created": {">=" + l.Created.Add(-time.Minute).UTC().Format(time.RFC3339)}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
+		query := url.Values{"event": {"workflow_dispatch"}, "branch": {"main"}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
 		if err := g.request(ctx, "GET", g.path("workflows/runner-bootstrap.yml/runs?")+query.Encode(), nil, &result); err != nil {
 			return nil, err
 		}
