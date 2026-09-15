@@ -168,7 +168,8 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 		}
 	} else {
 		run, err = c.bootstrap.getRun(ctx, l.RunID)
-		if hasHTTPStatus(err, 404) {
+		var missing *missingWorkflowRun
+		if errors.As(err, &missing) {
 			return c.recoverMissingRun(ctx, recoverOnly)
 		}
 		if err != nil {

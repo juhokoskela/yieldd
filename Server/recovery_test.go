@@ -469,7 +469,7 @@ func TestMissingWorkflowRequiresAbsentRunnerBeforeCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 				c.state = saved
-				w.getErr = &apiError{status: http.StatusNotFound}
+				w.getErr = &missingWorkflowRun{id: 99}
 				if !registered {
 					w.runner = nil
 				}
@@ -485,6 +485,44 @@ func TestMissingWorkflowRequiresAbsentRunnerBeforeCleanup(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestMissingWorkflowDoesNotConfuseLostAccessWithDeletion(t *testing.T) {
+	for _, mode := range []string{"deleted", "access-lost", "invalid-list", "still-listed"} {
+		t.Run(mode, func(t *testing.T) {
+			c, w, _ := newFixture(t)
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+				t.Fatal(err)
+			}
+			w.runner = nil
+			api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/repos/example/infrastructure/actions/runs/99" || mode == "access-lost" {
+					response.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if request.URL.Path != "/repos/example/infrastructure/actions/runs" {
+					t.Error("unexpected access probe", request.URL.Path)
+				}
+				switch mode {
+				case "deleted":
+					fmt.Fprint(response, `{"workflow_runs":[]}`)
+				case "invalid-list":
+					fmt.Fprint(response, `{}`)
+				case "still-listed":
+					fmt.Fprint(response, `{"workflow_runs":[{"id":99}]}`)
+				}
+			})
+			c.bootstrap = bootstrapWithRunAPI{bootstrapAPI: w, api: api}
+			done, err := c.reconcile(t.Context(), true)
+			if mode == "deleted" {
+				if err != nil || !done || c.state.Lease != nil || w.secret != "" {
+					t.Fatal("verified deletion failed to recover", done, err)
+				}
+			} else if err == nil || done || c.state.Lease == nil || c.state.Lease.CleanupIntent || w.secret == "" {
+				t.Fatal("unverified workflow absence allowed cleanup", done, err)
+			}
+		})
 	}
 }
 

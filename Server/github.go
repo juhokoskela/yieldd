@@ -42,6 +42,10 @@ func (r *workflowRun) age() (time.Duration, error) {
 
 type apiError struct{ status int }
 
+type missingWorkflowRun struct{ id int64 }
+
+func (e *missingWorkflowRun) Error() string { return fmt.Sprintf("workflow run %d is missing", e.id) }
+
 func (e *apiError) Error() string { return fmt.Sprintf("GitHub API returned HTTP %d", e.status) }
 
 func hasHTTPStatus(err error, status int) bool {
@@ -219,6 +223,25 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 func (g *githubAPI) getRun(ctx context.Context, id int64) (*workflowRun, error) {
 	var run workflowRun
 	headers, err := g.requestWithHeaders(ctx, "GET", g.path(fmt.Sprintf("runs/%d", id)), nil, &run)
+	if hasHTTPStatus(err, http.StatusNotFound) {
+		// A private repository can mask lost access with 404. Require a successful
+		// Actions listing before classifying the individual run as missing.
+		var listing struct {
+			Runs *[]workflowRun `json:"workflow_runs"`
+		}
+		if err := g.request(ctx, "GET", g.path("runs?per_page=1"), nil, &listing); err != nil {
+			return nil, fmt.Errorf("verify workflow access: %w", err)
+		}
+		if listing.Runs == nil {
+			return nil, errors.New("invalid workflow listing while verifying access")
+		}
+		for _, listed := range *listing.Runs {
+			if listed.ID == id {
+				return nil, errors.New("workflow lookup and listing disagree; retry reconciliation")
+			}
+		}
+		return nil, &missingWorkflowRun{id}
+	}
 	if err != nil {
 		return nil, err
 	}
