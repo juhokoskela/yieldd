@@ -65,7 +65,8 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, err
 	}
 	if c.state.Lease != nil {
-		done, err := c.reconcile(ctx, false)
+		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent
+		done, err := c.reconcile(ctx, recoverOnly)
 		if err != nil {
 			return 1, err
 		}

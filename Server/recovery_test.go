@@ -526,6 +526,36 @@ func TestMissingWorkflowDoesNotConfuseLostAccessWithDeletion(t *testing.T) {
 	}
 }
 
+func TestZeroDemandCleansUpOnlyUndispatchedLeases(t *testing.T) {
+	for _, dispatched := range []bool{false, true} {
+		t.Run(fmt.Sprint(dispatched), func(t *testing.T) {
+			c, w, store := newFixture(t)
+			if !dispatched {
+				w.secretErr = errors.New("upload interrupted")
+			}
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); (err != nil) == dispatched {
+				t.Fatal("unexpected initial provisioning result", err)
+			}
+			saved, err := store.load(testConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.state, w.secretErr = saved, nil
+			count, err := c.HandleDesiredRunnerCount(t.Context(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dispatched {
+				if count != 1 || c.state.Lease == nil || w.runner == nil || w.secret == "" || w.dispatched != 1 || w.events[len(w.events)-1] == "cancel" {
+					t.Fatal("zero demand interrupted a dispatched bootstrap", w.events)
+				}
+			} else if count != 0 || c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 {
+				t.Fatal("zero demand resumed provisioning instead of cleanup", w.events)
+			}
+		})
+	}
+}
+
 func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 	for _, mode := range []string{"running", "read-failed", "wrong-id", "wrong-title", "missing", "non-conflict"} {
 		t.Run(mode, func(t *testing.T) {
