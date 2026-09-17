@@ -8,6 +8,10 @@ worker() {
     local -a statuses
     cd /opt/actions-runner
     export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/.yieldd-job-started.sh
+    if [[ -f "$state_directory/jit-config" ]]; then
+        export ACTIONS_RUNNER_INPUT_JITCONFIG="$(< "$state_directory/jit-config")"
+        rm "$state_directory/jit-config"
+    fi
     set +e
     ./run.sh 2>&1 | tail -c 1048576 > "$state_directory/output.pending"
     statuses=("${PIPESTATUS[@]}")

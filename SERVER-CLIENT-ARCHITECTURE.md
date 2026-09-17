@@ -1,6 +1,6 @@
 # Server-client architecture
 
-This document records the direction for connected mode. The [Go coordinator prototype](Server/README.md) implements one-repository Scale Set demand and hosted provisioning, pending live acceptance. Mac connections, local capacity reporting, and local-first routing are not implemented. The foreground service and installable local agent remain standalone and do not require a server.
+This document records the direction for connected mode. The [Go coordinator prototype](Server/README.md) implements one-repository Scale Set demand and hosted provisioning. The first [connected Mac slice](Docs/connected-mac-prototype.md) adds one foreground Linux ARM64 client, expiring offers, and local-first selection, pending live acceptance. Multiple devices and installed connected agents remain future work. Standalone service and agent modes do not require a server.
 
 ## Responsibilities
 
@@ -59,7 +59,7 @@ The active request also acts as an availability signal. If the Mac sleeps, loses
 
 The server should hold the GitHub App credentials. The Mac receives only the assignment-specific runner configuration and never the app private key or a long-lived GitHub token.
 
-The first server slice uses the official [Runner Scale Set Client](https://github.com/actions/scaleset/tree/v0.4.0) for long polling and scale-set JIT configuration. Until Mac clients exist, it provisions every accepted unit of demand on the configured fallback.
+The server uses the official [Runner Scale Set Client](https://github.com/actions/scaleset/tree/v0.4.0) for long polling and scale-set JIT configuration. The single-slot prototype offers work to its configured Mac when an authenticated availability poll is fresh, otherwise it uses the configured fallback. Expired unaccepted offers can fall back; issued credentials require confirmed local cleanup before that reservation is released.
 
 ## Queue semantics
 
@@ -83,7 +83,7 @@ GitHub does not treat `runs-on: yieldd` as an automatic alternative to a hosted 
 
 The label-based fallback dispatches a bootstrap workflow in `yieldd-infra` on a user-configured runner target. That job starts an ephemeral yieldd listener on the provided machine, which can receive the original queued workload. Application repositories need no routing actions or bootstrap workflows. The fallback label has no default and may target GitHub-hosted compute or another provider that permits this arrangement.
 
-Manual repository-JIT experiments established happy-path cross-repository execution on Ubuntu, plus same-repository failure, cancellation, and no-pickup behavior. The coordinator now records intent before side effects, uses per-bootstrap secrets, bounds provisioning, and reconciles registrations and bootstrap runs. Automatic Scale Set execution remains unverified. Missing pickup acknowledgement must never trigger replacement execution without reconciling the original attempt.
+Manual repository-JIT experiments established happy-path cross-repository execution on Ubuntu, plus same-repository failure, cancellation, and no-pickup behavior. Live coordinator tests subsequently confirmed automatic hosted execution, restart reconciliation, and workload failure with cleanup. The coordinator records intent before side effects, uses per-bootstrap secrets, bounds provisioning, and reconciles registrations and bootstrap runs. Missing pickup acknowledgement must never trigger replacement execution without reconciling the original attempt.
 
 ## Standalone and connected modes
 
@@ -108,4 +108,4 @@ Both modes should use the same local runner-session, cleanup, and recovery code.
 - Which fairness and admission controls are needed beyond one repository and one runner?
 - How much status and diagnostic data should Macs report to the server?
 
-The next slice adds Mac capacity and expiring provisioning offers without changing the application workflow interface.
+The current connected slice uses one manually provisioned device token and retains ambiguous local execution until the Mac reconnects and confirms cleanup. Device enrollment, automatic remediation for permanently lost Macs, and multi-device scheduling are not implemented.

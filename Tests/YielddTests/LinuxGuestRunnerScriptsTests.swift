@@ -3,6 +3,35 @@ import Testing
 @testable import Yieldd
 
 @Test
+func linuxJITIsDeliveredWithoutRegistrationOrArgumentsAndConsumedOnce() throws {
+    let fixture = try LinuxRunnerScriptFixture()
+    defer { fixture.remove() }
+    let configure = fixture.request("configure", ["--jit"], input: "private-jit\n")
+    try ProcessExecutor().execute(configure).requireSuccess(for: configure)
+    #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("config-arguments").path))
+    let jitFile = fixture.directory.appendingPathComponent("runner/.yieldd-runner/jit-config")
+    #expect(try String(contentsOf: jitFile, encoding: .utf8) == "private-jit\n")
+    let permissions = try FileManager.default.attributesOfItem(atPath: jitFile.path)[.posixPermissions] as? Int
+    #expect(permissions == 0o600)
+    #expect(try ProcessExecutor().execute(configure).terminationStatus == 2)
+    let start = fixture.request("control", ["start"])
+    try ProcessExecutor().execute(start).requireSuccess(for: start)
+    #expect(!FileManager.default.fileExists(atPath: jitFile.path))
+    #expect(try String(contentsOf: fixture.directory.appendingPathComponent("jit-received"), encoding: .utf8) == "private-jit")
+    try ProcessExecutor().execute(start).requireSuccess(for: start)
+    #expect(try String(contentsOf: fixture.directory.appendingPathComponent("starts"), encoding: .utf8) == "start\n")
+}
+
+@Test
+func linuxJITConfigurationRejectsUnusedNameAndInvalidArgumentCounts() throws {
+    let fixture = try LinuxRunnerScriptFixture()
+    defer { fixture.remove() }
+    for arguments in [[], ["--jit", "unused-name"], ["owner/repo"], ["a", "b", "c", "d"]] {
+        #expect(try ProcessExecutor().execute(fixture.request("configure", arguments)).terminationStatus == 2)
+    }
+}
+
+@Test
 func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
     let fixture = try LinuxRunnerScriptFixture()
     defer { fixture.remove() }
@@ -31,7 +60,7 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
             Issue.record("The listener has already completed")
         }, stateChanged: { _ in }).run(
             id: RunnerID(value: "yieldd-test"),
-            assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+            pickupTimeout: 300, executionTimeout: 10
         )
         Issue.record("Expected listener failure")
     } catch let error as RunnerAssignmentError {
@@ -66,6 +95,7 @@ private struct LinuxRunnerScriptFixture {
         try executable("""
             #!/bin/bash
             printf 'start\n' >> "$HOME/starts"
+            printf '%s' "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" > "$HOME/jit-received"
             "$ACTIONS_RUNNER_HOOK_JOB_STARTED"
             printf 'listener output\n'
             exit 7

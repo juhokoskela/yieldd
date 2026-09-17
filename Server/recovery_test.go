@@ -21,6 +21,11 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 					c, w, store := newFixture(t)
 					ctx, cancel := context.WithCancel(t.Context())
 					defer cancel()
+					lifetime, stop := context.WithCancel(t.Context())
+					loop := newCoordinatorLoop(lifetime, c)
+					done := make(chan struct{})
+					go func() { defer close(done); loop.run() }()
+					defer func() { stop(); <-done }()
 					wantErr := context.Canceled
 					w.afterSecret = cancel
 					if mode == "deadline" {
@@ -28,7 +33,7 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 						w.afterSecret = func() { time.Sleep(61 * time.Second) }
 					}
 					w.dispatchErr = wantErr
-					if _, err := c.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
+					if _, err := loop.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
 						t.Fatal("lost cancellation identity", err)
 					}
 					saved, err := store.load(testConfig)
@@ -71,6 +76,11 @@ func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
 					c, w, store := newFixture(t)
 					ctx, cancel := context.WithCancel(t.Context())
 					defer cancel()
+					lifetime, stop := context.WithCancel(t.Context())
+					loop := newCoordinatorLoop(lifetime, c)
+					done := make(chan struct{})
+					go func() { defer close(done); loop.run() }()
+					defer func() { stop(); <-done }()
 					wantErr := context.Canceled
 					if mode == "deadline" {
 						wantErr = context.DeadlineExceeded
@@ -87,7 +97,7 @@ func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
 						return store.save(s)
 					}
 					w.dispatchErr = wantErr
-					if _, err := c.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
+					if _, err := loop.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
 						t.Fatal("lost cancellation identity", err)
 					}
 					saved, err := store.load(testConfig)

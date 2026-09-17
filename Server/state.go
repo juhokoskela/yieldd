@@ -15,14 +15,15 @@ import (
 )
 
 type lease struct {
-	Name           string    `json:"name"`
-	Created        time.Time `json:"created"`
-	RunnerID       int       `json:"runner_id,omitempty"`
-	JIT            string    `json:"jit,omitempty"`
-	DispatchIntent bool      `json:"dispatch_intent,omitempty"`
-	RunID          int64     `json:"run_id,omitempty"`
-	CleanupIntent  bool      `json:"cleanup_intent,omitempty"`
-	Conclusion     string    `json:"conclusion,omitempty"`
+	Name           string      `json:"name"`
+	Created        time.Time   `json:"created"`
+	RunnerID       int         `json:"runner_id,omitempty"`
+	JIT            string      `json:"jit,omitempty"`
+	DispatchIntent bool        `json:"dispatch_intent,omitempty"`
+	RunID          int64       `json:"run_id,omitempty"`
+	CleanupIntent  bool        `json:"cleanup_intent,omitempty"`
+	Conclusion     string      `json:"conclusion,omitempty"`
+	Local          *localLease `json:"local,omitempty"`
 }
 
 func (l lease) secretName() string {
@@ -116,6 +117,9 @@ func (s *stateStore) load(c config) (*state, error) {
 		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0) || (l.Conclusion != "" && !l.CleanupIntent) || ((l.DispatchIntent || l.CleanupIntent) && l.JIT != "") {
 			return nil, errors.New("invalid provisioning lease")
 		}
+		if err := l.validateLocal(c.DeviceID); err != nil {
+			return nil, err
+		}
 	}
 	return &value, nil
 }
@@ -146,4 +150,28 @@ func (s *stateStore) save(value *state) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+func (l *lease) validateLocal(device string) error {
+	if l.Local == nil {
+		return nil
+	}
+	a := l.Local
+	if device == "" || a.DeviceID != device || a.Expires.IsZero() || l.DispatchIntent {
+		return errors.New("invalid local lease identity")
+	}
+	switch a.Phase {
+	case localOffered:
+		if l.RunnerID != 0 || l.JIT != "" {
+			return errors.New("unaccepted offer has credentials")
+		}
+	case localAccepted:
+	case localIssued:
+		if l.RunnerID == 0 || l.JIT != "" {
+			return errors.New("invalid issued local lease")
+		}
+	default:
+		return errors.New("invalid local lease phase")
+	}
+	return nil
 }

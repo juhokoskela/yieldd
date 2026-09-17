@@ -5,17 +5,26 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 type config struct {
 	Repository     string `json:"repository"`
 	Infrastructure string `json:"infrastructure"`
 	Fallback       string `json:"fallback"`
+	DeviceID       string `json:"device_id,omitempty"`
 }
 
 var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$`)
 
 func (c config) validate() error {
+	if c.DeviceID != "" {
+		id, err := uuid.Parse(c.DeviceID)
+		if err != nil || id.String() != c.DeviceID {
+			return errors.New("device-id must be a lowercase UUID")
+		}
+	}
 	for _, repository := range []string{c.Repository, c.Infrastructure} {
 		_, name, _ := strings.Cut(repository, "/")
 		if !repositoryPattern.MatchString(repository) || name == "." || name == ".." {

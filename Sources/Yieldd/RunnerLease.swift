@@ -146,22 +146,23 @@ final class RunnerLeaseStore: @unchecked Sendable {
             )
         }
         try data.write(to: fileURL, options: .atomic)
-        try synchronize(fileURL)
-        try synchronize(directory)
+        try synchronizeRunnerState(fileURL)
+        try synchronizeRunnerState(directory)
     }
+}
 
-    private func synchronize(_ url: URL) throws {
-        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { _ = Darwin.close(descriptor) }
-        guard Darwin.fsync(descriptor) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+func synchronizeRunnerState(_ url: URL) throws {
+    let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { _ = Darwin.close(descriptor) }
+    guard Darwin.fsync(descriptor) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 }
 
 func withRunnerOwnership(
     in directory: URL? = nil,
+    connected: Bool = false,
     operation: (RunnerLeaseStore) throws -> Void
 ) throws {
     let stateDirectory = try directory ?? yielddApplicationSupportDirectory()
@@ -184,6 +185,9 @@ func withRunnerOwnership(
     }
     defer { _ = Darwin.close(descriptor) }
 
+    if !connected, FileManager.default.fileExists(atPath: stateDirectory.appendingPathComponent("connected-runner.json").path) {
+        throw ConnectedRunnerError.recoveryRequired
+    }
     try operation(store)
 }
 

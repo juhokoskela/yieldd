@@ -130,7 +130,7 @@ func newFixture(t *testing.T) (*coordinator, *fakeWorld, *stateStore) {
 		t.Fatal(err)
 	}
 	world := new(fakeWorld)
-	return &coordinator{lifetime: t.Context(), state: saved, save: store.save, runners: world, bootstrap: world, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, world, store
+	return &coordinator{state: saved, save: store.save, runners: world, bootstrap: world, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, world, store
 }
 
 func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
@@ -438,9 +438,9 @@ func TestCancellationBeforeProvisioningHasNoSideEffects(t *testing.T) {
 func TestShutdownStillPreventsProvisioningWithDetachedCallbackContext(t *testing.T) {
 	c, w, _ := newFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	c.lifetime = ctx
+	loop := newCoordinatorLoop(ctx, c)
 	cancel()
-	if _, err := c.HandleDesiredRunnerCount(context.WithoutCancel(ctx), 1); !errors.Is(err, context.Canceled) {
+	if _, err := loop.HandleDesiredRunnerCount(context.WithoutCancel(ctx), 1); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if c.state.Lease != nil || len(w.events) != 0 {

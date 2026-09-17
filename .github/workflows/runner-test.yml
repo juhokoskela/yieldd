@@ -33,6 +33,6 @@ jobs:
           case "$EXPECTED_OUTCOME" in
             success) echo 'Runner test passed.' ;;
             failure) echo 'Intentional test failure.' >&2; exit 7 ;;
-            cancellation) echo 'Cancel this application workflow run now.'; sleep 240 ;;
+            cancellation) echo 'Cancel this application workflow run now.'; sleep 240; echo 'Cancellation window expired without cancellation.' >&2; exit 1 ;;
             *) echo 'Unknown test outcome.' >&2; exit 2 ;;
           esac
