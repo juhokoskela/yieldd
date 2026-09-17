@@ -19,6 +19,8 @@ struct ConnectedRunner {
         guard try ConnectedHTTPClient.serverURL(lease.server) == ConnectedHTTPClient.serverURL(server),
               lease.deviceID == deviceID else { throw ConnectedRunnerError.identityChanged }
         if let runner, runner != lease.offer.runner { throw ConnectedRunnerError.confirmationMismatch }
+        let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(lease.offer.runner)")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         // A restart never resumes execution, even if the acceptance response was lost.
         try backend.destroy(RunnerID(value: lease.offer.runner))
         if runner == nil { try acknowledge(lease.offer) }
@@ -28,6 +30,8 @@ struct ConnectedRunner {
     func run(_ offer: ConnectedOffer, memory: RunnerMemoryAllocation, releaseCapacity: () -> Void = {}) throws {
         guard try store.load() == nil else { throw ConnectedRunnerError.recoveryRequired }
         let id = RunnerID(value: offer.runner)
+        let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(id.value)")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         try store.save(ConnectedLease(server: server, deviceID: deviceID, offer: offer))
         var failure: (any Error)?
         do {

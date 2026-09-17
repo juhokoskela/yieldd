@@ -53,6 +53,8 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         try checkCancellation()
 
         var reservation: RunnerMemoryReservation?
+        var activity: (any NSObjectProtocol)?
+        defer { if let activity { ProcessInfo.processInfo.endActivity(activity) } }
         var lifecycle: RunnerCleanupLifecycle?
         var operationFailure: (any Error)?
         do {
@@ -62,6 +64,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
                 onBlocked: { stateChanged(.waitingForMemory(id)) }
             )
             reservation = acquiredReservation
+            activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(id.value)")
             startupDeadline?.begin()
             let registrationToken = try github.createRegistrationToken(for: repository)
             try checkCancellation()
