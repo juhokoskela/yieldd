@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
-const offerLifetime = 30 * time.Second
+const (
+	offerLifetime        = 5 * time.Second
+	availabilityLifetime = 30 * time.Second
+	registrationLifetime = 30 * time.Second
+)
 
 type localPhase string
 
@@ -25,8 +29,12 @@ type localLease struct {
 
 func (l *localLease) expired() bool {
 	remaining := time.Until(l.Expires)
+	lifetime := offerLifetime
+	if l.Phase == localAccepted {
+		lifetime = registrationLifetime
+	}
 	// Clock rollback may invalidate an offer, but never an issued assignment.
-	return remaining <= 0 || remaining > offerLifetime
+	return remaining <= 0 || remaining > lifetime
 }
 
 type deviceRequest struct {
@@ -58,7 +66,7 @@ func (c *coordinator) pollDevice(request deviceRequest) (*deviceOffer, error) {
 	if request.DeviceID != c.state.Config.DeviceID || request.DeviceID == "" {
 		return nil, &deviceError{status: http.StatusForbidden, message: "device identity does not match"}
 	}
-	c.availableUntil = time.Now().Add(offerLifetime)
+	c.availableUntil = time.Now().Add(availabilityLifetime)
 	l := c.state.Lease
 	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
 		return nil, nil
@@ -83,10 +91,12 @@ func (c *coordinator) acceptDevice(ctx context.Context, request deviceRequest) (
 	}
 	next := *l.Local
 	next.Phase = localAccepted
-	next.Expires = time.Now().UTC().Add(offerLifetime)
+	next.Expires = time.Now().UTC().Add(registrationLifetime)
+	acceptLatency := time.Since(l.Created)
 	if err := c.saveLocal(&next, l.JIT); err != nil {
 		return nil, err
 	}
+	c.logger.Info("Local offer accepted", "runner", l.Name, "device", next.DeviceID, "accept_latency", acceptLatency)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -146,6 +156,7 @@ func (c *coordinator) reconcileLocal(ctx context.Context, recoverOnly bool) (boo
 	if err := c.saveLocal(nil, l.JIT); err != nil {
 		return false, err
 	}
+	c.logger.Info("Local offer expired; using hosted fallback", "runner", l.Name, "device", c.state.Config.DeviceID, "offer_age", time.Since(l.Created))
 	if err := c.register(ctx); err != nil {
 		return false, err
 	}

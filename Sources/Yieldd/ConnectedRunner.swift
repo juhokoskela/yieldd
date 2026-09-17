@@ -10,6 +10,7 @@ struct ConnectedRunner {
     let checkCancellation: () throws -> Void
     let wait: (TimeInterval) throws -> Void
     var stateChanged: (RunnerSessionState) -> Void = { _ in }
+    var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     func recover(confirmRegistrationRemoved runner: String? = nil) throws {
         guard let lease = try store.load() else {
@@ -19,6 +20,8 @@ struct ConnectedRunner {
         guard try ConnectedHTTPClient.serverURL(lease.server) == ConnectedHTTPClient.serverURL(server),
               lease.deviceID == deviceID else { throw ConnectedRunnerError.identityChanged }
         if let runner, runner != lease.offer.runner { throw ConnectedRunnerError.confirmationMismatch }
+        let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(lease.offer.runner)")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         // A restart never resumes execution, even if the acceptance response was lost.
         try backend.destroy(RunnerID(value: lease.offer.runner))
         if runner == nil { try acknowledge(lease.offer) }
@@ -28,6 +31,8 @@ struct ConnectedRunner {
     func run(_ offer: ConnectedOffer, memory: RunnerMemoryAllocation, releaseCapacity: () -> Void = {}) throws {
         guard try store.load() == nil else { throw ConnectedRunnerError.recoveryRequired }
         let id = RunnerID(value: offer.runner)
+        let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(id.value)")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         try store.save(ConnectedLease(server: server, deviceID: deviceID, offer: offer))
         var failure: (any Error)?
         do {
@@ -39,8 +44,9 @@ struct ConnectedRunner {
             try checkCancellation()
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
                              timeout: EphemeralRunnerSession.configurationTimeout, on: id)
-            try ReservedRunnerJob(backend: backend, checkCancellation: checkCancellation, wait: wait, stateChanged: stateChanged)
-                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: 15 * 60)
+            try ReservedRunnerJob(backend: backend, checkCancellation: checkCancellation, wait: wait,
+                                  stateChanged: stateChanged, currentTime: currentTime)
+                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
         } catch {
             failure = error
         }

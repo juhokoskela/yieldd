@@ -24,6 +24,43 @@ private func singleRunnerMemoryAdmission() -> RunnerMemoryAdmission {
     )
 }
 
+@Test(arguments: ["success", "cancel", "run", "destroy"])
+func runnerSessionHoldsSleepAssertionUntilItReturns(_ stage: String) throws {
+    let id = RunnerPlatform.linux.makeTestRunnerID()
+    let events = RunnerTestEventRecorder()
+    var created = false
+    let backend = RunnerTestBackend(events: events, onCreate: {
+        try expectRunnerPreventsIdleSleep(id)
+        created = true
+    }, execOutcomes: [.success(()), stage == "run" ? .failure(TestFailure.runnerJob) : .success(())],
+        destroyError: stage == "destroy" ? TestFailure.machineCleanup : nil)
+    let github = RunnerTestGitHub(events: events, onCreateRegistrationToken: { try expectRunnerPreventsIdleSleep(id) })
+    var observedCleanup = false
+    let session = EphemeralRunnerSession(backend: backend, github: github, memoryAdmission: runnerTestMemoryAdmission(),
+        checkCancellation: {
+            if created, stage == "cancel" { throw CancellationError() }
+        }, stateChanged: { state in
+            if case .preparing = state {
+                #expect(throws: Never.self) {
+                    let assertions = try runnerSleepAssertions(id)
+                    #expect(assertions.isEmpty)
+                }
+            }
+            if case .cleaningUp = state {
+                #expect(throws: Never.self) { try expectRunnerPreventsIdleSleep(id) }
+                observedCleanup = true
+            }
+        })
+    switch stage {
+    case "success": try session.run(id: id, repository: runnerTestRepository)
+    case "cancel": #expect(throws: CancellationError.self) { try session.run(id: id, repository: runnerTestRepository) }
+    case "run": #expect(throws: TestFailure.runnerJob) { try session.run(id: id, repository: runnerTestRepository) }
+    default: #expect(throws: RunnerSessionError.self) { try session.run(id: id, repository: runnerTestRepository) }
+    }
+    #expect(observedCleanup)
+    #expect(try runnerSleepAssertions(id).isEmpty)
+}
+
 @Test(arguments: [0, -1, RunnerTestCommand.maximumTimeoutMinutes + 1])
 func rejectsInvalidRunnerTestTimeout(_ timeout: Int) {
     var command = RunnerTestCommand()

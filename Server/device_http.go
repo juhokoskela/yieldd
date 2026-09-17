@@ -22,21 +22,46 @@ type coordinatorCall struct {
 
 // One event loop owns all coordinator state, including writes that span remote API calls.
 type coordinatorLoop struct {
-	worker  *coordinator
-	ctx     context.Context
-	calls   chan coordinatorCall
-	changed chan struct{}
+	worker         *coordinator
+	ctx            context.Context
+	calls          chan coordinatorCall
+	changed        chan struct{}
+	demandObserved bool
 }
 
 func newCoordinatorLoop(ctx context.Context, worker *coordinator) *coordinatorLoop {
 	return &coordinatorLoop{worker: worker, ctx: ctx, calls: make(chan coordinatorCall), changed: make(chan struct{}, 1)}
 }
 
-func (s *coordinatorLoop) run() {
+func (s *coordinatorLoop) run() error {
+	timer := time.NewTimer(0)
+	timer.Stop()
+	defer timer.Stop()
 	for {
+		var expired <-chan time.Time
+		l := s.worker.state.Lease
+		// On restart, let GitHub retract obsolete demand before starting paid fallback.
+		if s.demandObserved && l != nil && !l.CleanupIntent && l.Local != nil && l.Local.Phase == localOffered {
+			delay := time.Until(l.Local.Expires)
+			if l.Local.expired() {
+				delay = 0
+			}
+			timer.Reset(delay)
+			expired = timer.C
+		}
 		select {
 		case <-s.ctx.Done():
-			return
+			return nil
+		case <-expired:
+			if s.ctx.Err() != nil {
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
+			_, err := s.worker.reconcileLocal(ctx, false)
+			cancel()
+			if err != nil {
+				return &provisioningError{err}
+			}
 		case call := <-s.calls:
 			ctx, cancel := context.WithTimeout(call.ctx, 60*time.Second)
 			// The upstream listener detaches callback cancellation; restore shutdown here.
@@ -52,6 +77,7 @@ func (s *coordinatorLoop) run() {
 			cancel()
 			call.result <- err
 		}
+		timer.Stop()
 	}
 }
 
@@ -71,6 +97,7 @@ func (s *coordinatorLoop) invoke(ctx context.Context, run func(context.Context) 
 func (s *coordinatorLoop) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
 	var actual int
 	err := s.invoke(ctx, func(ctx context.Context) (err error) {
+		s.demandObserved = true
 		actual, err = s.worker.HandleDesiredRunnerCount(ctx, count)
 		return err
 	})

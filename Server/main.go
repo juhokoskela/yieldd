@@ -135,7 +135,12 @@ func run() error {
 	loopContext, cancelLoop := context.WithCancel(ctx)
 	loop := newCoordinatorLoop(loopContext, worker)
 	loopDone := make(chan struct{})
-	go func() { defer close(loopDone); loop.run() }()
+	var loopErr error
+	go func() {
+		defer close(loopDone)
+		loopErr = loop.run()
+		stop()
+	}()
 	defer func() { cancelLoop(); <-loopDone }()
 	if deviceListener != nil {
 		server := &http.Server{Handler: loop.deviceHandler(deviceToken), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
@@ -156,7 +161,13 @@ func run() error {
 		slog.Info("Listening for connected Mac", "address", clientListen, "device", cfg.DeviceID)
 	}
 	slog.Info("Serving scale set", "repository", cfg.Repository, "scale_set", saved.ScaleSetID, "capacity", 1, "fallback", cfg.Fallback)
-	if err := messages.Run(ctx, loop); err != nil && !onlyCancellation(err) {
+	err = messages.Run(ctx, loop)
+	cancelLoop()
+	<-loopDone
+	if loopErr != nil && !onlyCancellation(loopErr) {
+		return loopErr
+	}
+	if err != nil && !onlyCancellation(err) {
 		var provisioning *provisioningError
 		if errors.As(err, &provisioning) {
 			return provisioning

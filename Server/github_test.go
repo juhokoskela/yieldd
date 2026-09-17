@@ -309,25 +309,6 @@ func TestRunnerStatusRequiresExplicitMatchingIdentity(t *testing.T) {
 	}
 }
 
-func TestWorkflowAgeRequiresConsistentServerTimestamps(t *testing.T) {
-	created := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
-	for _, tc := range []struct {
-		name              string
-		created, observed time.Time
-	}{
-		{"missing-creation", time.Time{}, created},
-		{"missing-response-date", created, time.Time{}},
-		{"creation-after-response", created, created.Add(-time.Minute)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			run := &workflowRun{CreatedAt: tc.created, observedAt: tc.observed}
-			if _, err := run.age(); err == nil {
-				t.Fatal("invalid server timestamps accepted")
-			}
-		})
-	}
-}
-
 func TestRunner404RequiresAccessibleRunnerList(t *testing.T) {
 	for _, mode := range []string{"absent", "access-lost", "still-listed", "invalid-list"} {
 		t.Run(mode, func(t *testing.T) {

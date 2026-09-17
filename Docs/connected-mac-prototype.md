@@ -45,6 +45,8 @@ Stop any standalone runner command or installed local agent first. `connect` use
 
 For a different coordinator host, replace the server with its HTTPS origin. `connect` needs Apple Container and the device token, but no GitHub token or `gh` executable. Broad GitHub credentials stay on the coordinator. The Mac client remains a foreground process; the coordinator can run in the foreground or through the Linux Compose deployment.
 
+While accepting and executing an assignment, and during its cleanup attempt, `connect` prevents automatic idle system sleep. It releases that assertion when the attempt returns, including on failure or cancellation. Recovery acquires it again while cleaning up a recorded assignment. Idle polling and retry backoff do not keep the Mac awake. The display can sleep; closing the lid, explicitly choosing Sleep, and critical-battery shutdown are not prevented.
+
 Once the client has completed any outstanding recovery and is polling, dispatch the existing test:
 
 ```sh
@@ -55,11 +57,13 @@ Expect `Local offer created`, `Local credentials issued`, and `Local runner clea
 
 ## Delivery and recovery
 
-An offer contains the repository, coordinator identity, runner identity, and fixed Linux ARM64 shape. It contains no executable command. Offers expire after 30 seconds on the server. Unaccepted expired offers can become hosted attempts. Acceptance starts a fresh 30-second window: if credential delivery never reaches the issued phase, expiry or zero demand triggers registration cleanup before another allocation. The scheduler observes expiry on its next demand reconciliation, so expiry does not promise immediate fallback.
+An offer contains the repository, coordinator identity, runner identity, and fixed Linux ARM64 shape. It contains no executable command. The Mac has five seconds to accept an offer; guest startup is not part of that deadline. A coordinator timer starts hosted fallback when an unaccepted offer expires, without waiting for another GitHub demand message. On restart, the coordinator first confirms current demand with GitHub so it can retract an obsolete offer. Acceptance and expiry share the same event loop, so they cannot both win. An in-progress coordinator operation can delay timer handling. Logs report acceptance latency and expired offers.
+
+Availability remains valid for 30 seconds after a poll. Acceptance starts a separate 30-second registration window: if credential delivery never reaches the issued phase, the next demand reconciliation after expiry, or zero demand, triggers registration cleanup before another allocation. Issued credentials never expire into hosted fallback.
 
 The Mac writes a private, durable journal before accepting. The coordinator persists acceptance before registration and possible credential delivery before returning the JIT payload. Credentials are issued at most once; a lost response never triggers a second execution attempt. The Mac validates the runner identity, ephemeral setting, and work directory, then delivers the payload through stdin into its guest. The guest passes it through the runner's JIT environment variable, not process arguments. The pinned runner consumes and removes that variable before starting jobs. This is not isolation from a trusted workload running under the same guest account. The host journal does not contain the JIT payload.
 
-The listener has a five-minute pickup timeout and a fifteen-minute execution timeout. Ctrl+C stops local execution and attempts guest destruction and server acknowledgement. Guest destruction must succeed before the client acknowledges completion. The coordinator then reconciles the registration, refusing to remove a busy runner. A failed job is not a failed listener: GitHub retains the workload's own conclusion.
+The listener has a five-minute pickup timeout. After job start, `connect` imposes no execution deadline; configure `timeout-minutes` in the GitHub Actions job. Ctrl+C stops local execution and attempts guest destruction and server acknowledgement. Guest destruction must succeed before the client acknowledges completion. The coordinator then reconciles the registration, refusing to remove a busy runner. A failed job is not a failed listener: GitHub retains the workload's own conclusion.
 
 Transport failures and retryable HTTP responses trigger a five-second retry delay. Before accepting more work, the client destroys any recorded guest and retries acknowledgement. It never retries acceptance or resumes the recorded listener. Restarting `connect` uses the same recovery path. Failed destruction, permanent HTTP errors, and invalid responses stop the client with unresolved recovery state retained. Standalone runner commands refuse to bypass that journal. Empty polls have a one-second client-side delay, and memory admission reports when it cannot advertise capacity.
 

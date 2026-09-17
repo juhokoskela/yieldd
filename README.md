@@ -162,6 +162,8 @@ Capacity rejection leaves abandoned leases and clones untouched. Restart with a 
 
 This is a foreground command, not a daemon. Ctrl+C, SIGTERM, and closing the terminal (SIGHUP) interrupt every active slot and attempt cleanup before `yieldd` exits. The same signals stop `agent run`. The service does not impose `runner-test`'s two-hour job timeout.
 
+Runner sessions prevent automatic idle system sleep from memory admission through provisioning, job pickup, execution, and the cleanup attempt. Each session releases its assertion when it returns, including on failure or cancellation. Waiting for memory does not keep the Mac awake. The display can sleep; this does not override lid-close sleep, explicit Sleep, or critical-battery shutdown.
+
 ## Local agent
 
 The local agent runs the same runner pool at login without keeping a terminal open. For Linux slots, run `yieldd doctor` and start the container system once before installation so Apple Container can install any required kernel components. For macOS slots, validate the template with `machine-test` first.

@@ -1,6 +1,7 @@
 const { spawn } = require('node:child_process');
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const { createReadStream } = require('node:fs');
+const { createServer } = require('node:http');
 const { mkdtemp, mkdir, writeFile, access, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
@@ -93,6 +94,51 @@ async function verifyArchive(path, expected) {
 }
 
 async function runListener(runner, options) {
+    options.signal.throwIfAborted();
+    const pickup = new AbortController();
+    const signal = AbortSignal.any([options.signal, pickup.signal]);
+    const path = '/' + randomBytes(32).toString('hex');
+    let timer;
+    const server = createServer({ requestTimeout: 10000, headersTimeout: 5000 }, (request, response) => {
+        response.setHeader('Connection', 'close');
+        request.resume();
+        if (request.method !== 'POST' || request.url !== path) {
+            response.writeHead(404).end();
+            return;
+        }
+        if (signal.aborted) {
+            response.writeHead(409).end();
+            return;
+        }
+        // Acknowledge only after latching pickup in supervisor state, before job steps can run.
+        clearTimeout(timer);
+        response.writeHead(204).end();
+    });
+    server.on('error', error => pickup.abort(error));
+    try {
+        await new Promise((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(0, '127.0.0.1', resolve);
+        });
+        const hook = join(runner, 'yieldd-job-started.sh');
+        await writeFile(hook, `#!/bin/sh
+exec /usr/bin/curl --fail --silent --show-error --noproxy '*' --connect-timeout 5 --max-time 10 --request POST 'http://127.0.0.1:${server.address().port}${path}'
+`, { mode: 0o700 });
+        timer = setTimeout(() => pickup.abort(new Error('No job start was observed within five minutes. This does not prove that the job never started.')), 5 * 60 * 1000);
+        await retryListener(runner, {
+            ...options, signal,
+            env: { ...options.env, ACTIONS_RUNNER_HOOK_JOB_STARTED: hook },
+        });
+    } finally {
+        clearTimeout(timer);
+        await new Promise(resolve => {
+            server.close(resolve);
+            server.closeAllConnections();
+        });
+    }
+}
+
+async function retryListener(runner, options) {
     while (true) {
         try {
             await runProcess(join(runner, 'bin/Runner.Listener'), ['run'], options);
@@ -132,8 +178,8 @@ async function bootstrap(encoded, name, signal) {
         await verifyArchive(archive, checksum);
         signal.throwIfAborted();
         await runProcess('/usr/bin/tar', ['-xzf', archive, '-C', runner], options);
-        const completedHook = join(home, 'completed.sh');
-        await writeFile(completedHook, '#!/bin/sh\n: > "$HOME/job-completed"\n', { mode: 0o700 });
+        const completedHook = join(directory, 'completed.sh');
+        await writeFile(completedHook, '#!/bin/sh\n: > "${0%/*}/job-completed"\n', { mode: 0o700 });
         console.log('Starting one nested runner. The original workflow owns its job logs and conclusion.');
         await runListener(runner, {
             ...options,
@@ -144,7 +190,7 @@ async function bootstrap(encoded, name, signal) {
                 ACTIONS_RUNNER_HOOK_JOB_COMPLETED: completedHook,
             },
         });
-        await access(join(home, 'job-completed'));
+        await access(join(directory, 'job-completed'));
         console.log('Nested runner exited after a job. Check the original workflow for its result.');
     } finally {
         await rm(directory, { recursive: true, force: true });
@@ -158,12 +204,10 @@ if (require.main === module) {
     const controller = new AbortController();
     const interrupt = () => controller.abort(new Error('Bootstrap interrupted.'));
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, interrupt);
-    const timer = setTimeout(() => controller.abort(new Error('Bootstrap exceeded its 15-minute limit.')), 15 * 60 * 1000);
     bootstrap(encoded, name, controller.signal).catch(error => {
         console.error(error.message);
         process.exitCode = 1;
     }).finally(() => {
-        clearTimeout(timer);
         for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.off(signal, interrupt);
     });
 }

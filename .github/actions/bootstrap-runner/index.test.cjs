@@ -145,6 +145,102 @@ test('cancellation during listener retry delay preserves its reason and prevents
     } finally { clearTimeout(deadline); }
 });
 
+test('listener retries do not reset the pickup deadline', { timeout: 10000 }, async t => {
+    const { runner, options, attempts } = await fakeListener(t, [2, 0]);
+    const controller = new AbortController();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.method(console, 'log', message => {
+        if (message === 'Runner listener exited with status 2; retrying in five seconds.') {
+            t.mock.timers.tick(5 * 60 * 1000);
+        }
+    });
+    try {
+        await assert.rejects(runListener(runner, { ...options, signal: controller.signal }),
+            /No job start was observed within five minutes/u);
+        assert.equal((await attempts()).length, 1);
+    } finally {
+        controller.abort();
+    }
+});
+
+for (const mode of ['idle', 'started', 'marker-removed', 'home-recreated']) {
+    const started = mode !== 'idle';
+    test(started ? `picked-up job survives an hour and remains cancellable: ${mode}` : 'idle listener stops after five minutes without pickup',
+        { timeout: 10000 }, async t => {
+        const runner = await mkdtemp(join(tmpdir(), 'yieldd-bootstrap-test-'));
+        const controller = new AbortController();
+        const reason = new Error('cancelled by test');
+        const ready = join(runner, 'ready');
+        const home = join(runner, 'home');
+        let running;
+        try {
+            await mkdir(join(runner, 'bin'));
+            await mkdir(home);
+            await writeFile(join(runner, 'bin/Runner.Listener'), `#!${process.execPath}
+                const fs = require('node:fs');
+                process.on('SIGINT', () => process.exit(0));
+                if (${started}) require('node:child_process').execFileSync(process.env.ACTIONS_RUNNER_HOOK_JOB_STARTED);
+                if (${mode === 'marker-removed'}) fs.rmSync(${JSON.stringify(join(home, 'job-started'))}, { force: true });
+                if (${mode === 'home-recreated'}) {
+                    fs.rmSync(${JSON.stringify(home)}, { recursive: true });
+                    fs.mkdirSync(${JSON.stringify(home)});
+                }
+                fs.writeFileSync('ready', String(process.pid));
+                setInterval(() => {}, 1000);
+            `, { mode: 0o700 });
+            t.mock.timers.enable({ apis: ['setTimeout'] });
+            running = runListener(runner, {
+                cwd: runner,
+                env: { HOME: home },
+                signal: controller.signal,
+            });
+            const pid = await new Promise((resolve, reject) => {
+                const { watch } = require('node:fs');
+                const finish = (error, value) => {
+                    watcher.close();
+                    error ? reject(error) : resolve(value);
+                };
+                const check = () => readFile(ready, 'utf8').then(value => {
+                    if (/^[0-9]+$/u.test(value) && Number(value) > 1) finish(null, Number(value));
+                }, () => {});
+                const watcher = watch(runner, check);
+                watcher.once('error', finish);
+                check();
+                running.then(() => finish(new Error('Listener exited before readiness')), finish);
+            });
+            const hook = await readFile(join(runner, 'yieldd-job-started.sh'), 'utf8');
+            const url = hook.match(/http:\/\/127\.0\.0\.1:[0-9]+\/[a-f0-9]+/u)[0];
+            assert.equal((await fetch(url + '/invalid', { method: 'POST' })).status, 404);
+            assert.equal((await fetch(url)).status, 404);
+            t.mock.timers.tick(5 * 60 * 1000 - 1);
+            assert.doesNotThrow(() => process.kill(pid, 0));
+            t.mock.timers.tick(1);
+            if (started) {
+                t.mock.timers.tick(60 * 60 * 1000);
+                assert.doesNotThrow(() => process.kill(pid, 0));
+                controller.abort(reason);
+                await assert.rejects(running, error => error === reason);
+            } else {
+                await assert.rejects(running, /No job start was observed within five minutes/u);
+            }
+            assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+            await assert.rejects(fetch(url, { method: 'POST', signal: AbortSignal.timeout(1000) }), /fetch failed/u);
+        } finally {
+            controller.abort(reason);
+            // Restore real timers so an unresponsive fixture still receives escalation.
+            t.mock.timers.tick(5000);
+            t.mock.timers.reset();
+            await running?.catch(() => {});
+            await rm(runner, { recursive: true, force: true });
+        }
+    });
+}
+
+test('bootstrap workflow leaves execution limits to GitHub', async () => {
+    const workflow = await readFile(join(__dirname, '../../workflows/runner-bootstrap.yml'), 'utf8');
+    assert.doesNotMatch(workflow, /timeout-minutes:/u);
+});
+
 test('cancellation escalates for a child ignoring INT and preserves its identity', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'yieldd-bootstrap-test-'));
     const controller = new AbortController();
