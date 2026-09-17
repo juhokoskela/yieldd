@@ -243,6 +243,41 @@ func TestDeviceListenerRejectsPublicCleartextAndWeakTokens(t *testing.T) {
 	}
 }
 
+func TestCoordinatorLoopBoundsDetachedCallsAndCancelsInFlightWork(t *testing.T) {
+	for _, source := range []string{"request", "shutdown"} {
+		t.Run(source, func(t *testing.T) {
+			c, _, _ := newFixture(t)
+			lifetime, stop := context.WithCancel(t.Context())
+			request, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			loop := newCoordinatorLoop(lifetime, c)
+			done := make(chan struct{})
+			go func() { defer close(done); loop.run() }()
+			defer func() { stop(); <-done }()
+			if source == "shutdown" {
+				request = context.WithoutCancel(lifetime)
+				cancel = stop
+			}
+			err := loop.invoke(request, func(ctx context.Context) error {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 60*time.Second {
+					return errors.New("callback has no bounded deadline")
+				}
+				cancel()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(5 * time.Second):
+					return errors.New("callback did not receive cancellation")
+				}
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestConcurrentAcceptsRegisterOnlyOneRunner(t *testing.T) {
 	c, w, _, request := localFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -277,11 +312,15 @@ func TestConcurrentAcceptsRegisterOnlyOneRunner(t *testing.T) {
 
 func TestDeviceRequestRejectsOversizedAndUnknownFields(t *testing.T) {
 	c, w, _, _ := localFixture(t)
-	loop := newCoordinatorLoop(t.Context(), c)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	loop := newCoordinatorLoop(ctx, c)
+	done := make(chan struct{})
+	go func() { defer close(done); loop.run() }()
+	defer func() { cancel(); <-done }()
 	token := strings.Repeat("x", 32)
 	handler := loop.deviceHandler(token)
 	for _, body := range []string{`{"device_id":"` + strings.Repeat("x", 4096) + `"}`, `{"device_id":"x","command":"execute"}`, `{} {}`} {
-		request := httptest.NewRequest("POST", "/v1/accept", strings.NewReader(body))
+		request := httptest.NewRequestWithContext(ctx, "POST", "/v1/accept", strings.NewReader(body))
 		request.Header.Set("Authorization", "Bearer "+token)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)

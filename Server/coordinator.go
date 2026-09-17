@@ -29,13 +29,13 @@ type bootstrapAPI interface {
 
 // The event loop serializes listener callbacks and device requests. The state-directory lock excludes another local owner.
 type coordinator struct {
-	lifetime       context.Context
-	state          *state
-	save           func(*state) error
-	runners        runnerAPI
-	bootstrap      bootstrapAPI
-	logger         *slog.Logger
-	availableUntil time.Time
+	state             *state
+	save              func(*state) error
+	runners           runnerAPI
+	bootstrap         bootstrapAPI
+	logger            *slog.Logger
+	availableUntil    time.Time
+	reportedLocalHold string
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
@@ -53,20 +53,16 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 			err = &provisioningError{err}
 		}
 	}()
-	// The upstream listener removes cancellation while handling messages. Restore shutdown cancellation.
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	if err := c.lifetime.Err(); err != nil {
-		return 0, err
-	}
-	stop := context.AfterFunc(c.lifetime, cancel)
-	defer stop()
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	if c.state.Lease != nil {
-		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent && (c.state.Lease.Local == nil || c.state.Lease.Local.Phase == localOffered)
+		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent && (c.state.Lease.Local == nil || c.state.Lease.Local.Phase != localIssued)
 		done, err := c.reconcile(ctx, recoverOnly)
+		if err != nil && c.state.Lease != nil && c.state.Lease.Local != nil && c.state.Lease.CleanupIntent && transientFailure(err) {
+			c.logger.Warn("Local cleanup will retry on the next reconciliation", "runner", c.state.Lease.Name, "error", err)
+			return 1, nil
+		}
 		if err != nil || !done {
 			return 1, err
 		}
@@ -76,7 +72,7 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, nil
 	}
 	c.state.Lease = &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
-	if c.state.Config.DeviceID != "" && time.Now().Before(c.availableUntil) {
+	if time.Now().Before(c.availableUntil) {
 		c.state.Lease.Local = &localLease{DeviceID: c.state.Config.DeviceID, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
 		c.availableUntil = time.Time{}
 	}
@@ -301,7 +297,7 @@ func (c *coordinator) cleanup(ctx context.Context) error {
 			return err
 		}
 		if busy {
-			return errors.New("runner is still busy; cleanup obligation retained")
+			return runnerStillBusy
 		}
 		if err := c.runners.RemoveRunner(ctx, int64(runner.ID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
 			return &sdkError{"remove runner", err}

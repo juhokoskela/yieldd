@@ -23,30 +23,6 @@ type localLease struct {
 	Expires  time.Time  `json:"expires"`
 }
 
-func (l *lease) validateLocal(device string) error {
-	if l.Local == nil {
-		return nil
-	}
-	a := l.Local
-	if device == "" || a.DeviceID != device || a.Expires.IsZero() || l.DispatchIntent || l.RunID != 0 {
-		return errors.New("invalid local lease identity")
-	}
-	switch a.Phase {
-	case localOffered:
-		if l.RunnerID != 0 || l.JIT != "" {
-			return errors.New("unaccepted offer has credentials")
-		}
-	case localAccepted:
-	case localIssued:
-		if l.RunnerID == 0 || l.JIT != "" {
-			return errors.New("invalid issued local lease")
-		}
-	default:
-		return errors.New("invalid local lease phase")
-	}
-	return nil
-}
-
 func (l *localLease) expired() bool {
 	remaining := time.Until(l.Expires)
 	// Clock rollback may invalidate an offer, but never an issued assignment.
@@ -80,7 +56,7 @@ func (e *deviceError) Error() string { return e.message }
 
 func (c *coordinator) pollDevice(request deviceRequest) (*deviceOffer, error) {
 	if request.DeviceID != c.state.Config.DeviceID || request.DeviceID == "" {
-		return nil, &deviceError{http.StatusForbidden, "device identity does not match"}
+		return nil, &deviceError{status: http.StatusForbidden, message: "device identity does not match"}
 	}
 	c.availableUntil = time.Now().Add(offerLifetime)
 	l := c.state.Lease
@@ -92,7 +68,7 @@ func (c *coordinator) pollDevice(request deviceRequest) (*deviceOffer, error) {
 
 func (c *coordinator) checkDevice(request deviceRequest) error {
 	if request.DeviceID == "" || request.DeviceID != c.state.Config.DeviceID || request.Owner != c.state.Owner || !runnerNamePattern.MatchString(request.Runner) {
-		return &deviceError{http.StatusConflict, "device or coordinator identity does not match"}
+		return &deviceError{status: http.StatusConflict, message: "device or coordinator identity does not match"}
 	}
 	return nil
 }
@@ -103,10 +79,12 @@ func (c *coordinator) acceptDevice(ctx context.Context, request deviceRequest) (
 	}
 	l := c.state.Lease
 	if l == nil || l.Name != request.Runner || l.Local == nil || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
-		return nil, &deviceError{http.StatusGone, "offer is no longer available; clean up without starting a runner"}
+		return nil, &deviceError{status: http.StatusGone, message: "offer is no longer available; clean up without starting a runner"}
 	}
-	l.Local.Phase = localAccepted
-	if err := c.save(c.state); err != nil {
+	next := *l.Local
+	next.Phase = localAccepted
+	next.Expires = time.Now().UTC().Add(offerLifetime)
+	if err := c.saveLocal(&next, l.JIT); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -116,10 +94,10 @@ func (c *coordinator) acceptDevice(ctx context.Context, request deviceRequest) (
 		return nil, err
 	}
 	credential := &deviceCredential{JIT: l.JIT}
-	l.JIT = ""
-	l.Local.Phase = localIssued
+	issued := *l.Local
+	issued.Phase = localIssued
 	// Persist possible delivery before returning credentials. Never issue them a second time.
-	if err := c.save(c.state); err != nil {
+	if err := c.saveLocal(&issued, ""); err != nil {
 		return nil, err
 	}
 	c.logger.Info("Local credentials issued", "runner", l.Name, "device", l.Local.DeviceID)
@@ -145,27 +123,53 @@ func (c *coordinator) completeDevice(ctx context.Context, request deviceRequest)
 func (c *coordinator) reconcileLocal(ctx context.Context, recoverOnly bool) (bool, error) {
 	l := c.state.Lease
 	if l.Local.Phase == localIssued {
+		c.reportLocalHold("Local assignment blocks local and hosted provisioning until the Mac confirms guest destruction")
 		if recoverOnly {
 			return false, errors.New("local credentials may be in use; reconnect the assigned Mac to destroy its guest and acknowledge cleanup")
 		}
 		return false, nil
 	}
-	if recoverOnly {
+	if recoverOnly || (l.Local.Phase == localAccepted && l.Local.expired()) {
 		if err := c.beginCleanup(""); err != nil {
 			return false, err
 		}
 		return c.finishCleanup(ctx, true)
 	}
-	if l.Local.Phase == localAccepted || !l.Local.expired() {
+	if l.Local.Phase == localAccepted {
+		c.reportLocalHold("Waiting for local acceptance to finish; undelivered credentials will be cleaned up after expiry")
+		return false, nil
+	}
+	if !l.Local.expired() {
 		return false, nil
 	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
-	l.Local = nil
-	if err := c.save(c.state); err != nil {
+	if err := c.saveLocal(nil, l.JIT); err != nil {
 		return false, err
 	}
 	if err := c.register(ctx); err != nil {
 		return false, err
 	}
 	return false, c.prepare(ctx)
+}
+
+func (c *coordinator) saveLocal(local *localLease, jit string) error {
+	nextLease := *c.state.Lease
+	nextLease.Local, nextLease.JIT = local, jit
+	next := *c.state
+	next.Lease = &nextLease
+	if err := c.save(&next); err != nil {
+		return err
+	}
+	*c.state.Lease = nextLease
+	return nil
+}
+
+func (c *coordinator) reportLocalHold(message string) {
+	l := c.state.Lease
+	identity := l.Name + "/" + string(l.Local.Phase)
+	if c.reportedLocalHold == identity {
+		return
+	}
+	c.reportedLocalHold = identity
+	c.logger.Warn(message, "runner", l.Name, "phase", l.Local.Phase)
 }

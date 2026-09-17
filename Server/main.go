@@ -81,7 +81,7 @@ func run() error {
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	worker := &coordinator{lifetime: ctx, state: saved, save: store.save, runners: client, bootstrap: api, logger: slog.Default()}
+	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: slog.Default()}
 	if recoverOnly {
 		for {
 			done, err := worker.reconcile(ctx, true)
@@ -147,7 +147,12 @@ func run() error {
 				stop()
 			}
 		}()
-		defer func() { _ = server.Close(); <-serverDone }()
+		defer func() {
+			if err := drainDeviceHTTP(server); err != nil {
+				slog.Warn("Device HTTP drain timed out", "error", err)
+			}
+			<-serverDone
+		}()
 		slog.Info("Listening for connected Mac", "address", clientListen, "device", cfg.DeviceID)
 	}
 	slog.Info("Serving scale set", "repository", cfg.Repository, "scale_set", saved.ScaleSetID, "capacity", 1, "fallback", cfg.Fallback)
@@ -160,4 +165,14 @@ func run() error {
 	}
 	slog.Info("Stopped; any active bootstrap is recorded for reconciliation on restart")
 	return nil
+}
+
+func drainDeviceHTTP(server *http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := server.Shutdown(ctx)
+	if err != nil {
+		_ = server.Close()
+	}
+	return err
 }

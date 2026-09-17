@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -40,8 +39,12 @@ func (s *coordinatorLoop) run() {
 			return
 		case call := <-s.calls:
 			ctx, cancel := context.WithTimeout(call.ctx, 60*time.Second)
+			// The upstream listener detaches callback cancellation; restore shutdown here.
 			stop := context.AfterFunc(s.ctx, cancel)
-			err := ctx.Err()
+			err := s.ctx.Err()
+			if err == nil {
+				err = ctx.Err()
+			}
 			if err == nil {
 				err = call.run(ctx)
 			}
@@ -86,10 +89,10 @@ func (s *coordinatorLoop) HandleJobCompleted(ctx context.Context, job *scaleset.
 
 func listenForDevice(address, token string) (net.Listener, error) {
 	host, _, err := net.SplitHostPort(address)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+	if err != nil || !net.ParseIP(host).IsLoopback() {
 		return nil, errors.New("client-listen must use a loopback IP; terminate remote HTTPS at a trusted local proxy")
 	}
-	if len(token) < 32 || len(token) > 256 || strings.ContainsAny(token, " \t\r\n") {
+	if len(token) < 32 || len(token) > 256 {
 		return nil, errors.New("YIELDD_CLIENT_TOKEN must contain 32 to 256 non-whitespace characters")
 	}
 	for _, character := range []byte(token) {
@@ -105,14 +108,20 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 	pollSlot := make(chan struct{}, 1)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "application/json")
 		provided := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 		if subtle.ConstantTimeCompare(expected[:], provided[:]) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/poll", "/v1/accept", "/v1/complete":
+		default:
+			http.NotFound(w, r)
 			return
 		}
 		var request deviceRequest
@@ -160,15 +169,20 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 			return
 		}
 		if err != nil {
+			if onlyCancellation(err) {
+				http.Error(w, "coordinator is stopping; retry with the same recovery state", http.StatusServiceUnavailable)
+				return
+			}
 			var rejection *deviceError
 			if errors.As(err, &rejection) {
 				http.Error(w, rejection.message, rejection.status)
 			} else {
-				s.worker.logger.Error("Device request failed; state retained for recovery", "error", err)
+				s.worker.logger.Error("Device request failed", "error", err)
 				http.Error(w, "coordinator operation failed; retain local recovery state", http.StatusServiceUnavailable)
 			}
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(response)
 	})
 }

@@ -67,12 +67,19 @@ func TestUpstreamListenerDrivesDemandAndReconciliation(t *testing.T) {
 	c, world, _ := newFixture(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	loop := newCoordinatorLoop(ctx, c)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		loop.run()
+	}()
+	defer func() { cancel(); <-done }()
 	stream := &messageStream{t: t, world: world, cancel: cancel}
 	l, err := listener.New(stream, listener.Config{ScaleSetID: 3, MaxRunners: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Run(ctx, c); !errors.Is(err, context.Canceled) {
+	if err := l.Run(ctx, loop); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(stream.acquired, []int64{42}) || !reflect.DeepEqual(stream.deleted, []int{1, 2, 3}) {

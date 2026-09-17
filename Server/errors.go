@@ -2,8 +2,39 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 )
+
+var runnerStillBusy = errors.New("runner is still busy; cleanup obligation retained")
+
+func transientFailure(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !transientFailure(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if err == context.DeadlineExceeded || err == io.EOF || err == runnerStillBusy {
+		return true
+	}
+	if _, ok := err.(net.Error); ok {
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return transientFailure(wrapped.Unwrap())
+	}
+	var api *apiError
+	return errors.As(err, &api) && (api.status == 429 || api.status >= 500)
+}
 
 func onlyCancellation(err error) bool {
 	if err == context.Canceled {

@@ -151,3 +151,27 @@ func (s *stateStore) save(value *state) error {
 	defer dir.Close()
 	return dir.Sync()
 }
+
+func (l *lease) validateLocal(device string) error {
+	if l.Local == nil {
+		return nil
+	}
+	a := l.Local
+	if device == "" || a.DeviceID != device || a.Expires.IsZero() || l.DispatchIntent {
+		return errors.New("invalid local lease identity")
+	}
+	switch a.Phase {
+	case localOffered:
+		if l.RunnerID != 0 || l.JIT != "" {
+			return errors.New("unaccepted offer has credentials")
+		}
+	case localAccepted:
+	case localIssued:
+		if l.RunnerID == 0 || l.JIT != "" {
+			return errors.New("invalid issued local lease")
+		}
+	default:
+		return errors.New("invalid local lease phase")
+	}
+	return nil
+}
