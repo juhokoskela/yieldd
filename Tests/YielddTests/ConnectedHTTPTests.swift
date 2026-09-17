@@ -16,6 +16,25 @@ func connectedHTTPUsesBearerAuthenticationAndWireIdentity() throws {
     #expect(request.contains(#""device_id":"01234567-89ab-4def-8123-456789abcdef""#))
 }
 
+@Test(arguments: [false, true])
+func connectedHTTPRoutesMacOSAndRejectsLinuxOffers(wrongPlatform: Bool) throws {
+    let platform = wrongPlatform ? "linux" : "macos"
+    let body = """
+        {"owner":"01234567-89ab-4def-8123-456789abcdef","runner":"yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef","repository":"owner/repo","platform":"\(platform)","architecture":"arm64"}
+        """
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    let original = server.client
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID,
+        token: original.token, platform: .macOS, checkCancellation: {})
+    if wrongPlatform {
+        #expect(throws: ConnectedRunnerError.invalidOffer) { try client.poll() }
+    } else {
+        #expect(try client.poll()?.runnerPlatform == .macOS)
+    }
+    #expect(server.request.contains("POST /v1/macos/poll HTTP/1.1"))
+}
+
 @Test(arguments: [302, 401, 503])
 func connectedHTTPRejectsRedirectsAndErrorsWithoutLeakingBodies(_ status: Int) throws {
     let body = "private-jit secret-token"

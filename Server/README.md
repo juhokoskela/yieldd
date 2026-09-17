@@ -1,8 +1,8 @@
 # Scale Set coordinator prototype
 
-This foreground Go service provisions fallback compute for one application repository. Application jobs use only `runs-on: yieldd`; the coordinator dispatches a bootstrap in a separate infrastructure repository. The fallback target is required and has no default.
+This Go service routes jobs for one application repository. `runs-on: yieldd` and `runs-on: yieldd-linux` target the same Linux scale set. `runs-on: yieldd-macos` targets a separate macOS scale set when enabled. Each platform uses its own user-configured fallback target, dispatched through a separate infrastructure repository.
 
-This prototype has capacity for one runner. An optional [connected Mac](../Docs/connected-mac-prototype.md) can supply that slot with an on-demand Linux ARM64 container. Otherwise, the coordinator provisions the configured fallback. An issued local assignment awaiting the Mac's cleanup acknowledgement holds the only slot, blocking hosted fallback too. An idle disconnected Mac does not hold the slot after availability expires. The installed Swift agent remains standalone; connected mode uses the foreground `yieldd connect` command.
+This prototype has capacity for one runner per enabled platform. An optional [connected Mac](../Docs/connected-mac-prototype.md) supplies Linux ARM64 containers and macOS ARM64 VMs on demand. Otherwise, the coordinator provisions that platform's fallback. An issued local assignment awaiting cleanup acknowledgement blocks its own platform, including fallback, but not the other platform. An idle disconnected Mac does not hold the slot after availability expires. The installed Swift agent remains standalone; connected mode uses the foreground `yieldd connect` command.
 
 The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scaleset/tree/v0.4.0). It scales from GitHub's assigned-job count, not individual job notifications. GitHub chooses which queued job a runner receives.
 
@@ -24,7 +24,9 @@ go run . \
   --state-dir /absolute/private/yieldd-state
 ```
 
-The fallback can also be a JSON label array, such as `'["self-hosted","linux","disposable"]'`. It must select a disposable Linux or macOS host with the workload's OS and architecture and support the infrastructure action's Node runtime. The provider must permit nested runners. A target containing `yieldd` is rejected to avoid routing back to this coordinator.
+Add `--macos-fallback-runner '"macos-26"'` to enable the macOS scale set. Neither platform has a default fallback provider. Linux keeps its original scale-set ID and state directory; startup adds the `yieldd-linux` alias. macOS stores its independent identity and lease in the `macos/` child directory. Enabling it does not change the saved Linux configuration. Finish outstanding macOS assignments before disabling that queue, and retain its original configuration for recovery.
+
+The fallback can also be a JSON label array, such as `'["self-hosted","linux","disposable"]'`. It must select a disposable host with that platform's OS and a workload-compatible architecture and support the infrastructure action's Node runtime. The provider must permit nested runners. Arbitrary provider labels cannot establish compatibility; the operator owns that choice. A target containing `yieldd`, `yieldd-linux`, or `yieldd-macos` is rejected to avoid routing back to this coordinator.
 
 Use trusted workloads and private repositories. The outer bootstrap and nested job share an operating-system account; neither the private HOME nor the reduced environment is a security sandbox. Repository access to the infrastructure workflow and secrets must be restricted accordingly.
 
@@ -32,7 +34,7 @@ The state directory is created with mode `0700`; existing permissive directories
 
 ## Container deployment on Linux
 
-The [Dockerfile](Dockerfile) builds a static binary with Go 1.27.1. Its runtime image contains the coordinator and TLS root certificates, runs as UID/GID `65532`, and needs neither a Docker socket nor privileged mode. The Mac still runs `yieldd connect` natively to manage Apple Container guests.
+The [Dockerfile](Dockerfile) builds a static binary with Go 1.27.1. Its runtime image contains the coordinator and TLS root certificates, runs as UID/GID `65532`, and needs neither a Docker socket nor privileged mode. The Mac still runs `yieldd connect` natively to manage its containers and VMs.
 
 The [Compose configuration](compose.yaml) targets Docker Engine on Linux. It uses [host networking](https://docs.docker.com/engine/network/drivers/host/) so the device API can keep its loopback-only binding at `127.0.0.1:8787`. Terminate HTTPS with a reverse proxy on that same Linux host. Do not expose port 8787 directly or assume this networking arrangement works unchanged on macOS.
 
@@ -47,6 +49,8 @@ YIELDD_DEVICE_ID=REPLACE_WITH_EXISTING_LOWERCASE_DEVICE_UUID
 YIELDD_REPOSITORY=juhokoskela/yieldd
 YIELDD_INFRASTRUCTURE=juhokoskela/yieldd-infra
 YIELDD_FALLBACK_RUNNER='"ubuntu-24.04"'
+# Optional: enable macOS with a user-selected fallback.
+YIELDD_MACOS_FALLBACK_RUNNER='"macos-26"'
 ```
 
 The fallback remains required and may instead be a JSON label array. Credentials are injected at runtime, never copied into the build context or image. Docker administrators can inspect container environment variables; restrict access to the daemon and the environment file. Avoid printing `docker compose config` with real credentials.
@@ -92,12 +96,13 @@ docker compose --env-file /etc/yieldd/coordinator.env run --rm coordinator \
   --repository "$YIELDD_REPOSITORY" \
   --infrastructure "$YIELDD_INFRASTRUCTURE" \
   --fallback-runner "$YIELDD_FALLBACK_RUNNER" \
+  --macos-fallback-runner "${YIELDD_MACOS_FALLBACK_RUNNER:-}" \
   --device-id "$YIELDD_DEVICE_ID" \
   --state-dir /var/lib/yieldd \
   --recover
 ```
 
-As with native execution, `--recover` cannot bypass an issued local assignment awaiting guest destruction. Start the Mac client to resolve that obligation.
+As with native execution, `--recover` cannot bypass an issued local assignment awaiting guest destruction. Include both fallback arguments when both platforms are enabled. Start the Mac client to resolve local obligations.
 
 Build and smoke-test the image without GitHub credentials or network access during the smoke test:
 
@@ -149,4 +154,4 @@ Local tests exercise the upstream listener callback integration, encrypted HTTP 
 
 Manual cross-repository pickup already succeeded with a repository JIT runner: [application run](https://github.com/juhokoskela/yieldd/actions/runs/34688921974) and [infrastructure run](https://github.com/juhokoskela/yieldd-infra/actions/runs/34688923785). That was not a coordinator or Scale Set test.
 
-Live coordinator acceptance on September 17 confirmed automatic hosted pickup, restart reconciliation, and intentional workload failure followed by cleanup. The failure case preserved the application failure while the bootstrap succeeded. Cancellation and no-pickup cases remain separate checks. Connected local execution still needs live acceptance. Run only one trusted job at a time and inspect the run conclusions, exact registration, and cleanup state.
+Live coordinator acceptance on September 17 confirmed automatic hosted pickup, restart reconciliation, and intentional workload failure followed by cleanup. The failure case preserved the application failure while the bootstrap succeeded. Cancellation and no-pickup cases remain separate checks. Linux connected execution has also been exercised live. macOS connected execution and dual-platform routing still need live acceptance. Start with one trusted job at a time and inspect the run conclusions, exact registration, and cleanup state.

@@ -25,6 +25,7 @@ type fakeWorld struct {
 	run                                            *workflowRun
 	secret                                         string
 	dispatched                                     int
+	fallback                                       string
 	generateErr, dispatchErr, secretErr, deleteErr error
 	busy                                           bool
 	beforeGenerate, beforeDispatch                 func()
@@ -73,7 +74,8 @@ func (f *fakeWorld) deleteSecret(context.Context, string) error {
 	f.secret = ""
 	return nil
 }
-func (f *fakeWorld) dispatch(_ context.Context, l *lease, _ string) (int64, error) {
+func (f *fakeWorld) dispatch(_ context.Context, l *lease, fallback string) (int64, error) {
+	f.fallback = fallback
 	f.events = append(f.events, "dispatch")
 	f.dispatched++
 	if f.beforeDispatch != nil {

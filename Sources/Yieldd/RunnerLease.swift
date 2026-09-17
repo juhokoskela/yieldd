@@ -185,7 +185,9 @@ func withRunnerOwnership(
     }
     defer { _ = Darwin.close(descriptor) }
 
-    if !connected, FileManager.default.fileExists(atPath: stateDirectory.appendingPathComponent("connected-runner.json").path) {
+    if !connected, [RunnerPlatform.linux, .macOS].contains(where: {
+        FileManager.default.fileExists(atPath: ConnectedRunnerStore(directory: stateDirectory, platform: $0).file.path)
+    }) {
         throw ConnectedRunnerError.recoveryRequired
     }
     try operation(store)

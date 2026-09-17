@@ -5,12 +5,14 @@ final class ConnectedHTTPClient {
     let deviceID: String
     let token: String
     let checkCancellation: () throws -> Void
+    let platform: RunnerPlatform
     private let session: URLSession
 
-    init(server: URL, deviceID: String, token: String, checkCancellation: @escaping () throws -> Void) {
+    init(server: URL, deviceID: String, token: String, platform: RunnerPlatform = .linux, checkCancellation: @escaping () throws -> Void) {
         self.server = server
         self.deviceID = deviceID
         self.token = token
+        self.platform = platform
         self.checkCancellation = checkCancellation
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 65
@@ -47,6 +49,7 @@ final class ConnectedHTTPClient {
         let (status, data) = try request("poll", offer: nil)
         if status == 204 { return nil }
         let offer = try JSONDecoder().decode(ConnectedOffer.self, from: data)
+        guard offer.runnerPlatform == platform else { throw ConnectedRunnerError.invalidOffer }
         return offer
     }
 
@@ -63,9 +66,11 @@ final class ConnectedHTTPClient {
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation override: (() throws -> Void)? = nil) throws -> (Int, Data) {
         let check = override ?? checkCancellation
         try check()
+        if let offer, offer.runnerPlatform != platform { throw ConnectedRunnerError.invalidOffer }
         var body = ["device_id": deviceID]
         if let offer { body["owner"] = offer.owner; body["runner"] = offer.runner }
-        var request = URLRequest(url: server.appendingPathComponent("v1/\(action)"))
+        let path = platform == .linux ? "v1/\(action)" : "v1/macos/\(action)"
+        var request = URLRequest(url: server.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

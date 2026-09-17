@@ -82,6 +82,10 @@ worker() {
     local status
 
     cd "$runner_directory"
+    if [[ -f "$state_directory/jit-config" ]]; then
+        export ACTIONS_RUNNER_INPUT_JITCONFIG="$(< "$state_directory/jit-config")"
+        rm "$state_directory/jit-config"
+    fi
     if [[ -x "$HOME/.yieldd-job-started.sh" ]]; then
         export ACTIONS_RUNNER_HOOK_JOB_STARTED="$HOME/.yieldd-job-started.sh"
     fi

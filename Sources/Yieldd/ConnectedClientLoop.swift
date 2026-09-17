@@ -3,40 +3,51 @@ import Foundation
 func runConnectedClient(
     checkCancellation: () throws -> Void,
     recover: () throws -> Void,
-    acquire: () throws -> RunnerMemoryReservation,
+    acquire: () throws -> RunnerMemoryReservation?,
     release: @escaping (RunnerMemoryReservation) -> Void,
     poll: () throws -> ConnectedOffer?,
     run: (ConnectedOffer, RunnerMemoryAllocation, () -> Void) throws -> Void,
     wait: (TimeInterval) throws -> Void,
-    retrying: () -> Void
+    retrying: () -> Void,
+    available: () -> Bool = { true },
+    blocked: () -> Void = {}
 ) throws {
+    var heldReservation: RunnerMemoryReservation?
+    func releaseCapacity() {
+        guard let reservation = heldReservation else { return }
+        heldReservation = nil
+        release(reservation)
+    }
     func recoverWithRetry() throws {
         while true {
             try checkCancellation()
-            do { try recover(); return } catch where isTransientConnectedFailure(error) {
+            do {
+                try recover()
+                releaseCapacity()
+                return
+            } catch where isTransientConnectedFailure(error) {
                 retrying()
                 try wait(5)
             }
         }
     }
     try recoverWithRetry()
+    var reportedBlocked = false
     while true {
         try checkCancellation()
         do {
-            let reservation = try acquire()
-            var released = false
-            func releaseOnce() {
-                guard !released else { return }
-                released = true
-                release(reservation)
-            }
-            defer { releaseOnce() }
-            if let offer = try poll() {
-                try run(offer, reservation.allocation, releaseOnce)
-            } else {
-                releaseOnce()
+            guard available() else {
+                if !reportedBlocked { blocked(); reportedBlocked = true }
                 try wait(1)
+                continue
             }
+            reportedBlocked = false
+            guard let offer = try poll() else { try wait(1); continue }
+            // Polling advertises a snapshot, not a reservation. Another slot can win
+            // capacity before an offer arrives; leave that offer unaccepted.
+            guard let reservation = try acquire() else { try wait(1); continue }
+            heldReservation = reservation
+            try run(offer, reservation.allocation, releaseCapacity)
         } catch {
             if case let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) = error,
                !isCancellation(operation), cleanup.allSatisfy({ isTransientConnectedFailure($0.error) }) {

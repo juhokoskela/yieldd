@@ -38,6 +38,32 @@ func macOSConfigureRunnerUsesTheEphemeralMacOSLabel() throws {
 }
 
 @Test
+func macOSJITIsPrivateConsumedOnceAndReportsPickup() throws {
+    let fixture = try MacOSGuestRunnerFixture(runScript: """
+        #!/bin/bash
+        test "$ACTIONS_RUNNER_INPUT_JITCONFIG" = private-jit || exit 9
+        test ! -f "$HOME/actions-runner/.yieldd-runner/jit-config" || exit 10
+        "$ACTIONS_RUNNER_HOOK_JOB_STARTED"
+        printf 'started\n' >> "$HOME/runner-starts"
+        """, configScript: "#!/bin/bash\nexit 11\n")
+    defer { fixture.remove() }
+    let configure = fixture.request(script: macOSConfigureRunnerURL, arguments: ["--jit"],
+                                    standardInput: Data("private-jit\n".utf8))
+    let result = try ProcessExecutor().execute(configure).requireSuccess(for: configure)
+    #expect(result.stdout.isEmpty && result.stderr.isEmpty)
+    let file = fixture.diagnosticsDirectory.appendingPathComponent("jit-config")
+    let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    #expect(try ProcessExecutor().execute(configure).terminationStatus == 2)
+    let run = fixture.controlRequest("run")
+    try ProcessExecutor().execute(run).requireSuccess(for: run)
+    try ProcessExecutor().execute(run).requireSuccess(for: run)
+    #expect(try fixture.recordedLines(filename: "runner-starts").count == 1)
+    #expect(!FileManager.default.fileExists(atPath: file.path))
+    #expect(try ProcessExecutor().execute(fixture.controlRequest("status")).stdoutText.contains("\"jobStarted\":true"))
+}
+
+@Test
 func macOSRunnerControlReturnsTheListenerOutputAndStatus() throws {
     let fixture = try MacOSGuestRunnerFixture(runScript: """
         #!/bin/bash

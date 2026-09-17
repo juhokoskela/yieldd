@@ -71,7 +71,7 @@ func (c *coordinator) pollDevice(request deviceRequest) (*deviceOffer, error) {
 	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
 		return nil, nil
 	}
-	return &deviceOffer{Owner: c.state.Owner, Runner: l.Name, Repository: c.state.Config.Repository, Platform: "linux", Architecture: "arm64"}, nil
+	return &deviceOffer{Owner: c.state.Owner, Runner: l.Name, Repository: c.state.Config.Repository, Platform: c.state.Config.platform(), Architecture: "arm64"}, nil
 }
 
 func (c *coordinator) checkDevice(request deviceRequest) error {

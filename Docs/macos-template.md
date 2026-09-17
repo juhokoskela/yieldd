@@ -12,7 +12,7 @@ Template creation is manual. Use an Apple Virtualization.framework macOS VM bund
 6. Copy this repository's `Guest/macOS/configure-runner` and `Guest/macOS/runner-control` to `/Users/runner/bin/yieldd-configure-runner` and `/Users/runner/bin/yieldd-runner-control`. Make both executable. Run `yieldd-runner-control ready` from that directory over SSH to check the login prerequisites.
 7. Remove any previous runner registration and shut down the template cleanly. Do not run the template while yieldd is cloning it.
 
-Automatic login weakens the guest's local security. Keep repository credentials, personal accounts, and other secrets out of the template. Do not install passwordless sudo. yieldd shares no host directories and sends only the ephemeral registration token over SSH stdin. It does not collect or store the guest password.
+Automatic login weakens the guest's local security. Keep repository credentials, personal accounts, and other secrets out of the template. Do not install passwordless sudo. yieldd shares no host directories and sends the ephemeral registration token or connected runner's JIT payload over SSH stdin. It does not collect or store the guest password.
 
 ## Pin SSH credentials on the host
 

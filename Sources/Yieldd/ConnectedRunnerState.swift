@@ -13,7 +13,7 @@ struct ConnectedOffer: Codable, Equatable {
         guard UUID(uuidString: owner)?.uuidString.lowercased() == owner,
               runner.hasPrefix("yieldd-bootstrap-"),
               UUID(uuidString: suffix)?.uuidString.lowercased() == suffix,
-              platform == "linux", architecture == "arm64" else {
+              ["linux", "macos"].contains(platform), architecture == "arm64" else {
             throw ConnectedRunnerError.invalidOffer
         }
         _ = try GitHubRepository(repository)
@@ -23,6 +23,8 @@ struct ConnectedOffer: Codable, Equatable {
         self.platform = platform
         self.architecture = architecture
     }
+
+    var runnerPlatform: RunnerPlatform { platform == "macos" ? .macOS : .linux }
 
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -40,12 +42,13 @@ struct ConnectedLease: Codable, Equatable {
 
 struct ConnectedRunnerStore {
     let directory: URL
+    var platform: RunnerPlatform = .linux
     var publish: (URL, URL) throws -> Void = { source, destination in
         guard Darwin.rename(source.path, destination.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
-    var file: URL { directory.appendingPathComponent("connected-runner.json") }
+    var file: URL { directory.appendingPathComponent(platform == .linux ? "connected-runner.json" : "connected-macos-runner.json") }
 
     func load() throws -> ConnectedLease? {
         let fd = Darwin.open(file.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
@@ -61,13 +64,15 @@ struct ConnectedRunnerStore {
         }
         let data = try handle.read(upToCount: 8193) ?? Data()
         guard data.count <= 8192,
-              let lease = try? JSONDecoder().decode(ConnectedLease.self, from: data) else {
+              let lease = try? JSONDecoder().decode(ConnectedLease.self, from: data),
+              lease.offer.runnerPlatform == platform else {
             throw ConnectedRunnerError.invalidState
         }
         return lease
     }
 
     func save(_ lease: ConnectedLease) throws {
+        guard lease.offer.runnerPlatform == platform else { throw ConnectedRunnerError.invalidState }
         let data = try JSONEncoder().encode(lease)
         guard data.count <= 8192 else { throw ConnectedRunnerError.invalidState }
         let temporary = directory.appendingPathComponent(".connected-runner-\(UUID().uuidString).tmp")
@@ -96,7 +101,7 @@ enum ConnectedRunnerError: Error, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidOffer: "The coordinator offer must identify one Linux ARM64 runner."
+        case .invalidOffer: "The coordinator offer must identify one supported Linux or macOS ARM64 runner."
         case .invalidState: "The connected runner journal is invalid or not private. Do not delete unresolved recovery state."
         case .invalidJIT: "JIT credentials do not identify the offered ephemeral runner and _work directory."
         case .invalidServer: "--server must be an HTTPS origin, or HTTP on a loopback IP for local testing."

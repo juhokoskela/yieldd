@@ -20,6 +20,8 @@ services:
       - ${YIELDD_INFRASTRUCTURE:?Set YIELDD_INFRASTRUCTURE}
       - --fallback-runner
       - ${YIELDD_FALLBACK_RUNNER:?Set YIELDD_FALLBACK_RUNNER to a JSON label string or array}
+      - --macos-fallback-runner
+      - ${YIELDD_MACOS_FALLBACK_RUNNER:-}
       - --device-id
       - ${YIELDD_DEVICE_ID:?Set YIELDD_DEVICE_ID}
       - --client-listen

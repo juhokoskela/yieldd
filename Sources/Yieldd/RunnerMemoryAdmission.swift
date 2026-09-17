@@ -36,18 +36,11 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
         checkCancellation: () throws -> Void = {},
         onBlocked: () -> Void = {}
     ) throws -> RunnerMemoryReservation {
-        try validateCapacity(reserving: reservationBytes)
-
         var reportedBlocked = false
         while true {
             try checkCancellation()
-            let allocation: RunnerMemoryAllocation? = condition.withLock {
-                guard let allocation = availableAllocation(reserving: reservationBytes) else { return nil }
-                reservedBytes += reservationBytes
-                return allocation
-            }
-            if let allocation {
-                return RunnerMemoryReservation(allocation: allocation, bytes: reservationBytes)
+            if let reservation = try tryAcquire(reserving: reservationBytes) {
+                return reservation
             }
 
             if !reportedBlocked {
@@ -67,6 +60,19 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
             precondition(reservation.bytes <= reservedBytes)
             reservedBytes -= reservation.bytes
             condition.broadcast()
+        }
+    }
+
+    func isAvailable(reserving bytes: UInt64) -> Bool {
+        condition.withLock { availableAllocation(reserving: bytes) != nil }
+    }
+
+    func tryAcquire(reserving bytes: UInt64) throws -> RunnerMemoryReservation? {
+        try validateCapacity(reserving: bytes)
+        return condition.withLock {
+            guard let allocation = availableAllocation(reserving: bytes) else { return nil }
+            reservedBytes += bytes
+            return RunnerMemoryReservation(allocation: allocation, bytes: bytes)
         }
     }
 
