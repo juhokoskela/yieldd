@@ -3,6 +3,26 @@ import Testing
 @testable import Yieldd
 
 @Test
+func linuxJITIsDeliveredWithoutRegistrationOrArgumentsAndConsumedOnce() throws {
+    let fixture = try LinuxRunnerScriptFixture()
+    defer { fixture.remove() }
+    let configure = fixture.request("configure", ["--jit", "yieldd-test"], input: "private-jit\n")
+    try ProcessExecutor().execute(configure).requireSuccess(for: configure)
+    #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("config-arguments").path))
+    let jitFile = fixture.directory.appendingPathComponent("runner/.yieldd-runner/jit-config")
+    #expect(try String(contentsOf: jitFile, encoding: .utf8) == "private-jit\n")
+    let permissions = try FileManager.default.attributesOfItem(atPath: jitFile.path)[.posixPermissions] as? Int
+    #expect(permissions == 0o600)
+    #expect(try ProcessExecutor().execute(configure).terminationStatus == 2)
+    let start = fixture.request("control", ["start"])
+    try ProcessExecutor().execute(start).requireSuccess(for: start)
+    #expect(!FileManager.default.fileExists(atPath: jitFile.path))
+    #expect(try String(contentsOf: fixture.directory.appendingPathComponent("jit-received"), encoding: .utf8) == "private-jit")
+    try ProcessExecutor().execute(start).requireSuccess(for: start)
+    #expect(try String(contentsOf: fixture.directory.appendingPathComponent("starts"), encoding: .utf8) == "start\n")
+}
+
+@Test
 func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
     let fixture = try LinuxRunnerScriptFixture()
     defer { fixture.remove() }
@@ -66,6 +86,7 @@ private struct LinuxRunnerScriptFixture {
         try executable("""
             #!/bin/bash
             printf 'start\n' >> "$HOME/starts"
+            printf '%s' "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" > "$HOME/jit-received"
             "$ACTIONS_RUNNER_HOOK_JOB_STARTED"
             printf 'listener output\n'
             exit 7

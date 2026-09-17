@@ -1,27 +1,34 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
 if [[ "$#" -lt 2 || "$#" -gt 3 ]]; then
     echo "usage: yieldd-configure-runner OWNER/REPOSITORY RUNNER_NAME [ROUTING_LABEL]" >&2
+    echo "       yieldd-configure-runner --jit RUNNER_NAME" >&2
     exit 2
 fi
 
 repository="$1"
 runner_name="$2"
 label="${3:-yieldd}"
+jit=false
+if [[ "$repository" == --jit ]]; then
+    [[ "$#" -eq 2 ]] || exit 2
+    jit=true
+fi
 if [[ "$#" -eq 3 ]] && [[ ! "$label" =~ ^yieldd-request-[a-z0-9-]+$ || ${#label} -gt 63 ]]; then
     echo "invalid reservation routing label" >&2
     exit 2
 fi
-IFS= read -r registration_token
+IFS= read -r credential
 
-if [[ -z "$registration_token" ]]; then
-    echo "runner registration token is empty" >&2
+if [[ -z "$credential" ]]; then
+    echo "runner credential is empty" >&2
     exit 2
 fi
 
 cd /opt/actions-runner
-if [[ "$#" -eq 3 ]]; then
+if [[ "$#" -eq 3 || "$jit" == true ]]; then
     for marker in exit-status process-group launched job-started; do
         if [[ -e ".yieldd-runner/$marker" ]]; then
             echo "runner lifecycle state already exists; use a fresh guest" >&2
@@ -38,11 +45,19 @@ mv -f "$state_directory/job-started.$$" "$state_directory/job-started"
 HOOK
     chmod 0700 "$HOME/.yieldd-job-started.sh"
 fi
+if [[ "$jit" == true ]]; then
+    if [[ -e .runner || -e .credentials || -e .yieldd-runner/jit-config ]]; then
+        echo "runner credentials already exist; use a fresh guest" >&2
+        exit 2
+    fi
+    printf '%s\n' "$credential" > .yieldd-runner/jit-config
+    exit 0
+fi
 exec ./config.sh \
     --unattended \
     --ephemeral \
     --url "https://github.com/${repository}" \
-    --token "$registration_token" \
+    --token "$credential" \
     --name "$runner_name" \
     --no-default-labels \
     --labels "$label" \
