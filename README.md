@@ -109,7 +109,7 @@ Run `yieldd recover` to clean up abandoned registrations and disposable macOS cl
 
 ## Reserved single-job tests
 
-The [Scale Set coordinator prototype](Server/README.md) supports one repository and one runner while application jobs use only `runs-on: yieldd`. It can offer work to [one connected Mac](Docs/connected-mac-prototype.md) for on-demand Linux ARM64 execution, or provision a user-selected fallback through a separate infrastructure repository. Automatic hosted pickup and restart recovery have been tested live; connected execution still needs live acceptance. The earlier [manual nested runner experiment](Docs/runner-bootstrap-prototype.md) remains available for isolated tests. Both require trusted jobs on disposable hosts.
+The [Scale Set coordinator prototype](Server/README.md) supports one repository and one runner per platform. `runs-on: yieldd` and `yieldd-linux` select Linux; `yieldd-macos` selects the independently enabled macOS queue. It can offer work to [one connected Mac](Docs/connected-mac-prototype.md) for on-demand ARM64 containers or VMs, or provision each platform's user-selected fallback through a separate infrastructure repository. Idle local slots reserve no RAM. Hosted and connected Linux execution have been tested live; connected macOS and dual-platform routing still need live acceptance. The earlier [manual nested runner experiment](Docs/runner-bootstrap-prototype.md) remains available for isolated tests. Both require trusted jobs on disposable hosts.
 
 To exercise job-specific routing before connecting a coordinator, queue a trusted job whose `runs-on` matches a unique label, then run:
 

@@ -70,6 +70,19 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
         }
     }
 
+    func isAvailable(reserving bytes: UInt64) -> Bool {
+        condition.withLock { availableAllocation(reserving: bytes) != nil }
+    }
+
+    func tryAcquire(reserving bytes: UInt64) throws -> RunnerMemoryReservation? {
+        try validateCapacity(reserving: bytes)
+        return condition.withLock {
+            guard let allocation = availableAllocation(reserving: bytes) else { return nil }
+            reservedBytes += bytes
+            return RunnerMemoryReservation(allocation: allocation, bytes: bytes)
+        }
+    }
+
     private func availableAllocation(reserving reservationBytes: UInt64) -> RunnerMemoryAllocation? {
         guard reservationBytes <= budgetBytes - reservedBytes else {
             return nil

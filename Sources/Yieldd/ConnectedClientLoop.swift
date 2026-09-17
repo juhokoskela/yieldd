@@ -3,12 +3,14 @@ import Foundation
 func runConnectedClient(
     checkCancellation: () throws -> Void,
     recover: () throws -> Void,
-    acquire: () throws -> RunnerMemoryReservation,
+    acquire: () throws -> RunnerMemoryReservation?,
     release: @escaping (RunnerMemoryReservation) -> Void,
     poll: () throws -> ConnectedOffer?,
     run: (ConnectedOffer, RunnerMemoryAllocation, () -> Void) throws -> Void,
     wait: (TimeInterval) throws -> Void,
-    retrying: () -> Void
+    retrying: () -> Void,
+    available: () -> Bool = { true },
+    blocked: () -> Void = {}
 ) throws {
     func recoverWithRetry() throws {
         while true {
@@ -20,10 +22,20 @@ func runConnectedClient(
         }
     }
     try recoverWithRetry()
+    var reportedBlocked = false
     while true {
         try checkCancellation()
         do {
-            let reservation = try acquire()
+            guard available() else {
+                if !reportedBlocked { blocked(); reportedBlocked = true }
+                try wait(1)
+                continue
+            }
+            reportedBlocked = false
+            guard let offer = try poll() else { try wait(1); continue }
+            // Polling advertises a snapshot, not a reservation. Another slot can win
+            // capacity before an offer arrives; leave that offer unaccepted.
+            guard let reservation = try acquire() else { try wait(1); continue }
             var released = false
             func releaseOnce() {
                 guard !released else { return }
@@ -31,12 +43,7 @@ func runConnectedClient(
                 release(reservation)
             }
             defer { releaseOnce() }
-            if let offer = try poll() {
-                try run(offer, reservation.allocation, releaseOnce)
-            } else {
-                releaseOnce()
-                try wait(1)
-            }
+            try run(offer, reservation.allocation, releaseOnce)
         } catch {
             if case let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) = error,
                !isCancellation(operation), cleanup.allSatisfy({ isTransientConnectedFailure($0.error) }) {
