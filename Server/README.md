@@ -2,7 +2,7 @@
 
 This foreground Go service provisions fallback compute for one application repository. Application jobs use only `runs-on: yieldd`; the coordinator dispatches a bootstrap in a separate infrastructure repository. The fallback target is required and has no default.
 
-This first slice has capacity for one runner. It does not connect to Macs, report local capacity, or choose between local and hosted compute yet. The existing Swift agent remains standalone.
+This prototype has capacity for one runner. An optional [connected Mac](../Docs/connected-mac-prototype.md) can supply that slot with an on-demand Linux ARM64 container. Otherwise, the coordinator provisions the configured fallback. The installed Swift agent remains standalone; connected mode uses the foreground `yieldd connect` command.
 
 The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scaleset/tree/v0.4.0). It scales from GitHub's assigned-job count, not individual job notifications. GitHub chooses which queued job a runner receives.
 
@@ -67,8 +67,8 @@ This revision removes the prototype's `secret_stored` state field. Recover any o
 
 ## Validation status
 
-Local tests exercise the upstream listener callback integration, encrypted HTTP credential delivery, dispatch identity, interrupted provisioning, exclusive state ownership, and cleanup failures. CI runs the Go race detector and vet. These checks do not establish live Scale Set pickup or GitHub permission compatibility.
+Local tests exercise the upstream listener callback integration, encrypted HTTP credential delivery, dispatch identity, interrupted provisioning, exclusive state ownership, and cleanup failures. CI runs the Go race detector and vet. These checks do not establish live provider behavior for new configurations.
 
 Manual cross-repository pickup already succeeded with a repository JIT runner: [application run](https://github.com/juhokoskela/yieldd/actions/runs/34688921974) and [infrastructure run](https://github.com/juhokoskela/yieldd-infra/actions/runs/34688923785). That was not a coordinator or Scale Set test.
 
-After deploying the paired infrastructure workflow, the next acceptance check is one ordinary `runs-on: yieldd` job automatically provisioned by this service, followed by restart, failure, cancellation, and no-pickup cases. Run only one trusted job at a time and inspect both run conclusions, the exact registration, and the per-bootstrap secret after cleanup.
+Live coordinator acceptance on September 17 confirmed automatic hosted pickup, restart reconciliation, and intentional workload failure followed by cleanup. The failure case preserved the application failure while the bootstrap succeeded. Cancellation and no-pickup cases remain separate checks. Connected local execution still needs live acceptance. Run only one trusted job at a time and inspect the run conclusions, exact registration, and cleanup state.
