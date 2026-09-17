@@ -1,6 +1,6 @@
 # Scale Set coordinator prototype
 
-This Go service routes jobs for one application repository. `runs-on: yieldd` and `runs-on: yieldd-linux` target the same Linux scale set. `runs-on: yieldd-macos` targets a separate macOS scale set when enabled. Each platform uses its own user-configured fallback target, dispatched through a separate infrastructure repository.
+This Go service routes jobs for one application repository. `runs-on: yieldd` targets Linux; `runs-on: yieldd-linux` targets the same scale set when GitHub retains that alias. `runs-on: yieldd-macos` targets a separate macOS scale set when enabled. Each platform uses its own user-configured fallback target, dispatched through a separate infrastructure repository.
 
 This prototype has capacity for one runner per enabled platform. An optional [connected Mac](../Docs/connected-mac-prototype.md) supplies Linux ARM64 containers and macOS ARM64 VMs on demand. Otherwise, the coordinator provisions that platform's fallback. An issued local assignment awaiting cleanup acknowledgement blocks its own platform, including fallback, but not the other platform. An idle disconnected Mac does not hold the slot after availability expires. The installed Swift agent remains standalone; connected mode uses the foreground `yieldd connect` command.
 
@@ -24,7 +24,7 @@ go run . \
   --state-dir /absolute/private/yieldd-state
 ```
 
-Add `--macos-fallback-runner '"macos-26"'` to enable the macOS scale set. Neither platform has a default fallback provider. Linux keeps its original scale-set ID and state directory; startup adds the `yieldd-linux` alias. macOS stores its independent identity and lease in the `macos/` child directory. Enabling it does not change the saved Linux configuration. Finish outstanding macOS assignments before disabling that queue, and retain its original configuration for recovery.
+Add `--macos-fallback-runner '"macos-26"'` to enable the macOS scale set. Neither platform has a default fallback provider. Linux keeps its original scale-set ID and state directory; startup requests the `yieldd-linux` alias. If GitHub returns only the original `yieldd` label for a previously saved Linux set, startup preserves that identity and warns that workflows must use `runs-on: yieldd`. It does not silently claim the alias works or recreate the set. Newly created sets must retain both Linux labels. macOS stores its independent identity and lease in the `macos/` child directory. Enabling it does not change the saved Linux configuration. Finish outstanding macOS assignments before disabling that queue, and retain its original configuration for recovery.
 
 The fallback can also be a JSON label array, such as `'["self-hosted","linux","disposable"]'`. It must select a disposable host with that platform's OS and a workload-compatible architecture and support the infrastructure action's Node runtime. The provider must permit nested runners. Arbitrary provider labels cannot establish compatibility; the operator owns that choice. A target containing `yieldd`, `yieldd-linux`, or `yieldd-macos` is rejected to avoid routing back to this coordinator.
 

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,116 @@ import (
 
 	"github.com/actions/scaleset"
 )
+
+type scaleSetWriteResponse struct {
+	*fakeScaleSets
+	response *scaleset.RunnerScaleSet
+}
+
+func (f *scaleSetWriteResponse) CreateRunnerScaleSet(context.Context, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
+	f.created++
+	return f.response, nil
+}
+
+func (f *scaleSetWriteResponse) UpdateRunnerScaleSet(context.Context, int, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
+	f.updated++
+	return f.response, nil
+}
+
+func TestPlatformUpdateRejectsChangedIdentity(t *testing.T) {
+	for _, field := range []string{"nil", "id", "name", "group"} {
+		t.Run(field, func(t *testing.T) {
+			original := &scaleset.RunnerScaleSet{ID: 1, Name: "yieldd", RunnerGroupID: 1, Labels: []scaleset.Label{{Name: "yieldd", Type: "system"}}}
+			response := *original
+			response.Labels = []scaleset.Label{{Name: "yieldd"}, {Name: "yieldd-linux"}}
+			api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{set: original}, response: &response}
+			switch field {
+			case "nil":
+				api.response = nil
+			case "id":
+				response.ID++
+			case "name":
+				response.Name = "yieldd-macos"
+			case "group":
+				response.RunnerGroupID++
+			}
+			if _, err := ensurePlatformScaleSet(t.Context(), api, testConfig, 1); err == nil || !strings.Contains(err.Error(), "identity") {
+				t.Fatal("expected an identity diagnostic", err)
+			}
+			if api.created != 0 || api.updated != 1 {
+				t.Fatal("unexpected mutation", api.created, api.updated)
+			}
+		})
+	}
+}
+
+func TestPlatformUpdateReportsMissingLabels(t *testing.T) {
+	original := &scaleset.RunnerScaleSet{ID: 1, Name: "yieldd", RunnerGroupID: 1, Labels: []scaleset.Label{{Name: "yieldd", Type: "system"}}}
+	response := *original
+	response.Labels = []scaleset.Label{{Name: "yieldd-macos", Type: "system"}}
+	api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{set: original}, response: &response}
+	_, err := ensurePlatformScaleSet(t.Context(), api, testConfig, 1)
+	if err == nil || !strings.Contains(err.Error(), "labels") || !strings.Contains(err.Error(), fmt.Sprint(response.ID)) {
+		t.Fatal("expected scale-set ID and label diagnostic", err)
+	}
+}
+
+func TestPlatformPreservesSavedLinuxSetWhenAliasUpdateIsIgnored(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	original := &scaleset.RunnerScaleSet{ID: 1, Name: "yieldd", RunnerGroupID: 1, Labels: []scaleset.Label{{Name: "yieldd", Type: "system"}}}
+	api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{set: original}, response: original}
+	id, err := ensurePlatformScaleSet(t.Context(), api, testConfig, 1)
+	if err != nil || id != 1 || api.created != 0 || api.updated != 1 {
+		t.Fatal("legacy identity was not preserved", id, err, api.created, api.updated)
+	}
+	for _, field := range []string{"level=WARN", "scale_set=1", "alias=yieldd-linux", "runs-on: yieldd"} {
+		if !strings.Contains(logs.String(), field) {
+			t.Fatal("missing actionable alias warning", field, logs.String())
+		}
+	}
+}
+
+func TestPlatformAliasCompatibilityRequiresSavedLegacyLabels(t *testing.T) {
+	for _, saved := range []bool{false, true} {
+		t.Run(fmt.Sprint(saved), func(t *testing.T) {
+			original := &scaleset.RunnerScaleSet{ID: 1, Name: "yieldd", RunnerGroupID: 1, Labels: []scaleset.Label{{Name: "yieldd"}}}
+			savedID := 0
+			if saved {
+				savedID = 1
+				original.Labels = append(original.Labels, scaleset.Label{Name: "unexpected"})
+			}
+			response := *original
+			response.Labels = []scaleset.Label{{Name: "yieldd"}}
+			api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{set: original}, response: &response}
+			if _, err := ensurePlatformScaleSet(t.Context(), api, testConfig, savedID); err == nil {
+				t.Fatal("compatibility accepted a set without a saved legacy identity")
+			}
+		})
+	}
+}
+
+func TestPlatformCreationRequiresAllLabels(t *testing.T) {
+	for _, platform := range []string{"", "macos"} {
+		t.Run(platform, func(t *testing.T) {
+			cfg := testConfig
+			cfg.Platform = platform
+			response := &scaleset.RunnerScaleSet{ID: 42, Name: cfg.scaleSetName(), RunnerGroupID: 1}
+			if platform == "" {
+				response.Labels = []scaleset.Label{{Name: "yieldd"}}
+			}
+			api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{}, response: response}
+			if _, err := ensurePlatformScaleSet(t.Context(), api, cfg, 0); err == nil || !strings.Contains(err.Error(), "labels") {
+				t.Fatal("new set accepted incomplete routing labels", err)
+			}
+			if api.created != 1 || api.updated != 0 {
+				t.Fatal("unexpected mutation", api.created, api.updated)
+			}
+		})
+	}
+}
 
 type fakeScaleSets struct {
 	set              *scaleset.RunnerScaleSet
