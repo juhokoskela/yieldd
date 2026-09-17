@@ -80,7 +80,7 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, err
 	}
 	if c.state.Lease.Local != nil {
-		c.logger.Info("Local offer created", "runner", c.state.Lease.Name, "device", c.state.Config.DeviceID)
+		c.logger.Info("Local offer created", "runner", c.state.Lease.Name, "device", c.state.Config.DeviceID, "accept_timeout", offerLifetime)
 		return 1, nil
 	}
 	if err := c.register(ctx); err != nil {

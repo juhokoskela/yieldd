@@ -36,6 +36,8 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 					if _, err := loop.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
 						t.Fatal("lost cancellation identity", err)
 					}
+					stop()
+					<-done
 					saved, err := store.load(testConfig)
 					if err != nil {
 						t.Fatal(err)
@@ -100,6 +102,8 @@ func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
 					if _, err := loop.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, wantErr) {
 						t.Fatal("lost cancellation identity", err)
 					}
+					stop()
+					<-done
 					saved, err := store.load(testConfig)
 					if err != nil {
 						t.Fatal(err)
