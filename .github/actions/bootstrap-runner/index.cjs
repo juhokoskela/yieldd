@@ -1,6 +1,7 @@
 const { spawn } = require('node:child_process');
-const { createHash } = require('node:crypto');
-const { createReadStream, existsSync } = require('node:fs');
+const { createHash, randomBytes } = require('node:crypto');
+const { createReadStream } = require('node:fs');
+const { createServer } = require('node:http');
 const { mkdtemp, mkdir, writeFile, access, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
@@ -92,18 +93,48 @@ async function verifyArchive(path, expected) {
     if (hash.digest('hex') !== expected) throw new Error('Runner archive checksum mismatch.');
 }
 
-async function runListener(runner, options, startedFile) {
+async function runListener(runner, options) {
+    options.signal.throwIfAborted();
     const pickup = new AbortController();
     const signal = AbortSignal.any([options.signal, pickup.signal]);
-    const timer = setTimeout(() => {
-        if (!existsSync(startedFile)) {
-            pickup.abort(new Error('No job start was observed within five minutes. This does not prove that the job never started.'));
+    const path = '/' + randomBytes(32).toString('hex');
+    let timer;
+    const server = createServer({ requestTimeout: 10000, headersTimeout: 5000 }, (request, response) => {
+        response.setHeader('Connection', 'close');
+        request.resume();
+        if (request.method !== 'POST' || request.url !== path) {
+            response.writeHead(404).end();
+            return;
         }
-    }, 5 * 60 * 1000);
+        if (signal.aborted) {
+            response.writeHead(409).end();
+            return;
+        }
+        // Acknowledge only after latching pickup in supervisor state, before job steps can run.
+        clearTimeout(timer);
+        response.writeHead(204).end();
+    });
+    server.on('error', error => pickup.abort(error));
     try {
-        await retryListener(runner, { ...options, signal });
+        await new Promise((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(0, '127.0.0.1', resolve);
+        });
+        const hook = join(runner, 'yieldd-job-started.sh');
+        await writeFile(hook, `#!/bin/sh
+exec /usr/bin/curl --fail --silent --show-error --noproxy '*' --connect-timeout 5 --max-time 10 --request POST 'http://127.0.0.1:${server.address().port}${path}'
+`, { mode: 0o700 });
+        timer = setTimeout(() => pickup.abort(new Error('No job start was observed within five minutes. This does not prove that the job never started.')), 5 * 60 * 1000);
+        await retryListener(runner, {
+            ...options, signal,
+            env: { ...options.env, ACTIONS_RUNNER_HOOK_JOB_STARTED: hook },
+        });
     } finally {
         clearTimeout(timer);
+        await new Promise(resolve => {
+            server.close(resolve);
+            server.closeAllConnections();
+        });
     }
 }
 
@@ -147,11 +178,8 @@ async function bootstrap(encoded, name, signal) {
         await verifyArchive(archive, checksum);
         signal.throwIfAborted();
         await runProcess('/usr/bin/tar', ['-xzf', archive, '-C', runner], options);
-        const startedFile = join(home, 'job-started');
-        const startedHook = join(home, 'started.sh');
-        await writeFile(startedHook, '#!/bin/sh\n: > "$HOME/job-started"\n', { mode: 0o700 });
-        const completedHook = join(home, 'completed.sh');
-        await writeFile(completedHook, '#!/bin/sh\n: > "$HOME/job-completed"\n', { mode: 0o700 });
+        const completedHook = join(directory, 'completed.sh');
+        await writeFile(completedHook, '#!/bin/sh\n: > "${0%/*}/job-completed"\n', { mode: 0o700 });
         console.log('Starting one nested runner. The original workflow owns its job logs and conclusion.');
         await runListener(runner, {
             ...options,
@@ -159,11 +187,10 @@ async function bootstrap(encoded, name, signal) {
                 ...env,
                 // Runner 2.337.0 consumes and removes this variable before executing jobs.
                 ACTIONS_RUNNER_INPUT_JITCONFIG: encoded,
-                ACTIONS_RUNNER_HOOK_JOB_STARTED: startedHook,
                 ACTIONS_RUNNER_HOOK_JOB_COMPLETED: completedHook,
             },
-        }, startedFile);
-        await access(join(home, 'job-completed'));
+        });
+        await access(join(directory, 'job-completed'));
         console.log('Nested runner exited after a job. Check the original workflow for its result.');
     } finally {
         await rm(directory, { recursive: true, force: true });

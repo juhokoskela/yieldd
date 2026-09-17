@@ -15,6 +15,8 @@ The prototype uses repository-scoped JIT configuration, not a scale set. It test
 
 The bootstrap downloads runner 2.337.0 and verifies its pinned platform-specific SHA-256. It passes the JIT configuration through `ACTIONS_RUNNER_INPUT_JITCONFIG`, which that runner version consumes and removes before job execution. Listener exit status 2 triggers a retry after five seconds without resetting the pickup deadline. Other nonzero statuses stop the bootstrap. No broad GitHub credential is sent to the bootstrap. Do not publish encoded JIT credentials as workflow inputs, artifacts, command arguments, or logs.
 
+The job-start hook waits for a loopback acknowledgement before returning. The supervisor clears its pickup timer before acknowledging; deleting or recreating the workload's `HOME` cannot undo pickup. Hook scripts and the completion marker live outside that `HOME`. This does not isolate the supervisor from trusted workloads running under the same OS account.
+
 ## Prepare and dispatch
 
 After both workflows are on the default branch, build a fresh configuration locally with an authenticated `gh` CLI. This creates a runner registration and stores its single-use configuration as a repository secret. Choose a real fallback target available to the repository; it may be a JSON label string or label array.
