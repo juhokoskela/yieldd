@@ -27,11 +27,15 @@ struct ReservedRunnerJob {
     var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     func run(id: RunnerID, assignment: RunnerAssignment, executionTimeout: TimeInterval?) throws {
+        try run(id: id, pickupTimeout: assignment.pickupTimeout, executionTimeout: executionTimeout)
+    }
+
+    func run(id: RunnerID, pickupTimeout: TimeInterval, executionTimeout: TimeInterval?) throws {
         try checkCancellation()
         try backend.exec(["yieldd-runner-control", "start"], timeout: 30,
                          outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
         stateChanged(.listenerStarted(id))
-        var deadline = currentTime() + assignment.pickupTimeout
+        var deadline = currentTime() + pickupTimeout
         var jobStarted = false
         while true {
             try checkCancellation()

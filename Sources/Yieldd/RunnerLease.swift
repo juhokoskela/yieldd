@@ -162,6 +162,7 @@ final class RunnerLeaseStore: @unchecked Sendable {
 
 func withRunnerOwnership(
     in directory: URL? = nil,
+    connected: Bool = false,
     operation: (RunnerLeaseStore) throws -> Void
 ) throws {
     let stateDirectory = try directory ?? yielddApplicationSupportDirectory()
@@ -184,6 +185,9 @@ func withRunnerOwnership(
     }
     defer { _ = Darwin.close(descriptor) }
 
+    if !connected, FileManager.default.fileExists(atPath: stateDirectory.appendingPathComponent("connected-runner.json").path) {
+        throw ConnectedRunnerError.recoveryRequired
+    }
     try operation(store)
 }
 

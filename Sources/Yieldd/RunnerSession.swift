@@ -176,6 +176,7 @@ enum RunnerSessionCleanupStep: String, Equatable {
     case githubRunner = "GitHub runner"
     case machine
     case runnerProcess = "runner process"
+    case leaseRecord = "lease record"
 }
 
 enum RunnerSessionError: Error {
