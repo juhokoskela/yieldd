@@ -112,21 +112,25 @@ func run() error {
 	for _, worker := range workers {
 		go func() { results <- worker.run(ctx, recoverOnly) }()
 	}
+	if err := waitForCoordinators(results, len(workers), recoverOnly, stop); err != nil {
+		return err
+	}
+	slog.Info("Stopped; any active assignment is recorded for reconciliation on restart")
+	return nil
+}
+
+func waitForCoordinators(results <-chan error, count int, recoverOnly bool, stop context.CancelFunc) error {
 	var failures []error
-	for range workers {
+	for range count {
 		err := <-results
-		if err != nil && !onlyCancellation(err) {
+		if err != nil && (recoverOnly || !onlyCancellation(err)) {
 			failures = append(failures, err)
 		}
 		if !recoverOnly {
 			stop()
 		}
 	}
-	if len(failures) != 0 {
-		return errors.Join(failures...)
-	}
-	slog.Info("Stopped; any active assignment is recorded for reconciliation on restart")
-	return nil
+	return errors.Join(failures...)
 }
 
 func platformDeviceHandler(handler http.Handler) http.Handler {
