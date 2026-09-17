@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -150,6 +151,8 @@ func ensurePlatformScaleSet(ctx context.Context, client scaleSetAPI, cfg config,
 	if err != nil {
 		return 0, &sdkError{"find scale set", err}
 	}
+	legacyLabels := []scaleset.Label{{Name: "yieldd"}}
+	legacyLinux := cfg.platform() == "linux" && savedID != 0 && set != nil && sameLabels(set.Labels, legacyLabels)
 	if set == nil {
 		if savedID != 0 {
 			return 0, errors.New("saved scale set is missing; refusing to replace its identity")
@@ -166,10 +169,25 @@ func ensurePlatformScaleSet(ctx context.Context, client scaleSetAPI, cfg config,
 	if err != nil {
 		return 0, &sdkError{"configure scale set", err}
 	}
-	if set == nil || set.ID <= 0 || (savedID != 0 && set.ID != savedID) || set.Name != name || !sameLabels(set.Labels, desired.Labels) {
-		return 0, errors.New("invalid platform scale set response")
+	if set == nil || set.ID <= 0 || (savedID != 0 && set.ID != savedID) || set.Name != name || set.RunnerGroupID != 1 {
+		return 0, fmt.Errorf("invalid identity in GitHub response for scale set %q", name)
+	}
+	if !sameLabels(set.Labels, desired.Labels) {
+		if !legacyLinux || !sameLabels(set.Labels, legacyLabels) {
+			return 0, fmt.Errorf("scale set %q (%d) has labels %q; expected %q", name, set.ID, scaleSetLabelNames(set.Labels), scaleSetLabelNames(desired.Labels))
+		}
+		slog.Warn("GitHub did not retain the Linux alias; use runs-on: yieldd for this existing scale set",
+			"repository", cfg.Repository, "scale_set", set.ID, "alias", "yieldd-linux")
 	}
 	return set.ID, nil
+}
+
+func scaleSetLabelNames(labels []scaleset.Label) []string {
+	names := make([]string, len(labels))
+	for i, label := range labels {
+		names[i] = label.Name
+	}
+	return names
 }
 
 func sameLabels(a, b []scaleset.Label) bool {
