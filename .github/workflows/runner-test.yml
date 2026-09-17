@@ -2,6 +2,12 @@ name: Runner test
 
 on:
   workflow_dispatch:
+    inputs:
+      outcome:
+        description: Test success, intentional failure, or cancellation while sleeping.
+        type: choice
+        default: success
+        options: [success, failure, cancellation]
   pull_request_target:
     types: [labeled]
 
@@ -18,3 +24,15 @@ jobs:
         run: docker info
       - name: Run a Docker container
         run: docker run --rm hello-world
+      - name: Exercise the requested result
+        shell: bash
+        env:
+          EXPECTED_OUTCOME: ${{ inputs.outcome || 'success' }}
+        run: |
+          set -euo pipefail
+          case "$EXPECTED_OUTCOME" in
+            success) echo 'Runner test passed.' ;;
+            failure) echo 'Intentional test failure.' >&2; exit 7 ;;
+            cancellation) echo 'Cancel this application workflow run now.'; sleep 240 ;;
+            *) echo 'Unknown test outcome.' >&2; exit 2 ;;
+          esac
