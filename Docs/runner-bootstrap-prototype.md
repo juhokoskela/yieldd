@@ -1,13 +1,13 @@
 # Nested runner bootstrap prototype
 
-This experiment keeps the workload on `runs-on: yieldd`. A separate, manually dispatched bootstrap workflow obtains a disposable machine using your chosen fallback label, then runs one ephemeral Actions listener on it. The original workflow retains its job logs and conclusion. A successful bootstrap does not mean the workload succeeded.
+This manual experiment targets a UUID-specific runner label. A separate, manually dispatched bootstrap workflow obtains a disposable machine using your chosen fallback label, then runs one ephemeral Actions listener on it. The original workflow retains its job logs and conclusion. A successful bootstrap does not mean the workload succeeded. Coordinator-managed application workflows still use `runs-on: yieldd` or a platform-specific scale-set label; they do not need a runner UUID.
 
-The prototype uses repository-scoped JIT configuration, not a scale set. It tests whether a runner inside another workflow job can execute the original job correctly. The always-on server, capacity-based dispatch, scale-set registration, and reconciliation come afterward if this boundary passes live testing. No automatic fallback or retry is implemented.
+This manual prototype uses repository-scoped JIT configuration, not the coordinator's scale-set registration. It tests whether a runner inside another workflow job can execute the original job correctly. It does not dispatch fallback automatically or retry failed workloads.
 
 ## Safety and prerequisites
 
-- Use a private test repository with trusted workflows and contributors. Stop other `yieldd` runners and ensure no unrelated job targets `yieldd` during this experiment. A generic label cannot reserve a specific job.
-- Use a disposable Linux or macOS fallback runner on x64 or ARM64, with Bash, curl, tar, and the Actions runner's native dependencies. There is no default provider. Do not choose `yieldd` as the fallback target, which would make the bootstrap wait for itself.
+- Use a private test repository with trusted workflows and contributors. Give each attempt a fresh runner UUID as its custom label, and make the smoke workload target that exact label. Do not register these manual runners with the shared `yieldd` label.
+- Use a disposable Linux or macOS fallback runner on x64 or ARM64, with Bash, curl, tar, and the Actions runner's native dependencies. There is no default provider. Choose the underlying host provider's labels, not a yieldd scale-set label, as the fallback target.
 - The fallback must allow running a nested listener. Check the provider's restrictions and billing. This experiment has not established support from GitHub or another provider.
 - Bootstrap and workload run under the same operating-system account. A fresh HOME and minimal environment prevent accidental inheritance, not access to the outer runner's filesystem, processes, credentials, or network. This is not a sandbox for untrusted workloads.
 - The listener has five minutes to pick up a job. Once its job-start hook has fired, yieldd imposes no execution deadline. The outer bootstrap workflow uses GitHub's default six-hour job timeout; provider limits still apply. Cancellation signals the owned process group, then escalates after five seconds to leave time for cleanup before GitHub's outer cancellation deadline. Processes that deliberately leave that group and force-killed bootstrap processes rely on host disposal for cleanup.
@@ -19,7 +19,7 @@ The job-start hook waits for a loopback acknowledgement before returning. The su
 
 ## Prepare and dispatch
 
-After both workflows are on the default branch, build a fresh configuration locally with an authenticated `gh` CLI. This creates a runner registration and stores its single-use configuration as a repository secret. Choose a real fallback target available to the repository; it may be a JSON label string or label array.
+After both workflows are on the default branch, including the smoke workflow's UUID-specific `runs-on` selection, build a fresh configuration locally with an authenticated `gh` CLI. This creates a runner registration and stores its single-use configuration as a repository secret. Choose a real fallback target available to the repository; it may be a JSON label string or label array.
 
 ```sh
 set -o pipefail
@@ -29,7 +29,7 @@ fallback_runner='"YOUR_DISPOSABLE_FALLBACK_LABEL"'
 
 gh api --method POST "repos/$repository/actions/runners/generate-jitconfig" \
   -f "name=$runner_name" -F runner_group_id=1 \
-  -f 'labels[]=yieldd' -f work_folder=_work \
+  -f "labels[]=$runner_name" -f work_folder=_work \
   --jq .encoded_jit_config | \
 gh secret set YIELDD_BOOTSTRAP_JIT --repo "$repository"
 ```
