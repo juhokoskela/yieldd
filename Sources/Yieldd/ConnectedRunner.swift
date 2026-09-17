@@ -10,6 +10,7 @@ struct ConnectedRunner {
     let checkCancellation: () throws -> Void
     let wait: (TimeInterval) throws -> Void
     var stateChanged: (RunnerSessionState) -> Void = { _ in }
+    var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     func recover(confirmRegistrationRemoved runner: String? = nil) throws {
         guard let lease = try store.load() else {
@@ -43,8 +44,9 @@ struct ConnectedRunner {
             try checkCancellation()
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
                              timeout: EphemeralRunnerSession.configurationTimeout, on: id)
-            try ReservedRunnerJob(backend: backend, checkCancellation: checkCancellation, wait: wait, stateChanged: stateChanged)
-                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: 15 * 60)
+            try ReservedRunnerJob(backend: backend, checkCancellation: checkCancellation, wait: wait,
+                                  stateChanged: stateChanged, currentTime: currentTime)
+                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
         } catch {
             failure = error
         }

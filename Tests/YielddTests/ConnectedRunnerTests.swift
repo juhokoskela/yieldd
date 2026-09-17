@@ -12,6 +12,32 @@ private func connectedJIT(settings: [String: Any]? = nil) throws -> String {
     return try JSONEncoder().encode([".runner": runner, ".credentials": "e30="]).base64EncodedString()
 }
 
+@Test(arguments: [false, true])
+func connectedRunnerKeepsPickupDeadlineWithoutLimitingExecution(started: Bool) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    backend.statuses = [
+        "{\"phase\":\"listening\",\"jobStarted\":\(started)}",
+        #"{"phase":"exited","jobStarted":true,"exitStatus":0}"#,
+    ]
+    var now: TimeInterval = 0
+    var acknowledged = false
+    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() },
+        complete: { _ in acknowledged = true }, wait: { _ in now += 24 * 60 * 60 })
+    runner.currentTime = { now }
+    if started {
+        try runner.run(connectedOffer, memory: .constrained)
+        #expect(backend.statuses.isEmpty)
+    } else {
+        #expect(throws: RunnerAssignmentError.pickupTimedOut) { try runner.run(connectedOffer, memory: .constrained) }
+        #expect(backend.statuses.count == 1)
+    }
+    #expect(now == 24 * 60 * 60)
+    #expect(backend.destroyed && acknowledged)
+    #expect(try fixture.store.load() == nil)
+}
+
 @Test(arguments: ["success", "accept", "run", "cancel", "destroy", "acknowledge"])
 func connectedRunnerHoldsSleepAssertionThroughCleanup(_ stage: String) throws {
     let fixture = try ConnectedFixture()
@@ -388,9 +414,10 @@ private struct ConnectedFixture {
     }
     func remove() { try? FileManager.default.removeItem(at: directory) }
     func runner(backend: ConnectedBackend, accept: @escaping (ConnectedOffer) throws -> String,
-                complete: @escaping (ConnectedOffer) throws -> Void, check: @escaping () throws -> Void = {}) -> ConnectedRunner {
+                complete: @escaping (ConnectedOffer) throws -> Void, check: @escaping () throws -> Void = {},
+                wait: @escaping (TimeInterval) throws -> Void = { _ in }) -> ConnectedRunner {
         ConnectedRunner(backend: backend, store: store, server: "https://example.com/", deviceID: connectedOffer.owner,
-                        accept: accept, complete: complete, checkCancellation: check, wait: { _ in })
+                        accept: accept, complete: complete, checkCancellation: check, wait: wait)
     }
 }
 
@@ -403,6 +430,7 @@ private final class ConnectedBackend: RunnerBackend {
     var configuration: [String] = []
     var payload: Data?
     var onOperation: () throws -> Void = {}
+    var statuses = [#"{"phase":"exited","jobStarted":true,"exitStatus":0}"#]
     init(failure: Failure? = nil) { self.failure = failure }
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws { try onOperation(); creates += 1 }
     func exec(_ arguments: [String], standardInput: Data?, timeout: TimeInterval?, outputCapture: ProcessOutputCapture,
@@ -414,7 +442,10 @@ private final class ConnectedBackend: RunnerBackend {
             if failure == .configure { throw TestFailure.runnerJob }
         }
         if failure == .run, arguments.last == "start" { throw TestFailure.runnerJob }
-        if arguments.last == "status" { return processResult(stdout: #"{"phase":"exited","jobStarted":true,"exitStatus":0}"#) }
+        if arguments.last == "status" {
+            guard !statuses.isEmpty else { throw TestFailure.unexpectedBackendCall }
+            return processResult(stdout: statuses.removeFirst())
+        }
         return processResult()
     }
     func stopRunner(on id: RunnerID) throws { Issue.record("Guest destruction must bound connected cleanup") }
