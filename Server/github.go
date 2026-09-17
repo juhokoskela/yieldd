@@ -20,19 +20,10 @@ import (
 var runnerNamePattern = regexp.MustCompile(`^yieldd-bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type workflowRun struct {
-	ID           int64     `json:"id"`
-	DisplayTitle string    `json:"display_title"`
-	Status       string    `json:"status"`
-	Conclusion   string    `json:"conclusion"`
-	CreatedAt    time.Time `json:"created_at"`
-	observedAt   time.Time
-}
-
-func (r *workflowRun) age() (time.Duration, error) {
-	if r.CreatedAt.IsZero() || r.observedAt.IsZero() || r.observedAt.Before(r.CreatedAt) {
-		return 0, errors.New("workflow age is unavailable or invalid; retry with --recover to request cancellation")
-	}
-	return r.observedAt.Sub(r.CreatedAt), nil
+	ID           int64  `json:"id"`
+	DisplayTitle string `json:"display_title"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
 }
 
 type apiError struct{ status int }
@@ -73,11 +64,6 @@ type githubAPI struct {
 }
 
 func (g *githubAPI) request(ctx context.Context, method, path string, body, output any) error {
-	_, err := g.requestWithHeaders(ctx, method, path, body, output)
-	return err
-}
-
-func (g *githubAPI) requestWithHeaders(ctx context.Context, method, path string, body, output any) (http.Header, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var data []byte
@@ -85,12 +71,12 @@ func (g *githubAPI) requestWithHeaders(ctx context.Context, method, path string,
 		var err error
 		data, err = json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 	request, err := http.NewRequestWithContext(ctx, method, g.base+path, bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+g.token)
 	request.Header.Set("Accept", "application/vnd.github+json")
@@ -106,28 +92,28 @@ func (g *githubAPI) requestWithHeaders(ctx context.Context, method, path string,
 	unread := payload != nil && payload.closeUnread()
 	if err != nil {
 		if unread {
-			return nil, &requestNotSent{fmt.Errorf("GitHub request payload was not sent: %w", err)}
+			return &requestNotSent{fmt.Errorf("GitHub request payload was not sent: %w", err)}
 		}
-		return nil, fmt.Errorf("GitHub request failed: %w", err)
+		return fmt.Errorf("GitHub request failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return response.Header, &apiError{response.StatusCode}
+		return &apiError{response.StatusCode}
 	}
 	if output == nil {
-		return response.Header, nil
+		return nil
 	}
 	data, err = io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
 	if err != nil {
-		return response.Header, err
+		return err
 	}
 	if len(data) > 2<<20 {
-		return response.Header, errors.New("GitHub response exceeded size limit")
+		return errors.New("GitHub response exceeded size limit")
 	}
 	if err := json.Unmarshal(data, output); err != nil {
-		return response.Header, errors.New("invalid GitHub response")
+		return errors.New("invalid GitHub response")
 	}
-	return response.Header, nil
+	return nil
 }
 
 func (g *githubAPI) path(suffix string) string {
@@ -212,7 +198,7 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 			Runs []workflowRun `json:"workflow_runs"`
 		}
 		query := url.Values{"event": {"workflow_dispatch"}, "branch": {"main"}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
-		headers, err := g.requestWithHeaders(ctx, "GET", g.path("workflows/runner-bootstrap.yml/runs?")+query.Encode(), nil, &result)
+		err := g.request(ctx, "GET", g.path("workflows/runner-bootstrap.yml/runs?")+query.Encode(), nil, &result)
 		if err != nil {
 			return nil, err
 		}
@@ -223,7 +209,6 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 			if match != nil && match.ID != run.ID {
 				return nil, errors.New("multiple bootstrap runs match the provisioning lease")
 			}
-			run.observedAt, _ = http.ParseTime(headers.Get("Date"))
 			match = &run
 		}
 		if len(result.Runs) < 100 {
@@ -238,7 +223,7 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 
 func (g *githubAPI) getRun(ctx context.Context, id int64) (*workflowRun, error) {
 	var run workflowRun
-	headers, err := g.requestWithHeaders(ctx, "GET", g.path(fmt.Sprintf("runs/%d", id)), nil, &run)
+	err := g.request(ctx, "GET", g.path(fmt.Sprintf("runs/%d", id)), nil, &run)
 	if hasHTTPStatus(err, http.StatusNotFound) {
 		// A private repository can mask lost access with 404. Require a successful
 		// Actions listing before classifying the individual run as missing.
@@ -261,7 +246,6 @@ func (g *githubAPI) getRun(ctx context.Context, id int64) (*workflowRun, error) 
 	if err != nil {
 		return nil, err
 	}
-	run.observedAt, _ = http.ParseTime(headers.Get("Date"))
 	return &run, nil
 }
 

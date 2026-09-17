@@ -200,17 +200,17 @@ func (b bootstrapWithRunAPI) findRun(ctx context.Context, l *lease) (*workflowRu
 	return b.api.findRun(ctx, l)
 }
 
-func TestRestartUsesServerTimeForBootstrapAge(t *testing.T) {
+func TestRestartDoesNotCancelBootstrapBasedOnAge(t *testing.T) {
 	serverNow := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
-	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
-		for _, age := range []time.Duration{time.Minute, 26 * time.Minute} {
+	for _, status := range []string{"queued", "in_progress"} {
+		for _, age := range []time.Duration{time.Minute, time.Hour, 24 * time.Hour} {
 			for _, discover := range []bool{false, true} {
-				t.Run(fmt.Sprintf("skew=%v/age=%v/discover=%v", skew, age, discover), func(t *testing.T) {
+				t.Run(fmt.Sprintf("status=%s/age=%v/discover=%v", status, age, discover), func(t *testing.T) {
 					c, w, store := newFixture(t)
 					if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 						t.Fatal(err)
 					}
-					c.state.Lease.Created = serverNow.Add(skew)
+					c.state.Lease.Created = serverNow.Add(-age)
 					if discover {
 						c.state.Lease.RunID = 0
 					}
@@ -224,7 +224,7 @@ func TestRestartUsesServerTimeForBootstrapAge(t *testing.T) {
 					c.state = saved
 					api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
 						response.Header().Set("Date", serverNow.Format(http.TimeFormat))
-						run := map[string]any{"id": 99, "display_title": "Bootstrap " + saved.Lease.Name, "status": "queued", "created_at": serverNow.Add(-age)}
+						run := map[string]any{"id": 99, "display_title": "Bootstrap " + saved.Lease.Name, "status": status, "created_at": serverNow.Add(-age)}
 						if discover {
 							json.NewEncoder(response).Encode(map[string]any{"workflow_runs": []any{run}})
 						} else {
@@ -236,8 +236,8 @@ func TestRestartUsesServerTimeForBootstrapAge(t *testing.T) {
 						t.Fatal(err)
 					}
 					cancelled := w.events[len(w.events)-1] == "cancel"
-					if cancelled != (age > 25*time.Minute) || w.dispatched != 1 || c.state.Lease == nil || w.secret == "" {
-						t.Fatal("host clock changed cancellation or cleanup", w.events)
+					if cancelled || w.dispatched != 1 || c.state.Lease == nil || w.secret == "" {
+						t.Fatal("age triggered cancellation or cleanup", w.events)
 					}
 				})
 			}

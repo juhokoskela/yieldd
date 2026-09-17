@@ -196,15 +196,8 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 		}
 	}
 	if run.Status != "completed" {
-		// Queue time is not covered by the workflow job timeout. Do not leave a queued bootstrap indefinitely.
 		if !recoverOnly {
-			age, err := run.age()
-			if err != nil {
-				return false, err
-			}
-			if age <= 25*time.Minute {
-				return false, nil
-			}
+			return false, nil
 		}
 		err := c.bootstrap.cancelRun(ctx, l.RunID)
 		if err == nil {

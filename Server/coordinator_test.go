@@ -79,7 +79,7 @@ func (f *fakeWorld) dispatch(_ context.Context, l *lease, _ string) (int64, erro
 	if f.beforeDispatch != nil {
 		f.beforeDispatch()
 	}
-	f.run = &workflowRun{ID: 99, DisplayTitle: "Bootstrap " + l.Name, Status: "queued", CreatedAt: time.Unix(100000, 0), observedAt: time.Unix(100000, 0)}
+	f.run = &workflowRun{ID: 99, DisplayTitle: "Bootstrap " + l.Name, Status: "queued"}
 	if f.dispatchErr != nil {
 		return 0, f.dispatchErr
 	}
@@ -448,17 +448,16 @@ func TestShutdownStillPreventsProvisioningWithDetachedCallbackContext(t *testing
 	}
 }
 
-func TestQueuedBootstrapDeadlineRetainsLeaseUntilTermination(t *testing.T) {
+func TestExplicitRecoveryCancelsBootstrapAndRetainsLeaseUntilTermination(t *testing.T) {
 	c, w, _ := newFixture(t)
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	w.run.observedAt = w.run.CreatedAt.Add(26 * time.Minute)
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+	if done, err := c.reconcile(t.Context(), true); err != nil || done {
 		t.Fatal(err)
 	}
 	if c.state.Lease == nil || w.secret == "" || w.events[len(w.events)-1] != "cancel" || w.dispatched != 1 {
-		t.Fatal("unsafe queued timeout cleanup", w.events)
+		t.Fatal("unsafe recovery cleanup", w.events)
 	}
 }
 

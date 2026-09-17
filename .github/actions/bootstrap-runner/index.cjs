@@ -1,6 +1,6 @@
 const { spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
-const { createReadStream } = require('node:fs');
+const { createReadStream, existsSync } = require('node:fs');
 const { mkdtemp, mkdir, writeFile, access, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
@@ -92,7 +92,22 @@ async function verifyArchive(path, expected) {
     if (hash.digest('hex') !== expected) throw new Error('Runner archive checksum mismatch.');
 }
 
-async function runListener(runner, options) {
+async function runListener(runner, options, startedFile) {
+    const pickup = new AbortController();
+    const signal = AbortSignal.any([options.signal, pickup.signal]);
+    const timer = setTimeout(() => {
+        if (!existsSync(startedFile)) {
+            pickup.abort(new Error('No job start was observed within five minutes. This does not prove that the job never started.'));
+        }
+    }, 5 * 60 * 1000);
+    try {
+        await retryListener(runner, { ...options, signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function retryListener(runner, options) {
     while (true) {
         try {
             await runProcess(join(runner, 'bin/Runner.Listener'), ['run'], options);
@@ -132,6 +147,9 @@ async function bootstrap(encoded, name, signal) {
         await verifyArchive(archive, checksum);
         signal.throwIfAborted();
         await runProcess('/usr/bin/tar', ['-xzf', archive, '-C', runner], options);
+        const startedFile = join(home, 'job-started');
+        const startedHook = join(home, 'started.sh');
+        await writeFile(startedHook, '#!/bin/sh\n: > "$HOME/job-started"\n', { mode: 0o700 });
         const completedHook = join(home, 'completed.sh');
         await writeFile(completedHook, '#!/bin/sh\n: > "$HOME/job-completed"\n', { mode: 0o700 });
         console.log('Starting one nested runner. The original workflow owns its job logs and conclusion.');
@@ -141,9 +159,10 @@ async function bootstrap(encoded, name, signal) {
                 ...env,
                 // Runner 2.337.0 consumes and removes this variable before executing jobs.
                 ACTIONS_RUNNER_INPUT_JITCONFIG: encoded,
+                ACTIONS_RUNNER_HOOK_JOB_STARTED: startedHook,
                 ACTIONS_RUNNER_HOOK_JOB_COMPLETED: completedHook,
             },
-        });
+        }, startedFile);
         await access(join(home, 'job-completed'));
         console.log('Nested runner exited after a job. Check the original workflow for its result.');
     } finally {
@@ -158,12 +177,10 @@ if (require.main === module) {
     const controller = new AbortController();
     const interrupt = () => controller.abort(new Error('Bootstrap interrupted.'));
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, interrupt);
-    const timer = setTimeout(() => controller.abort(new Error('Bootstrap exceeded its 15-minute limit.')), 15 * 60 * 1000);
     bootstrap(encoded, name, controller.signal).catch(error => {
         console.error(error.message);
         process.exitCode = 1;
     }).finally(() => {
-        clearTimeout(timer);
         for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.off(signal, interrupt);
     });
 }

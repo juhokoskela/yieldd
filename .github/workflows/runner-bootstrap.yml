@@ -23,7 +23,6 @@ concurrency:
 jobs:
   bootstrap:
     runs-on: ${{ fromJSON(inputs['fallback-runner']) }}
-    timeout-minutes: 20
     steps:
       - name: Reject reruns of single-use credentials
         shell: bash
