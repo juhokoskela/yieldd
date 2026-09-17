@@ -15,14 +15,15 @@ import (
 )
 
 type lease struct {
-	Name           string    `json:"name"`
-	Created        time.Time `json:"created"`
-	RunnerID       int       `json:"runner_id,omitempty"`
-	JIT            string    `json:"jit,omitempty"`
-	DispatchIntent bool      `json:"dispatch_intent,omitempty"`
-	RunID          int64     `json:"run_id,omitempty"`
-	CleanupIntent  bool      `json:"cleanup_intent,omitempty"`
-	Conclusion     string    `json:"conclusion,omitempty"`
+	Name           string      `json:"name"`
+	Created        time.Time   `json:"created"`
+	RunnerID       int         `json:"runner_id,omitempty"`
+	JIT            string      `json:"jit,omitempty"`
+	DispatchIntent bool        `json:"dispatch_intent,omitempty"`
+	RunID          int64       `json:"run_id,omitempty"`
+	CleanupIntent  bool        `json:"cleanup_intent,omitempty"`
+	Conclusion     string      `json:"conclusion,omitempty"`
+	Local          *localLease `json:"local,omitempty"`
 }
 
 func (l lease) secretName() string {
@@ -115,6 +116,9 @@ func (s *stateStore) load(c config) (*state, error) {
 	if l := value.Lease; l != nil {
 		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0) || (l.Conclusion != "" && !l.CleanupIntent) || ((l.DispatchIntent || l.CleanupIntent) && l.JIT != "") {
 			return nil, errors.New("invalid provisioning lease")
+		}
+		if err := l.validateLocal(c.DeviceID); err != nil {
+			return nil, err
 		}
 	}
 	return &value, nil

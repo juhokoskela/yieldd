@@ -27,14 +27,15 @@ type bootstrapAPI interface {
 	runnerBusy(context.Context, string, int) (bool, error)
 }
 
-// The listener calls the scaler serially. The state-directory lock excludes another local owner.
+// The event loop serializes listener callbacks and device requests. The state-directory lock excludes another local owner.
 type coordinator struct {
-	lifetime  context.Context
-	state     *state
-	save      func(*state) error
-	runners   runnerAPI
-	bootstrap bootstrapAPI
-	logger    *slog.Logger
+	lifetime       context.Context
+	state          *state
+	save           func(*state) error
+	runners        runnerAPI
+	bootstrap      bootstrapAPI
+	logger         *slog.Logger
+	availableUntil time.Time
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
@@ -64,7 +65,7 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, err
 	}
 	if c.state.Lease != nil {
-		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent
+		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent && (c.state.Lease.Local == nil || c.state.Lease.Local.Phase == localOffered)
 		done, err := c.reconcile(ctx, recoverOnly)
 		if err != nil || !done {
 			return 1, err
@@ -75,23 +76,35 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, nil
 	}
 	c.state.Lease = &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
+	if c.state.Config.DeviceID != "" && time.Now().Before(c.availableUntil) {
+		c.state.Lease.Local = &localLease{DeviceID: c.state.Config.DeviceID, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
+		c.availableUntil = time.Time{}
+	}
 	if err := c.save(c.state); err != nil {
 		return 0, err
 	}
-	l := c.state.Lease
-	generated, err := c.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, c.state.ScaleSetID)
-	if err != nil {
-		return 1, fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
+	if c.state.Lease.Local != nil {
+		c.logger.Info("Local offer created", "runner", c.state.Lease.Name, "device", c.state.Config.DeviceID)
+		return 1, nil
 	}
-	if generated == nil || generated.Runner == nil || generated.Runner.ID <= 0 || generated.Runner.Name != l.Name || generated.Runner.RunnerScaleSetID != c.state.ScaleSetID || generated.EncodedJITConfig == "" {
-		return 1, errors.New("invalid JIT response; provisioning intent retained for recovery")
-	}
-	l.RunnerID = generated.Runner.ID
-	l.JIT = generated.EncodedJITConfig
-	if err := c.save(c.state); err != nil {
+	if err := c.register(ctx); err != nil {
 		return 1, err
 	}
 	return 1, c.prepare(ctx)
+}
+
+func (c *coordinator) register(ctx context.Context) error {
+	l := c.state.Lease
+	generated, err := c.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, c.state.ScaleSetID)
+	if err != nil {
+		return fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
+	}
+	if generated == nil || generated.Runner == nil || generated.Runner.ID <= 0 || generated.Runner.Name != l.Name || generated.Runner.RunnerScaleSetID != c.state.ScaleSetID || generated.EncodedJITConfig == "" {
+		return errors.New("invalid JIT response; provisioning intent retained for recovery")
+	}
+	l.RunnerID = generated.Runner.ID
+	l.JIT = generated.EncodedJITConfig
+	return c.save(c.state)
 }
 
 func (c *coordinator) prepare(ctx context.Context) error {
@@ -144,6 +157,9 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 	}
 	if l.CleanupIntent {
 		return c.finishCleanup(ctx, recoverOnly)
+	}
+	if l.Local != nil {
+		return c.reconcileLocal(ctx, recoverOnly)
 	}
 	if !l.DispatchIntent {
 		if recoverOnly {
@@ -256,7 +272,11 @@ func (c *coordinator) finishCleanup(ctx context.Context, recoverOnly bool) (bool
 	if err := c.cleanup(ctx); err != nil {
 		return false, err
 	}
-	c.logger.Info("Bootstrap cleaned up", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion)
+	if l.Local != nil {
+		c.logger.Info("Local runner cleaned up", "runner", l.Name, "device", l.Local.DeviceID)
+	} else {
+		c.logger.Info("Bootstrap cleaned up", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion)
+	}
 	if l.RunID != 0 && l.Conclusion != "success" && !recoverOnly {
 		return true, fmt.Errorf("bootstrap %d concluded %s; stopped after cleanup rather than automatically retrying the workload", l.RunID, l.Conclusion)
 	}
@@ -287,8 +307,10 @@ func (c *coordinator) cleanup(ctx context.Context) error {
 			return &sdkError{"remove runner", err}
 		}
 	}
-	if err := c.bootstrap.deleteSecret(ctx, l.secretName()); err != nil {
-		return err
+	if l.Local == nil {
+		if err := c.bootstrap.deleteSecret(ctx, l.secretName()); err != nil {
+			return err
+		}
 	}
 	next := *c.state
 	next.Lease = nil
