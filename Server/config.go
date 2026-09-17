@@ -14,11 +14,29 @@ type config struct {
 	Infrastructure string `json:"infrastructure"`
 	Fallback       string `json:"fallback"`
 	DeviceID       string `json:"device_id,omitempty"`
+	Platform       string `json:"platform,omitempty"`
+}
+
+func (c config) platform() string {
+	if c.Platform == "macos" {
+		return "macos"
+	}
+	return "linux"
+}
+
+func (c config) scaleSetName() string {
+	if c.platform() == "macos" {
+		return "yieldd-macos"
+	}
+	return "yieldd"
 }
 
 var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$`)
 
 func (c config) validate() error {
+	if c.Platform != "" && c.Platform != "macos" {
+		return errors.New("invalid coordinator platform")
+	}
 	if c.DeviceID != "" {
 		id, err := uuid.Parse(c.DeviceID)
 		if err != nil || id.String() != c.DeviceID {
@@ -45,8 +63,8 @@ func (c config) validate() error {
 		return errors.New("fallback must contain at least one label")
 	}
 	for _, label := range labels {
-		if strings.TrimSpace(label) != label || label == "" || len(label) > 255 || strings.EqualFold(label, "yieldd") || strings.ContainsAny(label, "\x00\r\n") {
-			return errors.New("fallback labels must be nonempty and cannot target yieldd")
+		if strings.TrimSpace(label) != label || label == "" || len(label) > 255 || strings.EqualFold(label, "yieldd") || strings.EqualFold(label, "yieldd-linux") || strings.EqualFold(label, "yieldd-macos") || strings.ContainsAny(label, "\x00\r\n") {
+			return errors.New("fallback labels must be nonempty and cannot target a yieldd scale set")
 		}
 	}
 	return nil
