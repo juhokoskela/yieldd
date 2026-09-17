@@ -12,10 +12,20 @@ func runConnectedClient(
     available: () -> Bool = { true },
     blocked: () -> Void = {}
 ) throws {
+    var heldReservation: RunnerMemoryReservation?
+    func releaseCapacity() {
+        guard let reservation = heldReservation else { return }
+        heldReservation = nil
+        release(reservation)
+    }
     func recoverWithRetry() throws {
         while true {
             try checkCancellation()
-            do { try recover(); return } catch where isTransientConnectedFailure(error) {
+            do {
+                try recover()
+                releaseCapacity()
+                return
+            } catch where isTransientConnectedFailure(error) {
                 retrying()
                 try wait(5)
             }
@@ -36,14 +46,8 @@ func runConnectedClient(
             // Polling advertises a snapshot, not a reservation. Another slot can win
             // capacity before an offer arrives; leave that offer unaccepted.
             guard let reservation = try acquire() else { try wait(1); continue }
-            var released = false
-            func releaseOnce() {
-                guard !released else { return }
-                released = true
-                release(reservation)
-            }
-            defer { releaseOnce() }
-            try run(offer, reservation.allocation, releaseOnce)
+            heldReservation = reservation
+            try run(offer, reservation.allocation, releaseCapacity)
         } catch {
             if case let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) = error,
                !isCancellation(operation), cleanup.allSatisfy({ isTransientConnectedFailure($0.error) }) {

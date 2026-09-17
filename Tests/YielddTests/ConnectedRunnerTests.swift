@@ -199,11 +199,17 @@ func connectedRunnerCleansUpBeforePropagatingFailure(_ stage: String) throws {
     }, complete: { _ in acknowledged = true }, check: {
         if stage == "cancel" { throw CancellationError() }
     })
+    var releases = 0
     if stage == "cancel" {
-        #expect(throws: CancellationError.self) { try runner.run(connectedOffer, memory: .full) }
+        #expect(throws: CancellationError.self) {
+            try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
+        }
     } else {
-        #expect(throws: TestFailure.runnerJob) { try runner.run(connectedOffer, memory: .full) }
+        #expect(throws: TestFailure.runnerJob) {
+            try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
+        }
     }
+    #expect(releases == 1)
     #expect(backend.destroyed && acknowledged)
     #expect(try fixture.store.load() == nil)
 }
@@ -305,6 +311,83 @@ func connectedClientRetriesOnlyThroughRecovery(_ stage: String) throws {
         let lastPoll = try #require(events.lastIndex(of: "poll"))
         #expect(events[(firstPoll + 1)..<lastPoll].contains("recover"))
     }
+}
+
+@Test
+func connectedClientRetainsCapacityWhenGuestDestructionFails() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend(failure: .destroy)
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() },
+        complete: { _ in Issue.record("Guest destruction must succeed before acknowledgement") })
+    let gib: UInt64 = 1_024 * 1_024 * 1_024
+    let memory = RunnerMemoryAdmission(physicalMemoryBytes: 24 * gib, readMemoryPressure: { .normal })
+    var held: RunnerMemoryReservation?
+    var releases = 0
+    #expect(throws: TestFailure.machineCleanup) {
+        try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() }, acquire: {
+            held = try memory.tryAcquire(reserving: 12 * gib)
+            return held
+        }, release: { reservation in
+            releases += 1
+            memory.release(reservation)
+        }, poll: { connectedOffer }, run: { offer, allocation, release in
+            try runner.run(offer, memory: allocation, releaseCapacity: release)
+        }, wait: { _ in Issue.record("A permanent destruction failure must escape") }, retrying: {})
+    }
+    #expect(backend.creates == 1 && !backend.destroyed)
+    #expect(releases == 0)
+    #expect(try fixture.store.load() != nil)
+    let competing = try memory.tryAcquire(reserving: 8 * gib)
+    #expect(competing == nil)
+    if let competing { memory.release(competing) }
+    if releases == 0, let held { memory.release(held) }
+}
+
+@Test
+func connectedClientRetainsCapacityUntilRecoverySucceeds() throws {
+    let gib: UInt64 = 1_024 * 1_024 * 1_024
+    let memory = RunnerMemoryAdmission(physicalMemoryBytes: 24 * gib, readMemoryPressure: { .normal })
+    var recoveries = 0
+    var polls = 0
+    var releases = 0
+    #expect(throws: CancellationError.self) {
+        try runConnectedClient(checkCancellation: {}, recover: {
+            recoveries += 1
+            guard recoveries > 1 else { return }
+            #expect(!memory.isAvailable(reserving: 8 * gib))
+            if recoveries == 2 { throw ConnectedRunnerError.http(503) }
+        }, acquire: { try memory.tryAcquire(reserving: 12 * gib) }, release: {
+            releases += 1
+            memory.release($0)
+        }, poll: {
+            polls += 1
+            if polls == 2 {
+                #expect(memory.isAvailable(reserving: 8 * gib))
+                throw CancellationError()
+            }
+            return connectedOffer
+        }, run: { _, _, _ in throw ConnectedRunnerError.transport }, wait: { _ in }, retrying: {})
+    }
+    #expect(recoveries == 3 && polls == 2 && releases == 1)
+}
+
+@Test
+func connectedRunnerReleasesCapacityWhenJournalPublicationFails() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    var store = fixture.store
+    store.publish = { _, _ in throw TestFailure.runnerJob }
+    let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/",
+        deviceID: connectedOffer.owner, accept: { _ in throw TestFailure.unexpectedBackendCall },
+        complete: { _ in Issue.record("Journal publication failed before acceptance") },
+        checkCancellation: {}, wait: { _ in })
+    var releases = 0
+    #expect(throws: TestFailure.runnerJob) {
+        try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
+    }
+    #expect(releases == 1 && backend.creates == 0)
 }
 
 @Test
@@ -439,7 +522,11 @@ func connectedRunnerRejectsWrongPlatformBeforeAcceptance() throws {
     let runner = fixture.runner(backend: ConnectedBackend(), accept: { _ in
         Issue.record("Wrong platform was accepted"); return ""
     }, complete: { _ in Issue.record("Wrong platform was acknowledged") })
-    #expect(throws: ConnectedRunnerError.invalidOffer) { try runner.run(mac, memory: .full) }
+    var releases = 0
+    #expect(throws: ConnectedRunnerError.invalidOffer) {
+        try runner.run(mac, memory: .full, releaseCapacity: { releases += 1 })
+    }
+    #expect(releases == 1)
     #expect(try fixture.store.load() == nil)
 }
 

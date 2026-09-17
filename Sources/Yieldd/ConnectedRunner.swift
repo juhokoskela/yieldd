@@ -19,6 +19,8 @@ struct ConnectedRunner {
     }
 
     func run(_ offer: ConnectedOffer, memory: RunnerMemoryAllocation, releaseCapacity: () -> Void = {}) throws {
+        var releaseOnExit = true
+        defer { if releaseOnExit { releaseCapacity() } }
         guard offer.runnerPlatform == backend.platform else { throw ConnectedRunnerError.invalidOffer }
         guard try store.load() == nil else { throw ConnectedRunnerError.recoveryRequired }
         let id = RunnerID(value: offer.runner)
@@ -31,6 +33,8 @@ struct ConnectedRunner {
             let jit = try accept(offer)
             try validateConnectedJIT(jit, runner: offer.runner)
             try checkCancellation()
+            // Creation can fail after allocating a guest. Retain capacity until destruction succeeds.
+            releaseOnExit = false
             try backend.create(id: id, memory: memory)
             try checkCancellation()
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
@@ -42,6 +46,7 @@ struct ConnectedRunner {
             failure = error
         }
         try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
+        releaseOnExit = false
         releaseCapacity()
         stateChanged(.capacityReleased(id))
         try cleanUp(step: .githubRunner, after: failure) { try acknowledgeConnectedRunner(offer, complete: complete) }
