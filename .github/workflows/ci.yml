@@ -78,3 +78,7 @@ jobs:
         run: |
           go test -race ./...
           go vet ./...
+      - name: Build and smoke-test coordinator image
+        run: |
+          docker build -t local/yieldd-coordinator:dev .
+          bash test-image.sh

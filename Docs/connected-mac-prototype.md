@@ -24,6 +24,8 @@ GH_TOKEN="$(gh auth token)" go run . \
 
 The HTTP listener binds only to a loopback IP. For a remote Mac, expose it through a trusted HTTPS reverse proxy on the coordinator host. Forward `/v1/` and the Authorization header, allow 20-second long polls and 60-second operations, and disable response caching and credential/body logging. The Mac validates normal system TLS trust and refuses redirects. Direct loopback HTTP is permitted only for same-host testing.
 
+For a separate Linux host, the [coordinator container setup](../Server/README.md#container-deployment-on-linux) provides a non-root image, persistent state, and a Compose service behind the host's HTTPS proxy. Only the coordinator moves into that container; `yieldd connect` remains a native macOS process.
+
 On the Mac, rebuild the guest image with JIT support and the CLI, from the repository root:
 
 ```sh
@@ -41,7 +43,7 @@ Stop any standalone runner command or installed local agent first. `connect` use
   --device-id "$YIELDD_DEVICE_ID"
 ```
 
-For a different coordinator host, replace the server with its HTTPS origin. `connect` needs Apple Container and the device token, but no GitHub token or `gh` executable. Broad GitHub credentials stay on the coordinator. Both sides must remain foreground processes for this slice.
+For a different coordinator host, replace the server with its HTTPS origin. `connect` needs Apple Container and the device token, but no GitHub token or `gh` executable. Broad GitHub credentials stay on the coordinator. The Mac client remains a foreground process; the coordinator can run in the foreground or through the Linux Compose deployment.
 
 Once the client has completed any outstanding recovery and is polling, dispatch the existing test:
 

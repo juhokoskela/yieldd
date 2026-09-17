@@ -30,6 +30,82 @@ Use trusted workloads and private repositories. The outer bootstrap and nested j
 
 The state directory is created with mode `0700`; existing permissive directories are rejected. `state.json` is atomically replaced with mode `0600` and synced to disk. It temporarily contains JIT credentials until their encrypted upload succeeds. Keep the directory private, outside version control, on persistent local storage. One process holds its ownership lock. The lock does not coordinate separate hosts or different state directories.
 
+## Container deployment on Linux
+
+The [Dockerfile](Dockerfile) builds a static binary with Go 1.27.1. Its runtime image contains the coordinator and TLS root certificates, runs as UID/GID `65532`, and needs neither a Docker socket nor privileged mode. The Mac still runs `yieldd connect` natively to manage Apple Container guests.
+
+The [Compose configuration](compose.yaml) targets Docker Engine on Linux. It uses [host networking](https://docs.docker.com/engine/network/drivers/host/) so the device API can keep its loopback-only binding at `127.0.0.1:8787`. Terminate HTTPS with a reverse proxy on that same Linux host. Do not expose port 8787 directly or assume this networking arrangement works unchanged on macOS.
+
+Before moving from the Mac, let its active assignment finish and verify both client cleanup and coordinator cleanup. Stop the old coordinator before starting this one. Do not migrate with an outstanding lease or connected-client journal, and do not run two coordinators for the same scale set.
+
+Create a private environment file outside the checkout, for example `/etc/yieldd/coordinator.env`, owned by the deploying account with mode `0600`:
+
+```dotenv
+GH_TOKEN=REPLACE_WITH_SERVER_GITHUB_TOKEN
+YIELDD_CLIENT_TOKEN=REPLACE_WITH_SHARED_DEVICE_TOKEN
+YIELDD_DEVICE_ID=REPLACE_WITH_EXISTING_LOWERCASE_DEVICE_UUID
+YIELDD_REPOSITORY=juhokoskela/yieldd
+YIELDD_INFRASTRUCTURE=juhokoskela/yieldd-infra
+YIELDD_FALLBACK_RUNNER='"ubuntu-24.04"'
+```
+
+The fallback remains required and may instead be a JSON label array. Credentials are injected at runtime, never copied into the build context or image. Docker administrators can inspect container environment variables; restrict access to the daemon and the environment file. Avoid printing `docker compose config` with real credentials.
+
+From `Server/` on the Linux host:
+
+```sh
+docker compose --env-file /etc/yieldd/coordinator.env up -d --build
+docker compose --env-file /etc/yieldd/coordinator.env logs -f coordinator
+```
+
+Configure the host's HTTPS proxy to forward `/v1/` to `http://127.0.0.1:8787`, preserve the Authorization header, allow 20-second long polls and 60-second requests, and disable caching and credential/body logging. For example, a host-installed [Caddy reverse proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy) can serve a domain pointing at this server:
+
+```caddyfile
+yieldd.example.com {
+    reverse_proxy /v1/* 127.0.0.1:8787
+}
+```
+
+Use your actual domain with a publicly trusted certificate. Then start the Mac client with its existing device ID and shared token:
+
+```sh
+.build/yieldd.app/Contents/MacOS/yieldd connect \
+  --server https://yieldd.example.com \
+  --device-id "$YIELDD_DEVICE_ID"
+```
+
+Compose keeps state in the named volume `yieldd-coordinator-state`, with a private directory owned by UID `65532`. The root filesystem is read-only; only the state volume is writable. Recreating the container preserves the volume and coordinator identity. Back it up as sensitive data. Never use `docker compose down --volumes` or prune this volume while recovery obligations remain. Host networking is shared with other host processes, not an additional network isolation boundary.
+
+Compose restarts the coordinator unless explicitly stopped and allows 90 seconds for shutdown. Repeated errors still require operator attention; restarting does not make an ambiguous dispatch safe to repeat. To stop without deleting state:
+
+```sh
+docker compose --env-file /etc/yieldd/coordinator.env stop coordinator
+```
+
+For explicit recovery, stop the service first, load the same configuration into your shell, then run a one-off container against the same volume:
+
+```sh
+set -a
+. /etc/yieldd/coordinator.env
+set +a
+docker compose --env-file /etc/yieldd/coordinator.env run --rm coordinator \
+  --repository "$YIELDD_REPOSITORY" \
+  --infrastructure "$YIELDD_INFRASTRUCTURE" \
+  --fallback-runner "$YIELDD_FALLBACK_RUNNER" \
+  --device-id "$YIELDD_DEVICE_ID" \
+  --state-dir /var/lib/yieldd \
+  --recover
+```
+
+As with native execution, `--recover` cannot bypass an issued local assignment awaiting guest destruction. Start the Mac client to resolve that obligation.
+
+Build and smoke-test the image without GitHub credentials or network access during the smoke test:
+
+```sh
+docker build -t local/yieldd-coordinator:dev .
+bash test-image.sh
+```
+
 ## Lifecycle and recovery
 
 The service records intent before registration and dispatch. It uploads an encrypted, uniquely named GitHub secret, then clears the local JIT value and records dispatch intent in one write. Dispatch inputs contain only the runner name and fallback labels. The request enables [`return_run_details`](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event), and the service persists the returned run ID. Title-based discovery is reserved for lost responses or a crash before that ID was saved. It never redispatches an uncertain request.

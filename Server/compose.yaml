@@ -1,0 +1,39 @@
+name: yieldd-coordinator
+
+services:
+  coordinator:
+    image: local/yieldd-coordinator:dev
+    build: .
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 90s
+    environment:
+      GH_TOKEN: ${GH_TOKEN:?Set GH_TOKEN}
+      YIELDD_CLIENT_TOKEN: ${YIELDD_CLIENT_TOKEN:?Set YIELDD_CLIENT_TOKEN}
+    command:
+      - --repository
+      - ${YIELDD_REPOSITORY:?Set YIELDD_REPOSITORY}
+      - --infrastructure
+      - ${YIELDD_INFRASTRUCTURE:?Set YIELDD_INFRASTRUCTURE}
+      - --fallback-runner
+      - ${YIELDD_FALLBACK_RUNNER:?Set YIELDD_FALLBACK_RUNNER to a JSON label string or array}
+      - --device-id
+      - ${YIELDD_DEVICE_ID:?Set YIELDD_DEVICE_ID}
+      - --client-listen
+      - 127.0.0.1:8787
+      - --state-dir
+      - /var/lib/yieldd
+    volumes:
+      - state:/var/lib/yieldd
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  state:
+    name: yieldd-coordinator-state
