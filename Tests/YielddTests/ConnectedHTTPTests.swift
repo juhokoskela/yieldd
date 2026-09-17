@@ -21,7 +21,23 @@ func connectedHTTPRejectsRedirectsAndErrorsWithoutLeakingBodies(_ status: Int) t
     let body = "private-jit secret-token"
     let server = try ConnectedHTTPFixture(response: "HTTP/1.1 \(status) Error\r\nLocation: http://127.0.0.1:1/stolen\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
     defer { server.close() }
-    #expect(throws: ConnectedRunnerError.http(status)) { try server.client.poll() }
+    do {
+        _ = try server.client.poll()
+        Issue.record("Expected HTTP rejection")
+    } catch {
+        #expect(error as? ConnectedRunnerError == .http(status))
+        #expect(!describeError(error).contains("private-jit"))
+        #expect(!describeError(error).contains("secret-token"))
+    }
+}
+
+@Test
+func connectedHTTPReusesTheClientForIndependentResponses() throws {
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+    defer { server.close() }
+    let client = server.client
+    #expect(try client.poll() == nil)
+    #expect(try client.poll() == nil)
 }
 
 @Test
@@ -37,8 +53,10 @@ func connectedHTTPStopsLongPollOnCancellation() throws {
     let server = try ConnectedHTTPFixture(response: nil)
     defer { server.close() }
     var client = server.client
+    let deadline = ProcessInfo.processInfo.systemUptime + 5
     client = ConnectedHTTPClient(server: client.server, deviceID: client.deviceID, token: client.token, checkCancellation: {
         if !server.request.isEmpty { throw CancellationError() }
+        if ProcessInfo.processInfo.systemUptime >= deadline { throw TestFailure.runnerJob }
     })
     #expect(throws: CancellationError.self) { try client.poll() }
 }

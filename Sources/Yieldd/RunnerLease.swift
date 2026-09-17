@@ -146,17 +146,17 @@ final class RunnerLeaseStore: @unchecked Sendable {
             )
         }
         try data.write(to: fileURL, options: .atomic)
-        try synchronize(fileURL)
-        try synchronize(directory)
+        try synchronizeRunnerState(fileURL)
+        try synchronizeRunnerState(directory)
     }
+}
 
-    private func synchronize(_ url: URL) throws {
-        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { _ = Darwin.close(descriptor) }
-        guard Darwin.fsync(descriptor) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+func synchronizeRunnerState(_ url: URL) throws {
+    let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { _ = Darwin.close(descriptor) }
+    guard Darwin.fsync(descriptor) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 }
 

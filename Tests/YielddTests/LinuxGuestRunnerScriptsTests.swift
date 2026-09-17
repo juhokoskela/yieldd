@@ -6,7 +6,7 @@ import Testing
 func linuxJITIsDeliveredWithoutRegistrationOrArgumentsAndConsumedOnce() throws {
     let fixture = try LinuxRunnerScriptFixture()
     defer { fixture.remove() }
-    let configure = fixture.request("configure", ["--jit", "yieldd-test"], input: "private-jit\n")
+    let configure = fixture.request("configure", ["--jit"], input: "private-jit\n")
     try ProcessExecutor().execute(configure).requireSuccess(for: configure)
     #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("config-arguments").path))
     let jitFile = fixture.directory.appendingPathComponent("runner/.yieldd-runner/jit-config")
@@ -20,6 +20,15 @@ func linuxJITIsDeliveredWithoutRegistrationOrArgumentsAndConsumedOnce() throws {
     #expect(try String(contentsOf: fixture.directory.appendingPathComponent("jit-received"), encoding: .utf8) == "private-jit")
     try ProcessExecutor().execute(start).requireSuccess(for: start)
     #expect(try String(contentsOf: fixture.directory.appendingPathComponent("starts"), encoding: .utf8) == "start\n")
+}
+
+@Test
+func linuxJITConfigurationRejectsUnusedNameAndInvalidArgumentCounts() throws {
+    let fixture = try LinuxRunnerScriptFixture()
+    defer { fixture.remove() }
+    for arguments in [[], ["--jit", "unused-name"], ["owner/repo"], ["a", "b", "c", "d"]] {
+        #expect(try ProcessExecutor().execute(fixture.request("configure", arguments)).terminationStatus == 2)
+    }
 }
 
 @Test
@@ -51,7 +60,7 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
             Issue.record("The listener has already completed")
         }, stateChanged: { _ in }).run(
             id: RunnerID(value: "yieldd-test"),
-            assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+            pickupTimeout: 300, executionTimeout: 10
         )
         Issue.record("Expected listener failure")
     } catch let error as RunnerAssignmentError {

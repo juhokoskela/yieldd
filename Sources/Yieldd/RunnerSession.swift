@@ -85,7 +85,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
                 try ReservedRunnerJob(
                     backend: backend, checkCancellation: checkCancellation,
                     wait: wait, stateChanged: stateChanged
-                ).run(id: id, assignment: assignment, executionTimeout: jobTimeout)
+                ).run(id: id, pickupTimeout: assignment.pickupTimeout, executionTimeout: jobTimeout)
             } else {
                 try backend.exec(
                     ["yieldd-runner-control", "run"], timeout: jobTimeout,

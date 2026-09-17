@@ -8,15 +8,27 @@ struct ConnectedOffer: Codable, Equatable {
     let platform: String
     let architecture: String
 
-    func validate() throws {
+    init(owner: String, runner: String, repository: String, platform: String, architecture: String) throws {
+        let suffix = String(runner.dropFirst("yieldd-bootstrap-".count))
         guard UUID(uuidString: owner)?.uuidString.lowercased() == owner,
               runner.hasPrefix("yieldd-bootstrap-"),
-              UUID(uuidString: String(runner.dropFirst("yieldd-bootstrap-".count)))?.uuidString.lowercased()
-                == String(runner.dropFirst("yieldd-bootstrap-".count)),
+              UUID(uuidString: suffix)?.uuidString.lowercased() == suffix,
               platform == "linux", architecture == "arm64" else {
             throw ConnectedRunnerError.invalidOffer
         }
         _ = try GitHubRepository(repository)
+        self.owner = owner
+        self.runner = runner
+        self.repository = repository
+        self.platform = platform
+        self.architecture = architecture
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(owner: values.decode(String.self, forKey: .owner), runner: values.decode(String.self, forKey: .runner),
+                      repository: values.decode(String.self, forKey: .repository), platform: values.decode(String.self, forKey: .platform),
+                      architecture: values.decode(String.self, forKey: .architecture))
     }
 }
 
@@ -28,6 +40,11 @@ struct ConnectedLease: Codable, Equatable {
 
 struct ConnectedRunnerStore {
     let directory: URL
+    var publish: (URL, URL) throws -> Void = { source, destination in
+        guard Darwin.rename(source.path, destination.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
     var file: URL { directory.appendingPathComponent("connected-runner.json") }
 
     func load() throws -> ConnectedLease? {
@@ -47,36 +64,35 @@ struct ConnectedRunnerStore {
               let lease = try? JSONDecoder().decode(ConnectedLease.self, from: data) else {
             throw ConnectedRunnerError.invalidState
         }
-        try lease.offer.validate()
         return lease
     }
 
     func save(_ lease: ConnectedLease) throws {
-        try lease.offer.validate()
         let data = try JSONEncoder().encode(lease)
         guard data.count <= 8192 else { throw ConnectedRunnerError.invalidState }
-        try data.write(to: file, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        try synchronize(file)
-        try synchronize(directory)
+        let temporary = directory.appendingPathComponent(".connected-runner-\(UUID().uuidString).tmp")
+        let fd = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+        try handle.close()
+        try publish(temporary, file)
+        try synchronizeRunnerState(directory)
     }
 
     func clear() throws {
         try FileManager.default.removeItem(at: file)
-        try synchronize(directory)
-    }
-
-    private func synchronize(_ url: URL) throws {
-        let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { _ = Darwin.close(fd) }
-        guard Darwin.fsync(fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        try synchronizeRunnerState(directory)
     }
 }
 
 enum ConnectedRunnerError: Error, Equatable, LocalizedError {
     case invalidOffer, invalidState, invalidJIT, invalidServer, invalidToken, recoveryRequired, identityChanged
     case responseTooLarge, transport, http(Int)
+    case registrationReconciliationRequired(String), confirmationMismatch
 
     var errorDescription: String? {
         switch self {
@@ -88,8 +104,11 @@ enum ConnectedRunnerError: Error, Equatable, LocalizedError {
         case .recoveryRequired: "A connected runner needs cleanup. Run connect with its original server and device ID before using standalone commands."
         case .identityChanged: "The connected runner journal belongs to another server or device. Reconnect with its original settings to recover it."
         case .responseTooLarge: "The coordinator response exceeded its size limit."
-        case .transport: "The coordinator request failed. Reconnect with the same settings to recover any outstanding assignment."
+        case .transport: "The coordinator request failed. Outstanding cleanup remains in the local journal."
         case let .http(status): "The coordinator returned HTTP \(status). Any unacknowledged cleanup remains in the local journal."
+        case let .registrationReconciliationRequired(runner):
+            "The coordinator no longer recognizes this assignment. Restore its original state, or manually remove GitHub runner \(runner), then run connect with --confirm-registration-removed \(runner) and the original server and device ID."
+        case .confirmationMismatch: "The confirmed runner must match the outstanding connected journal. No recovery state was cleared."
         }
     }
 }

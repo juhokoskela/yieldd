@@ -17,7 +17,7 @@ func reservedRunnerUsesIndependentPickupAndExecutionDeadlines() throws {
         backend: backend, checkCancellation: {}, wait: { now += $0 }, stateChanged: { states.append($0) },
         currentTime: { now }
     )
-    try job.run(id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test", pickupTimeout: 0.75), executionTimeout: 2)
+    try job.run(id: assignmentID, pickupTimeout: 0.75, executionTimeout: 2)
     #expect(now > 0.75)
     #expect(states == [.listenerStarted(assignmentID), .jobStarted(assignmentID), .listenerExited(assignmentID, status: 0)])
 }
@@ -29,7 +29,7 @@ func reservedRunnerObservesAJobThatFinishesBetweenPolls() throws {
     try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in
         Issue.record("A completed listener must not wait")
     }, stateChanged: { states.append($0) }).run(
-        id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+        id: assignmentID, pickupTimeout: 300, executionTimeout: 10
     )
     #expect(states.contains(.jobStarted(assignmentID)))
     #expect(backend.commands.last == ["yieldd-runner-control", "run"])
@@ -41,7 +41,7 @@ func reservedRunnerTimesOutInTheCorrectPhase(started: Bool) throws {
     var now: TimeInterval = 0
     let job = ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { now += $0 }, stateChanged: { _ in }, currentTime: { now })
     #expect(throws: started ? RunnerAssignmentError.executionTimedOut : .pickupTimedOut) {
-        try job.run(id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test", pickupTimeout: 1), executionTimeout: 1)
+        try job.run(id: assignmentID, pickupTimeout: 1, executionTimeout: 1)
     }
 }
 
@@ -50,7 +50,7 @@ func reservedRunnerRejectsMalformedStatus(_ status: String) throws {
     let backend = AssignmentBackend(statuses: [status])
     #expect(throws: RunnerAssignmentError.invalidStatus) {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
-            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+            id: assignmentID, pickupTimeout: 300, executionTimeout: 10
         )
     }
 }
@@ -60,7 +60,7 @@ func reservedRunnerDoesNotReportSuccessWhenNoJobRan() throws {
     let backend = AssignmentBackend(statuses: [exited(false)])
     #expect(throws: RunnerAssignmentError.exitedWithoutJob) {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
-            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+            id: assignmentID, pickupTimeout: 300, executionTimeout: 10
         )
     }
 }
@@ -80,7 +80,7 @@ func reservedRunnerReportsFailedListenerOutput(_ replay: ProcessResult) throws {
         .filter { !$0.isEmpty }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
     #expect(throws: RunnerAssignmentError.listenerFailed(7, output: output)) {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
-            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+            id: assignmentID, pickupTimeout: 300, executionTimeout: 10
         )
     }
 }
@@ -101,7 +101,7 @@ func reservedRunnerPreservesReplayTransportAndCancellationErrors(_ failure: Stri
     let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor)
     do {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
-            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+            id: assignmentID, pickupTimeout: 300, executionTimeout: 10
         )
         Issue.record("Expected replay failure")
     } catch let error as ProcessExecutionError {
@@ -114,7 +114,7 @@ func reservedRunnerRejectsReplayThatDisagreesWithTerminalStatus() throws {
     let backend = AssignmentBackend(statuses: [exited(true, status: 7)])
     #expect(throws: RunnerAssignmentError.invalidStatus) {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
-            id: assignmentID, assignment: RunnerAssignment(routingLabel: "yieldd-request-test"), executionTimeout: 10
+            id: assignmentID, pickupTimeout: 300, executionTimeout: 10
         )
     }
 }

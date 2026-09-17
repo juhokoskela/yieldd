@@ -26,10 +26,6 @@ struct ReservedRunnerJob {
     let stateChanged: (RunnerSessionState) -> Void
     var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
-    func run(id: RunnerID, assignment: RunnerAssignment, executionTimeout: TimeInterval?) throws {
-        try run(id: id, pickupTimeout: assignment.pickupTimeout, executionTimeout: executionTimeout)
-    }
-
     func run(id: RunnerID, pickupTimeout: TimeInterval, executionTimeout: TimeInterval?) throws {
         try checkCancellation()
         try backend.exec(["yieldd-runner-control", "start"], timeout: 30,

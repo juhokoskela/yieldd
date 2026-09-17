@@ -1,13 +1,34 @@
 import Foundation
 
-struct ConnectedHTTPClient {
+final class ConnectedHTTPClient {
     let server: URL
     let deviceID: String
     let token: String
     let checkCancellation: () throws -> Void
+    private let session: URLSession
+
+    init(server: URL, deviceID: String, token: String, checkCancellation: @escaping () throws -> Void) {
+        self.server = server
+        self.deviceID = deviceID
+        self.token = token
+        self.checkCancellation = checkCancellation
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 65
+        configuration.timeoutIntervalForResource = 70
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        session = URLSession(configuration: configuration)
+    }
+
+    deinit { session.invalidateAndCancel() }
 
     static func serverURL(_ value: String) throws -> URL {
-        guard let url = URL(string: value), let host = url.host, !host.isEmpty,
+        guard var components = URLComponents(string: value) else { throw ConnectedRunnerError.invalidServer }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        if components.port == (components.scheme == "https" ? 443 : 80) { components.port = nil }
+        guard let url = components.url, let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
               url.path.isEmpty || url.path == "/",
               url.scheme == "https" || (url.scheme == "http" && ["127.0.0.1", "[::1]", "::1"].contains(host)) else {
@@ -26,7 +47,6 @@ struct ConnectedHTTPClient {
         let (status, data) = try request("poll", offer: nil)
         if status == 204 { return nil }
         let offer = try JSONDecoder().decode(ConnectedOffer.self, from: data)
-        try offer.validate()
         return offer
     }
 
@@ -37,11 +57,12 @@ struct ConnectedHTTPClient {
     }
 
     func complete(_ offer: ConnectedOffer) throws {
-        _ = try request("complete", offer: offer, cancellable: false)
+        _ = try request("complete", offer: offer, checkCancellation: {})
     }
 
-    private func request(_ action: String, offer: ConnectedOffer?, cancellable: Bool = true) throws -> (Int, Data) {
-        if cancellable { try checkCancellation() }
+    private func request(_ action: String, offer: ConnectedOffer?, checkCancellation override: (() throws -> Void)? = nil) throws -> (Int, Data) {
+        let check = override ?? checkCancellation
+        try check()
         var body = ["device_id": deviceID]
         if let offer { body["owner"] = offer.owner; body["runner"] = offer.runner }
         var request = URLRequest(url: server.appendingPathComponent("v1/\(action)"))
@@ -49,21 +70,15 @@ struct ConnectedHTTPClient {
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 65
-        configuration.timeoutIntervalForResource = 70
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
         let response = ConnectedHTTPResponse()
-        let session = URLSession(configuration: configuration, delegate: response, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
         let task = session.dataTask(with: request)
+        task.delegate = response
+        defer { task.cancel() }
         task.resume()
         while response.completed.wait(timeout: .now() + .milliseconds(100)) == .timedOut {
-            if cancellable { try checkCancellation() }
+            try check()
         }
-        if cancellable { try checkCancellation() }
+        try check()
         let (status, data) = try response.result()
         guard status == 200 || (action == "poll" && status == 204) else {
             throw ConnectedRunnerError.http(status)
