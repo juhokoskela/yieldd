@@ -73,16 +73,11 @@ struct ConnectCommand: ParsableCommand {
                     try MacOSVirtualizationBackend.validateTemplate(at: template)
                     try VirtualizationEntitlement.requireCurrentProcess()
                 }
-                let container: URL?
-                if platforms.contains(.linux) {
-                    let located = try ExecutableLocator().locate("container")
-                    try AppleContainerSystem(containerURL: located, executor: ProcessExecutor(checkCancellation: stop.check)).start()
-                    container = located
-                } else { container = nil }
                 let slots = try platforms.map { platform -> RunnerSlotBackend in
                     switch platform {
                     case .linux:
-                        guard let container else { throw RunnerServiceConfigurationError.missingContainerExecutable }
+                        let container = try ExecutableLocator().locate("container")
+                        try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check)).start()
                         return .linux(containerURL: container)
                     case .macOS:
                         guard let template else { throw RunnerServiceConfigurationError.templatePairRequired }

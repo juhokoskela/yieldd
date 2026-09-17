@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -176,14 +177,7 @@ func sameLabels(a, b []scaleset.Label) bool {
 		return false
 	}
 	for _, want := range b {
-		found := false
-		for _, got := range a {
-			if got.Name == want.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.ContainsFunc(a, func(got scaleset.Label) bool { return got.Name == want.Name }) {
 			return false
 		}
 	}

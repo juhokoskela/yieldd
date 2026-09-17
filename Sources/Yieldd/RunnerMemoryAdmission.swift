@@ -36,18 +36,11 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
         checkCancellation: () throws -> Void = {},
         onBlocked: () -> Void = {}
     ) throws -> RunnerMemoryReservation {
-        try validateCapacity(reserving: reservationBytes)
-
         var reportedBlocked = false
         while true {
             try checkCancellation()
-            let allocation: RunnerMemoryAllocation? = condition.withLock {
-                guard let allocation = availableAllocation(reserving: reservationBytes) else { return nil }
-                reservedBytes += reservationBytes
-                return allocation
-            }
-            if let allocation {
-                return RunnerMemoryReservation(allocation: allocation, bytes: reservationBytes)
+            if let reservation = try tryAcquire(reserving: reservationBytes) {
+                return reservation
             }
 
             if !reportedBlocked {
