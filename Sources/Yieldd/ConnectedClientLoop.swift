@@ -52,7 +52,7 @@ func runConnectedClient(
             if case let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) = error,
                !isCancellation(operation), cleanup.allSatisfy({ isTransientConnectedFailure($0.error) }) {
                 try recoverWithRetry()
-                if !isTransientConnectedFailure(operation) { throw operation }
+                if !isTransientConnectedFailure(operation), !(operation is ConnectedExecutionError) { throw operation }
                 continue
             }
             guard isTransientConnectedFailure(error) else { throw error }

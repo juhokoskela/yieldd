@@ -114,10 +114,14 @@ func (s *coordinatorLoop) HandleJobCompleted(ctx context.Context, job *scaleset.
 	return s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobCompleted(ctx, job) })
 }
 
-func listenForDevice(address, token string) (net.Listener, error) {
+func listenForDevice(address, token string, allowNonLoopback bool) (net.Listener, error) {
 	host, _, err := net.SplitHostPort(address)
-	if err != nil || !net.ParseIP(host).IsLoopback() {
-		return nil, errors.New("client-listen must use a loopback IP; terminate remote HTTPS at a trusted local proxy")
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil || (!ip.IsLoopback() && !ip.IsUnspecified()) {
+		return nil, errors.New("client-listen must use a loopback or unspecified IP address")
+	}
+	if !ip.IsLoopback() && !allowNonLoopback {
+		return nil, errors.New("non-loopback device HTTP requires --allow-non-loopback-client-listen; use it only inside a container with a loopback-only published port and an HTTPS proxy")
 	}
 	if len(token) < 32 || len(token) > 256 {
 		return nil, errors.New("YIELDD_CLIENT_TOKEN must contain 32 to 256 non-whitespace characters")
@@ -146,7 +150,7 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 			return
 		}
 		switch r.URL.Path {
-		case "/v1/poll", "/v1/accept", "/v1/complete":
+		case "/v1/poll", "/v1/accept", "/v1/complete", "/v1/renew":
 		default:
 			http.NotFound(w, r)
 			return
@@ -191,6 +195,12 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 		case "/v1/complete":
 			err = s.invoke(r.Context(), func(ctx context.Context) error { return s.worker.completeDevice(ctx, request) })
 			response = struct{}{}
+		case "/v1/renew":
+			err = s.invoke(r.Context(), func(ctx context.Context) error {
+				var renewalErr error
+				response, renewalErr = s.worker.renewDevice(ctx, request)
+				return renewalErr
+			})
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 			return

@@ -39,10 +39,16 @@ type coordinator struct {
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
+	if err := c.recordLocalJob(job.RunnerName, job.RunnerID, false); err != nil {
+		return err
+	}
 	c.logger.Info("Job started", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID)
 	return nil
 }
 func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
+	if err := c.recordLocalJob(job.RunnerName, job.RunnerID, true); err != nil {
+		return err
+	}
 	c.logger.Info("Job completed", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID, "result", job.Result)
 	return nil
 }

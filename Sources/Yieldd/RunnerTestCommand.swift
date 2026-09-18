@@ -77,7 +77,7 @@ struct RunnerTestCommand: ParsableCommand {
                 print("Runner \(id.value) is waiting for available host memory.")
             case .waitingForGitHubCleanup, .leaseCleanupFailed:
                 reportRunnerRecoveryState(state)
-            case .listenerStarted, .jobStarted, .listenerExited, .capacityReleased, .cleanupCompleted:
+            case .listenerStarted, .jobStarted, .listenerExited, .executionStopped, .capacityReleased, .cleanupCompleted:
                 reportRunnerServiceState(state, platform: backend.platform, output: .terminal)
             case .preparing, .waitingForJob, .cleaningUp:
                 break

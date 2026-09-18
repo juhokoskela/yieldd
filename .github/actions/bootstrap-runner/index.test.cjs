@@ -13,6 +13,7 @@ const name = 'yieldd-bootstrap-test';
 function encodeSettings(settings) {
     return Buffer.from(JSON.stringify({
         '.runner': Buffer.from(JSON.stringify(settings)).toString('base64'),
+        '.credentials': Buffer.from('{}').toString('base64'),
     })).toString('base64');
 }
 
@@ -36,7 +37,7 @@ function configuration(settings = {}, files = {}) {
     return Buffer.from(JSON.stringify({
         '.runner': Buffer.from(JSON.stringify({
             agentName: name, ephemeral: true, workFolder: '_work', ...settings,
-        })).toString('base64'), ...files,
+        })).toString('base64'), '.credentials': Buffer.from('{}').toString('base64'), ...files,
     })).toString('base64');
 }
 
@@ -56,6 +57,16 @@ test('child environment is an allowlist, not a copy of bootstrap credentials or 
     assert.deepEqual(Object.keys(env).sort(), ['HOME', 'LANG', 'PATH', 'TEMP', 'TMP', 'TMPDIR']);
     assert.equal(env.HOME, '/private/home');
     assert.equal(env.TMPDIR, '/private/tmp');
+});
+
+test('JIT accepts only the expected files with canonical nonempty base64 contents', () => {
+    validateConfiguration(configuration({}, { '.credentials_rsaparams': 'e30=' }), name);
+    for (const key of ['.env', '.path', '.runner_migrated', '../outside']) {
+        assert.throws(() => validateConfiguration(configuration({}, { [key]: 'e30=' }), name), /JIT configuration/);
+    }
+    for (const value of [undefined, '', 'not-base64', 'e30=!']) {
+        assert.throws(() => validateConfiguration(configuration({}, { '.credentials': value }), name), /JIT configuration/);
+    }
 });
 
 test('archive contents must match the pinned checksum', async () => {

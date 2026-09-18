@@ -211,7 +211,7 @@ func TestDeviceHTTPAuthenticatesAndDoesNotReplayCredentials(t *testing.T) {
 		path, token string
 		status      int
 	}{
-		{"accept", "wrong", 401}, {"poll", token, 200}, {"accept", token, 200}, {"accept", token, 410}, {"complete", token, 200}, {"complete", token, 200},
+		{"accept", "wrong", 401}, {"renew", "wrong", 401}, {"poll", token, 200}, {"accept", token, 200}, {"renew", token, 200}, {"accept", token, 410}, {"complete", token, 200}, {"complete", token, 200},
 	} {
 		r, _ := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/"+test.path, strings.NewReader(string(body)))
 		r.Header.Set("Authorization", "Bearer "+test.token)
@@ -230,16 +230,43 @@ func TestDeviceHTTPAuthenticatesAndDoesNotReplayCredentials(t *testing.T) {
 	}
 }
 
-func TestDeviceListenerRejectsPublicCleartextAndWeakTokens(t *testing.T) {
-	for _, address := range []string{"0.0.0.0:0", "localhost:0", "192.168.1.2:0"} {
-		if listener, err := listenForDevice(address, strings.Repeat("x", 32)); err == nil {
+func TestDeviceListenerRejectsWildcardBindingByDefault(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:0", "[::]:0"} {
+		listener, err := listenForDevice(address, strings.Repeat("x", 32), false)
+		if err == nil {
 			listener.Close()
-			t.Fatal("public cleartext enabled")
+			t.Errorf("wildcard binding %s accepted without explicit opt-in", address)
+		} else if !strings.Contains(err.Error(), "--allow-non-loopback-client-listen") {
+			t.Errorf("missing opt-in guidance: %v", err)
 		}
 	}
-	if listener, err := listenForDevice("127.0.0.1:0", "short"); err == nil {
+}
+
+func TestDeviceListenerRequiresExplicitLoopbackOrContainerBindingAndStrongTokens(t *testing.T) {
+	for _, address := range []string{":0", "localhost:0", "192.168.1.2:0"} {
+		for _, allow := range []bool{false, true} {
+			if listener, err := listenForDevice(address, strings.Repeat("x", 32), allow); err == nil {
+				listener.Close()
+				t.Fatalf("unsupported address %s accepted with opt-in %v", address, allow)
+			}
+		}
+	}
+	for _, test := range []struct {
+		address string
+		allow   bool
+	}{
+		{"127.0.0.1:0", false}, {"[::1]:0", false}, {"127.0.0.1:0", true},
+		{"0.0.0.0:0", true}, {"[::]:0", true},
+	} {
+		listener, err := listenForDevice(test.address, strings.Repeat("x", 32), test.allow)
+		if err != nil {
+			t.Fatal(err)
+		}
 		listener.Close()
-		t.Fatal("weak token accepted")
+		if listener, err := listenForDevice(test.address, "short", test.allow); err == nil {
+			listener.Close()
+			t.Fatal("weak token accepted")
+		}
 	}
 }
 

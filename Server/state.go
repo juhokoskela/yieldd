@@ -157,6 +157,9 @@ func (l *lease) validateLocal(device string) error {
 		return nil
 	}
 	a := l.Local
+	if (a.JobCompleted && !a.JobStarted) || ((a.JobStarted || a.JobCompleted) && a.Phase != localIssued) {
+		return errors.New("invalid local job state")
+	}
 	if device == "" || a.DeviceID != device || a.Expires.IsZero() || l.DispatchIntent {
 		return errors.New("invalid local lease identity")
 	}

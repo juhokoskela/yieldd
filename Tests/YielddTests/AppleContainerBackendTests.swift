@@ -38,7 +38,8 @@ func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
                 "--",
                 "docker", "info",
             ],
-            timeout: DockerReadiness.probeTimeout
+            timeout: DockerReadiness.probeTimeout,
+            outputCapture: .tail(maxBytes: 64 * 1_024)
         ),
         ProcessRequest(
             executableURL: containerURL,
@@ -49,7 +50,8 @@ func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
                 "--",
                 "yieldd-runner-control", "memory", "full",
             ],
-            timeout: AppleContainerBackend.memoryConfigurationTimeout
+            timeout: AppleContainerBackend.memoryConfigurationTimeout,
+            outputCapture: .tail(maxBytes: 64 * 1_024)
         ),
     ])
 }
@@ -69,7 +71,8 @@ func constructsExecCommandWithoutInterpretingArguments() throws {
             "--name", runnerID.value,
             "--user", "runner",
             "--",
-        ] + arguments
+        ] + arguments,
+        outputCapture: .tail(maxBytes: 64 * 1_024)
     )])
 }
 
@@ -223,8 +226,17 @@ func stopRunnerUsesBoundedNoncancellableRootCommand() throws {
             "yieldd-runner-control", "stop",
         ],
         timeout: AppleContainerBackend.runnerStopTimeout,
+        outputCapture: .tail(maxBytes: 64 * 1_024),
         cancellable: false
     )])
+}
+
+@Test
+func guestCommandsDefaultToBoundedOutput() throws {
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor)
+    try backend.exec(["yieldd-configure-runner", "--jit"], on: runnerID)
+    #expect(executor.requests.first?.outputCapture == .tail(maxBytes: 64 * 1_024))
 }
 
 @Test
@@ -260,7 +272,8 @@ func passesStandardInputWithoutPuttingItInArguments() throws {
             "--",
             "yieldd-configure-runner", "owner/repository", runnerID.value,
         ],
-        standardInput: standardInput
+        standardInput: standardInput,
+        outputCapture: .tail(maxBytes: 64 * 1_024)
     )])
     #expect(!executor.requests[0].arguments.contains("registration-token"))
 }
@@ -285,7 +298,8 @@ func passesTimeoutWithoutPuttingItInArguments() throws {
             "--",
             "/opt/actions-runner/run.sh",
         ],
-        timeout: 90
+        timeout: 90,
+        outputCapture: .tail(maxBytes: 64 * 1_024)
     )])
 }
 

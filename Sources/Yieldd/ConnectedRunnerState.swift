@@ -122,8 +122,9 @@ func validateConnectedJIT(_ encoded: String, runner: String) throws {
     guard encoded.utf8.count <= 1_024 * 1_024,
           let data = Data(base64Encoded: encoded),
           let files = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-          !files.isEmpty,
-          files.keys.allSatisfy({ $0.hasPrefix(".") && $0.count > 1 && $0.dropFirst().utf8.allSatisfy({ (97...122).contains($0) || $0 == 95 }) }),
+          files[".credentials"] != nil,
+          Set(files.keys).isSubset(of: [".runner", ".credentials", ".credentials_rsaparams"]),
+          files.values.allSatisfy({ Data(base64Encoded: $0).map { !$0.isEmpty } == true }),
           let settings = files[".runner"].flatMap({ Data(base64Encoded: $0) }),
           let decoded = try? JSONSerialization.jsonObject(with: settings) as? [String: Any] else {
         throw ConnectedRunnerError.invalidJIT

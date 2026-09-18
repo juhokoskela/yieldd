@@ -77,6 +77,7 @@ struct MachineTestRunner {
             machineMayExist = true
             try backend.create(id: id, memory: reservation.allocation)
             try checkCancellation()
+            try RunnerGuestProtocol.validate(backend: backend, id: id)
             switch backend.platform {
             case .linux:
                 try backend.exec(

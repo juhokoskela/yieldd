@@ -29,6 +29,8 @@ func machineTestRunsChecksAndCleanupInOrder() throws {
 
     #expect(backend.calls == [
         .create(machineTestID, .full),
+        .exec(machineTestID, ["yieldd-configure-runner", "--protocol-version"]),
+        .exec(machineTestID, ["yieldd-runner-control", "--protocol-version"]),
         .exec(machineTestID, ["docker", "run", "--rm", "hello-world"]),
         .destroy(machineTestID),
     ])
@@ -62,6 +64,8 @@ func macOSMachineValidationAlwaysDestroysClone(validationFails: Bool) throws {
     }
     #expect(backend.calls == [
         .create(machineTestID, .full),
+        .exec(machineTestID, ["yieldd-configure-runner", "--protocol-version"]),
+        .exec(machineTestID, ["yieldd-runner-control", "--protocol-version"]),
         .exec(machineTestID, ["/bin/bash", "-s"]),
         .destroy(machineTestID),
     ])
@@ -169,17 +173,18 @@ private final class RecordingRunnerBackend: RunnerBackend {
         as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult {
+        calls.append(.exec(id, arguments))
+        if arguments.last == "--protocol-version" { return processResult(stdout: "1\n") }
         if platform == .macOS {
             #expect(standardInput == Data(MacOSTemplateValidation.script.utf8))
             #expect(outputCapture == .tail(maxBytes: MacOSGuestSSH.outputTailBytes))
             #expect(timeout == MacOSTemplateValidation.timeout)
         } else {
             #expect(standardInput == nil)
-            #expect(outputCapture == .all)
+            #expect(outputCapture == .tail(maxBytes: 64 * 1_024))
             #expect(timeout == MachineTestRunner.helloWorldTimeout)
         }
         #expect(user == .runner)
-        calls.append(.exec(id, arguments))
         guard !execOutcomes.isEmpty else {
             throw TestFailure.unexpectedBackendCall
         }

@@ -46,7 +46,7 @@ final class ConnectedHTTPClient {
     }
 
     func poll() throws -> ConnectedOffer? {
-        let (status, data) = try request("poll", offer: nil)
+        let (status, data) = try request("poll", offer: nil, checkCancellation: checkCancellation)
         if status == 204 { return nil }
         let offer = try JSONDecoder().decode(ConnectedOffer.self, from: data)
         guard offer.runnerPlatform == platform else { throw ConnectedRunnerError.invalidOffer }
@@ -55,7 +55,7 @@ final class ConnectedHTTPClient {
 
     func accept(_ offer: ConnectedOffer) throws -> String {
         struct Credential: Decodable { let jit: String }
-        let (_, data) = try request("accept", offer: offer)
+        let (_, data) = try request("accept", offer: offer, checkCancellation: checkCancellation)
         return try JSONDecoder().decode(Credential.self, from: data).jit
     }
 
@@ -63,8 +63,16 @@ final class ConnectedHTTPClient {
         _ = try request("complete", offer: offer, checkCancellation: {})
     }
 
-    private func request(_ action: String, offer: ConnectedOffer?, checkCancellation override: (() throws -> Void)? = nil) throws -> (Int, Data) {
-        let check = override ?? checkCancellation
+    func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> Bool {
+        struct Authorization: Decodable { let `continue`: Bool }
+        let (_, data) = try request("renew", offer: offer, checkCancellation: {
+            try self.checkCancellation()
+            try checkDeadline()
+        })
+        return try JSONDecoder().decode(Authorization.self, from: data).continue
+    }
+
+    private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {
         try check()
         if let offer, offer.runnerPlatform != platform { throw ConnectedRunnerError.invalidOffer }
         var body = ["device_id": deviceID]

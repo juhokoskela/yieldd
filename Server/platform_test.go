@@ -86,40 +86,54 @@ func TestPlatformPreservesSavedLinuxSetWhenAliasUpdateIsIgnored(t *testing.T) {
 	}
 }
 
-func TestPlatformAliasCompatibilityRequiresSavedLegacyLabels(t *testing.T) {
-	for _, saved := range []bool{false, true} {
-		t.Run(fmt.Sprint(saved), func(t *testing.T) {
-			original := &scaleset.RunnerScaleSet{ID: 1, Name: "yieldd", RunnerGroupID: 1, Labels: []scaleset.Label{{Name: "yieldd"}}}
-			savedID := 0
-			if saved {
-				savedID = 1
-				original.Labels = append(original.Labels, scaleset.Label{Name: "unexpected"})
-			}
+func TestPlatformAliasCompatibilityRequiresKnownLabels(t *testing.T) {
+	for _, savedID := range []int{0, 1} {
+		t.Run(fmt.Sprint(savedID), func(t *testing.T) {
+			original := &scaleset.RunnerScaleSet{ID: 1, Name: "yieldd", RunnerGroupID: 1, Labels: []scaleset.Label{{Name: "yieldd"}, {Name: "unexpected"}}}
 			response := *original
 			response.Labels = []scaleset.Label{{Name: "yieldd"}}
 			api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{set: original}, response: &response}
 			if _, err := ensurePlatformScaleSet(t.Context(), api, testConfig, savedID); err == nil {
-				t.Fatal("compatibility accepted a set without a saved legacy identity")
+				t.Fatal("compatibility accepted unexpected labels")
 			}
 		})
 	}
 }
 
-func TestPlatformCreationRequiresAllLabels(t *testing.T) {
+func TestPlatformCreationRequiresBaseLabel(t *testing.T) {
 	for _, platform := range []string{"", "macos"} {
 		t.Run(platform, func(t *testing.T) {
 			cfg := testConfig
 			cfg.Platform = platform
 			response := &scaleset.RunnerScaleSet{ID: 42, Name: cfg.scaleSetName(), RunnerGroupID: 1}
-			if platform == "" {
-				response.Labels = []scaleset.Label{{Name: "yieldd"}}
-			}
 			api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{}, response: response}
 			if _, err := ensurePlatformScaleSet(t.Context(), api, cfg, 0); err == nil || !strings.Contains(err.Error(), "labels") {
 				t.Fatal("new set accepted incomplete routing labels", err)
 			}
 			if api.created != 1 || api.updated != 0 {
 				t.Fatal("unexpected mutation", api.created, api.updated)
+			}
+		})
+	}
+}
+
+func TestPlatformAliasIsOptionalForNewAndDiscoveredLinuxSets(t *testing.T) {
+	for _, exists := range []bool{false, true} {
+		t.Run(fmt.Sprint(exists), func(t *testing.T) {
+			response := &scaleset.RunnerScaleSet{ID: 42, Name: "yieldd", RunnerGroupID: 1, Labels: []scaleset.Label{{Name: "yieldd"}}}
+			api := &scaleSetWriteResponse{fakeScaleSets: &fakeScaleSets{}, response: response}
+			if exists {
+				api.set = response
+			}
+			id, err := ensurePlatformScaleSet(t.Context(), api, testConfig, 0)
+			if err != nil || id != 42 {
+				t.Fatal(id, err)
+			}
+			if exists && (api.created != 0 || api.updated != 1) {
+				t.Fatal("replaced discovered identity")
+			}
+			if !exists && (api.created != 1 || api.updated != 0) {
+				t.Fatal("unexpected creation")
 			}
 		})
 	}

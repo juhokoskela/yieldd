@@ -160,6 +160,7 @@ enum RunnerSessionState: Equatable {
     case listenerStarted(RunnerID)
     case jobStarted(RunnerID)
     case listenerExited(RunnerID, status: Int32)
+    case executionStopped(RunnerID, reason: String)
     case capacityReleased(RunnerID)
     case cleanupCompleted(RunnerID)
     case preparing(RunnerID)

@@ -2,6 +2,11 @@
 set -euo pipefail
 umask 077
 
+if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
+    printf '1\n'
+    exit 0
+fi
+
 if ! { [[ "$#" -eq 1 && "$1" == --jit ]] || [[ "$#" -ge 2 && "$#" -le 3 && "$1" != --jit ]]; }; then
     echo "usage: yieldd-configure-runner OWNER/REPOSITORY RUNNER_NAME [ROUTING_LABEL]" >&2
     echo "       yieldd-configure-runner --jit" >&2

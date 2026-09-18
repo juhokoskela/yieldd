@@ -134,7 +134,7 @@ extension ProcessExecutionError: LocalizedError {
     }
 
     private func processFailureDescription(executableURL: URL, reason: String, stderr: String) -> String {
-        let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = terminalSafeOutput(stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !detail.isEmpty else {
             return "Process \(executableURL.path) \(reason)."
         }
