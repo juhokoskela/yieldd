@@ -104,4 +104,6 @@ This is an explicit operator assertion that GitHub registration cleanup is compl
 
 ## Validation boundary
 
-Local tests cover authenticated HTTP, response bounds, redirect refusal, signal cancellation, offer expiry, duplicate acceptance, persisted recovery phases, credential handling, and cleanup failures. Linux local execution and remote HTTPS deployment have been exercised live. The macOS JIT guest scripts, platform-isolated recovery, and shared memory admission have local regression coverage. These fixtures do not establish live macOS Scale Set pickup, simulator usability, or dual-platform provider routing; those remain acceptance checks.
+Local tests cover authenticated HTTP, response bounds, redirect refusal, signal cancellation, offer expiry, duplicate acceptance, persisted recovery phases, credential handling, cleanup failures, and renewable execution authorization. Earlier live testing confirmed Linux and macOS execution, simultaneous slots, and capacity-triggered fallback. The authorization protocol and bridge-network deployment changes still require live acceptance; the fixtures do not establish those provider and host boundaries.
+
+See [runner boundaries](runner-boundaries.md) for the controls implemented here and the host network, storage, and coordinator-trust risks that remain.

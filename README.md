@@ -109,7 +109,7 @@ Run `yieldd recover` to clean up abandoned registrations and disposable macOS cl
 
 ## Reserved single-job tests
 
-The [Scale Set coordinator prototype](Server/README.md) supports one repository and one runner per platform. `runs-on: yieldd` selects Linux; `yieldd-linux` is an alias when retained by GitHub. Existing Linux sets can continue with `yieldd` alone and an explicit startup warning. `yieldd-macos` selects the independently enabled macOS queue. It can offer work to [one connected Mac](Docs/connected-mac-prototype.md) for on-demand ARM64 containers or VMs, or provision each platform's user-selected fallback through a separate infrastructure repository. Idle local slots reserve no RAM. Hosted and connected Linux execution have been tested live; connected macOS and dual-platform routing still need live acceptance. The earlier [manual nested runner experiment](Docs/runner-bootstrap-prototype.md) remains available for isolated tests. Both require trusted jobs on disposable hosts.
+The [Scale Set coordinator prototype](Server/README.md) supports one repository and one runner per platform. `runs-on: yieldd` selects Linux; `yieldd-linux` is an alias when retained by GitHub. Linux sets can continue with `yieldd` alone and an explicit startup warning. `yieldd-macos` selects the independently enabled macOS queue. It can offer work to [one connected Mac](Docs/connected-mac-prototype.md) for on-demand ARM64 containers or VMs, or provision each platform's user-selected fallback through a separate infrastructure repository. Idle local slots reserve no RAM. Earlier live testing confirmed both platforms and capacity-triggered fallback. Connected execution now requires renewable authorization with a five-minute offline grace; healthy jobs have no total duration limit. See [runner boundaries](Docs/runner-boundaries.md) before accepting hostile workloads. The earlier [manual nested runner experiment](Docs/runner-bootstrap-prototype.md) remains available for isolated tests.
 
 To exercise job-specific routing before connecting a coordinator, queue a trusted job whose `runs-on` matches a unique label, then run:
 
@@ -120,7 +120,7 @@ To exercise job-specific routing before connecting a coordinator, queue a truste
   --pickup-timeout 5 --timeout 120
 ```
 
-Replace `unique-id` with a fresh lowercase identifier. Labels must start with `yieldd-request-`, contain only lowercase letters, digits, and hyphens, and be at most 63 characters. The runner registers only this label, not its generic platform label. Omit `--template` for Linux. Rebuild the Linux guest image and update both macOS guest entry-point scripts before using reserved tests. No coordinator or hosted fallback is implemented yet.
+Replace `unique-id` with a fresh lowercase identifier. Labels must start with `yieldd-request-`, contain only lowercase letters, digits, and hyphens, and be at most 63 characters. The runner registers only this label, not its generic platform label. Omit `--template` for Linux. Rebuild the Linux guest image and update both macOS guest entry-point scripts before using reserved tests. These standalone tests do not use coordinator routing or hosted fallback.
 
 The manual `macOS runner test` workflow accepts an optional `routing-label` input. Leaving it empty keeps the default `yieldd-macos` target. After pushing the branch containing this workflow change, generate one label and use it for both dispatch and the local runner:
 
