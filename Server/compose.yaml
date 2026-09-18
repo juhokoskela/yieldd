@@ -30,6 +30,7 @@ services:
       - ${YIELDD_DEVICE_ID:?Set YIELDD_DEVICE_ID}
       - --client-listen
       - 0.0.0.0:8787
+      - --allow-non-loopback-client-listen
       - --state-dir
       - /var/lib/yieldd
     volumes:

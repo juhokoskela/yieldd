@@ -24,7 +24,7 @@ func main() {
 func run() error {
 	var cfg config
 	var directory, clientListen, macOSFallback string
-	var recoverOnly bool
+	var recoverOnly, allowNonLoopbackClientListen bool
 	flag.StringVar(&cfg.Repository, "repository", "", "Application repository (OWNER/REPOSITORY)")
 	flag.StringVar(&cfg.Infrastructure, "infrastructure", "", "Infrastructure repository (OWNER/REPOSITORY)")
 	flag.StringVar(&cfg.Fallback, "fallback-runner", "", "Linux fallback target as a JSON label string or array")
@@ -33,6 +33,7 @@ func run() error {
 	flag.BoolVar(&recoverOnly, "recover", false, "Clean up recorded assignments and exit without provisioning")
 	flag.StringVar(&cfg.DeviceID, "device-id", "", "UUID of the connected Apple Silicon Mac")
 	flag.StringVar(&clientListen, "client-listen", "", "HTTP address behind an HTTPS proxy; use loopback on the host or 0.0.0.0 inside the Compose container")
+	flag.BoolVar(&allowNonLoopbackClientListen, "allow-non-loopback-client-listen", false, "Allow cleartext device HTTP on an unspecified IP inside a container with a loopback-only published port")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
@@ -64,7 +65,7 @@ func run() error {
 	var deviceListener net.Listener
 	if clientListen != "" && !recoverOnly {
 		var err error
-		deviceListener, err = listenForDevice(clientListen, deviceToken)
+		deviceListener, err = listenForDevice(clientListen, deviceToken, allowNonLoopbackClientListen)
 		if err != nil {
 			return err
 		}

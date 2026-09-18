@@ -114,11 +114,14 @@ func (s *coordinatorLoop) HandleJobCompleted(ctx context.Context, job *scaleset.
 	return s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobCompleted(ctx, job) })
 }
 
-func listenForDevice(address, token string) (net.Listener, error) {
+func listenForDevice(address, token string, allowNonLoopback bool) (net.Listener, error) {
 	host, _, err := net.SplitHostPort(address)
 	ip := net.ParseIP(host)
 	if err != nil || ip == nil || (!ip.IsLoopback() && !ip.IsUnspecified()) {
-		return nil, errors.New("client-listen must use a loopback IP, or an unspecified IP inside a container with a loopback-only published port")
+		return nil, errors.New("client-listen must use a loopback or unspecified IP address")
+	}
+	if !ip.IsLoopback() && !allowNonLoopback {
+		return nil, errors.New("non-loopback device HTTP requires --allow-non-loopback-client-listen; use it only inside a container with a loopback-only published port and an HTTPS proxy")
 	}
 	if len(token) < 32 || len(token) > 256 {
 		return nil, errors.New("YIELDD_CLIENT_TOKEN must contain 32 to 256 non-whitespace characters")

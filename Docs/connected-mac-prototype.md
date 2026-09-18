@@ -22,7 +22,7 @@ GH_TOKEN="$(gh auth token)" go run . \
   --state-dir /Users/juhokoskela/.local/state/yieldd-connected-coordinator
 ```
 
-Bind the native HTTP listener to loopback. The Compose container binds internally to all interfaces but publishes only a host-loopback port. For a remote Mac, expose it through a trusted HTTPS reverse proxy on the coordinator host. Forward `/v1/` and the Authorization header, allow 20-second long polls and 60-second operations, and disable response caching and credential/body logging. The Mac validates normal system TLS trust and refuses redirects. Direct loopback HTTP is permitted only for same-host testing.
+Bind the native HTTP listener to loopback. The Compose container explicitly opts into wildcard binding with `--allow-non-loopback-client-listen` and publishes only a host-loopback port. Without that flag, wildcard binding is rejected. For a remote Mac, expose it through a trusted HTTPS reverse proxy on the coordinator host. Forward `/v1/` and the Authorization header, allow 20-second long polls and 60-second operations, and disable response caching and credential/body logging. The Mac validates normal system TLS trust and refuses redirects. Direct loopback HTTP is permitted only for same-host testing.
 
 For a separate Linux host, the [coordinator container setup](../Server/README.md#container-deployment-on-linux) provides a non-root image, persistent state, and a Compose service behind the host's HTTPS proxy. Only the coordinator moves into that container; `yieldd connect` remains a native macOS process.
 

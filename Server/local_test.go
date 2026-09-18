@@ -230,23 +230,43 @@ func TestDeviceHTTPAuthenticatesAndDoesNotReplayCredentials(t *testing.T) {
 	}
 }
 
-func TestDeviceListenerRequiresExplicitLoopbackOrContainerBindingAndStrongTokens(t *testing.T) {
-	for _, address := range []string{":0", "localhost:0", "192.168.1.2:0"} {
-		if listener, err := listenForDevice(address, strings.Repeat("x", 32)); err == nil {
+func TestDeviceListenerRejectsWildcardBindingByDefault(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:0", "[::]:0"} {
+		listener, err := listenForDevice(address, strings.Repeat("x", 32), false)
+		if err == nil {
 			listener.Close()
-			t.Fatal("public cleartext enabled")
+			t.Errorf("wildcard binding %s accepted without explicit opt-in", address)
+		} else if !strings.Contains(err.Error(), "--allow-non-loopback-client-listen") {
+			t.Errorf("missing opt-in guidance: %v", err)
 		}
 	}
-	for _, address := range []string{"127.0.0.1:0", "0.0.0.0:0"} {
-		listener, err := listenForDevice(address, strings.Repeat("x", 32))
+}
+
+func TestDeviceListenerRequiresExplicitLoopbackOrContainerBindingAndStrongTokens(t *testing.T) {
+	for _, address := range []string{":0", "localhost:0", "192.168.1.2:0"} {
+		for _, allow := range []bool{false, true} {
+			if listener, err := listenForDevice(address, strings.Repeat("x", 32), allow); err == nil {
+				listener.Close()
+				t.Fatalf("unsupported address %s accepted with opt-in %v", address, allow)
+			}
+		}
+	}
+	for _, test := range []struct {
+		address string
+		allow   bool
+	}{
+		{"127.0.0.1:0", false}, {"[::1]:0", false}, {"127.0.0.1:0", true},
+		{"0.0.0.0:0", true}, {"[::]:0", true},
+	} {
+		listener, err := listenForDevice(test.address, strings.Repeat("x", 32), test.allow)
 		if err != nil {
 			t.Fatal(err)
 		}
 		listener.Close()
-	}
-	if listener, err := listenForDevice("127.0.0.1:0", "short"); err == nil {
-		listener.Close()
-		t.Fatal("weak token accepted")
+		if listener, err := listenForDevice(test.address, "short", test.allow); err == nil {
+			listener.Close()
+			t.Fatal("weak token accepted")
+		}
 	}
 }
 

@@ -15,6 +15,7 @@ jq -e '.services.coordinator |
     .cpus == 1 and (.mem_limit | tonumber) == 536870912 and .pids_limit == 128 and
     .read_only == true and .cap_drop == ["ALL"] and
     .security_opt == ["no-new-privileges:true"] and
-    (.command | index("0.0.0.0:8787")) != null' <<< "$configuration" >/dev/null
+    (.command | index("0.0.0.0:8787")) != null and
+    (.command | index("--allow-non-loopback-client-listen")) != null' <<< "$configuration" >/dev/null
 
 echo 'Compose limits and loopback-only port publication validated.'

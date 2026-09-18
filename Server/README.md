@@ -36,7 +36,7 @@ The state directory is created with mode `0700`; existing permissive directories
 
 The [Dockerfile](Dockerfile) builds a static binary with Go 1.27.1. Its runtime image contains the coordinator and TLS root certificates, runs as UID/GID `65532`, and needs neither a Docker socket nor privileged mode. The Mac still runs `yieldd connect` natively to manage its containers and VMs.
 
-The [Compose configuration](compose.yaml) targets Docker Engine on Linux. The coordinator uses a bridge network and listens on `0.0.0.0:8787` inside its container. Docker publishes that port only on host `127.0.0.1:8787`. Terminate HTTPS with a reverse proxy on that same Linux host. Do not publish port 8787 on a public interface. For a bare binary, keep `--client-listen 127.0.0.1:8787`; an unspecified bind address is intended only for the container setup.
+The [Compose configuration](compose.yaml) targets Docker Engine on Linux. The coordinator uses a bridge network and listens on `0.0.0.0:8787` inside its container. Docker publishes that port only on host `127.0.0.1:8787`. Terminate HTTPS with a reverse proxy on that same Linux host. Do not publish port 8787 on a public interface. For a bare binary, keep `--client-listen 127.0.0.1:8787`. Wildcard binding requires `--allow-non-loopback-client-listen`, supplied by Compose. This explicit opt-in does not detect whether the process is containerized or verify the published port.
 
 Use Docker Engine 28 or newer with the default NAT bridge settings. [Older releases can expose localhost-published ports to the same layer-2 network](https://docs.docker.com/engine/network/port-publishing/). Keep port 8787 closed in the EC2 security group or host ingress firewall too. Do not enable direct routing to the coordinator's bridge.
 
