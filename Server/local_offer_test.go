@@ -13,6 +13,35 @@ import (
 	"time"
 )
 
+func TestLocalExpiryUsesEachPhaseLifetime(t *testing.T) {
+	for _, phase := range []struct {
+		name     localPhase
+		lifetime time.Duration
+	}{
+		{localOffered, offerLifetime},
+		{localAccepted, registrationLifetime},
+		{localIssued, localStartupLifetime},
+	} {
+		t.Run(string(phase.name), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				for _, test := range []struct {
+					remaining time.Duration
+					expired   bool
+				}{
+					{-time.Nanosecond, true}, {0, true},
+					{phase.lifetime / 2, false}, {phase.lifetime, false},
+					{phase.lifetime + time.Nanosecond, true},
+				} {
+					lease := localLease{Phase: phase.name, Expires: time.Now().Add(test.remaining)}
+					if got := lease.expired(); got != test.expired {
+						t.Errorf("remaining %s: expired = %v, want %v", test.remaining, got, test.expired)
+					}
+				}
+			})
+		})
+	}
+}
+
 func startOfferLoop(t *testing.T, c *coordinator) (*coordinatorLoop, func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())

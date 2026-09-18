@@ -33,10 +33,13 @@ type localLease struct {
 func (l *localLease) expired() bool {
 	remaining := time.Until(l.Expires)
 	lifetime := offerLifetime
-	if l.Phase == localAccepted {
+	switch l.Phase {
+	case localAccepted:
 		lifetime = registrationLifetime
+	case localIssued:
+		lifetime = localStartupLifetime
 	}
-	// Clock rollback may invalidate an offer, but never an issued assignment.
+	// Issued expiry ends startup authorization, not the obligation to confirm guest destruction.
 	return remaining <= 0 || remaining > lifetime
 }
 
@@ -152,8 +155,7 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 		// time, but let the Mac's offline grace absorb temporary inconsistency.
 		return nil, &deviceError{status: http.StatusServiceUnavailable, message: "GitHub has not confirmed an active runner; execution authorization was not renewed"}
 	}
-	remaining := time.Until(l.Local.Expires)
-	return &deviceAuthorization{Continue: remaining > 0 && remaining <= localStartupLifetime}, nil
+	return &deviceAuthorization{Continue: !l.Local.expired()}, nil
 }
 
 func (c *coordinator) recordLocalJob(runner string, id int, completed bool) error {
