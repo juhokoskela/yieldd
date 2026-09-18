@@ -116,7 +116,7 @@ enum RunnerAssignmentError: Error, Equatable, LocalizedError {
         case let .listenerFailed(status, output):
             output.isEmpty
                 ? "The runner listener exited with status \(status)."
-                : "The runner listener exited with status \(status): \(output)"
+                : "The runner listener exited with status \(status): \(terminalSafeOutput(output))"
         }
     }
 }
