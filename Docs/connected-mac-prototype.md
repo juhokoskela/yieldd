@@ -1,6 +1,6 @@
 # One connected Mac
 
-This prototype offers one Linux ARM64 container slot, one macOS ARM64 VM slot, or both from one Mac. Application jobs use `runs-on: yieldd` (Linux), `yieldd-linux`, or `yieldd-macos`. If the coordinator warns that GitHub did not retain the `yieldd-linux` alias on an existing scale set, use `yieldd` for Linux; macOS remains separate. An idle slot creates no guest and reserves no RAM. Polling advertises a snapshot of available memory; an offer must acquire an atomic reservation before acceptance.
+This prototype offers one Linux ARM64 container slot, one macOS ARM64 VM slot, or both from one Mac. Application jobs use `runs-on: yieldd` (Linux), `yieldd-linux`, or `yieldd-macos`. If the coordinator warns that GitHub did not retain the `yieldd-linux` alias, use `yieldd` for Linux; macOS remains separate. An idle slot creates no guest and reserves no RAM. Polling advertises a snapshot of available memory; an offer must acquire an atomic reservation before acceptance.
 
 There is at most one active runner per platform across local and fallback execution. Both local slots share one host-memory budget: Linux reserves 12 GiB and macOS reserves 8 GiB while provisioning or executing. A 24-GiB host's 18-GiB budget cannot run both simultaneously, but neither idle slot can starve the other. A platform without local capacity uses its configured fallback. This is not yet a multi-device scheduler or installed connected agent. Workloads must support the chosen fallback architecture as well as local ARM64.
 
