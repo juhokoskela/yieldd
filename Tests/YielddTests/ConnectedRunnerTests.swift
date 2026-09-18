@@ -109,6 +109,21 @@ func connectedJITRejectsInvalidPayloads(_ kind: String) {
     #expect(throws: ConnectedRunnerError.invalidJIT) { try validateConnectedJIT(input, runner: connectedOffer.runner) }
 }
 
+@Test(arguments: [".env", ".path", ".runner_migrated", "../outside", "invalid-encoding", "missing-credentials"])
+func connectedJITRejectsUnexpectedFiles(_ input: String) throws {
+    let data = try #require(Data(base64Encoded: connectedJIT()))
+    var files = try JSONDecoder().decode([String: String].self, from: data)
+    if input == "missing-credentials" {
+        files.removeValue(forKey: ".credentials")
+    } else if input == "invalid-encoding" {
+        files[".credentials"] = "not-base64"
+    } else {
+        files[input] = Data("untrusted".utf8).base64EncodedString()
+    }
+    let payload = try JSONEncoder().encode(files).base64EncodedString()
+    #expect(throws: ConnectedRunnerError.invalidJIT) { try validateConnectedJIT(payload, runner: connectedOffer.runner) }
+}
+
 @Test(arguments: ["http://example.com", "https://user:pass@example.com", "https://example.com/path", "https://example.com?token=x", "https://example.com#x", "file:///tmp/test"])
 func connectedCLIRejectsUnsafeServerOrigins(_ value: String) {
     #expect(throws: ConnectedRunnerError.invalidServer) { try ConnectedHTTPClient.serverURL(value) }

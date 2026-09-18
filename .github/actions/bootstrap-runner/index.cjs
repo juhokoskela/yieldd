@@ -22,7 +22,10 @@ function validateConfiguration(encoded, name) {
     }
     try {
         const files = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
-        if (!files || Array.isArray(files) || Object.keys(files).some(key => !/^\.[a-z_]+$/u.test(key))) {
+        const allowed = new Set(['.runner', '.credentials', '.credentials_rsaparams']);
+        if (!files || Array.isArray(files) || !Object.hasOwn(files, '.credentials') ||
+            Object.entries(files).some(([key, value]) => !allowed.has(key) || typeof value !== 'string' ||
+                !value.length || Buffer.from(value, 'base64').toString('base64') !== value)) {
             throw new Error();
         }
         const decoded = JSON.parse(Buffer.from(files['.runner'], 'base64').toString('utf8'));
