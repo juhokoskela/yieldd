@@ -86,22 +86,23 @@ struct ConnectCommand: ParsableCommand {
                 }
                 try RunnerPool(stop: stop).run(slots: slots) { slot, stop in
                     let platform = slot.platform
-                    let executor = ProcessExecutor(checkCancellation: stop.check)
+                    let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
+                                                     platform: platform, checkCancellation: stop.check)
+                    let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
+                    let executor = ProcessExecutor(checkCancellation: authorization.check)
                     let backend: any RunnerBackend
                     switch slot {
                     case let .linux(containerURL):
                         backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
-                            dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: stop.check))
+                            dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
                     case let .macOS(templateURL):
                         backend = try MacOSVirtualizationBackend(templateURL: templateURL,
                             cloneRootURL: MacOSRunnerCloneStore(stateDirectory: directory).rootURL,
-                            executor: executor, checkCancellation: stop.check, wait: stop.wait)
+                            executor: executor, checkCancellation: authorization.check, wait: stop.wait)
                     }
-                    let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
-                                                     platform: platform, checkCancellation: stop.check)
                     let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform),
                         server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
-                        checkCancellation: stop.check, wait: stop.wait,
+                        authorization: authorization, wait: stop.wait,
                         stateChanged: { reportRunnerServiceState($0, platform: platform, output: .terminal) })
                     try runConnectedClient(checkCancellation: stop.check, recover: {
                         try runner.recover()

@@ -146,7 +146,7 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 			return
 		}
 		switch r.URL.Path {
-		case "/v1/poll", "/v1/accept", "/v1/complete":
+		case "/v1/poll", "/v1/accept", "/v1/complete", "/v1/renew":
 		default:
 			http.NotFound(w, r)
 			return
@@ -191,6 +191,12 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 		case "/v1/complete":
 			err = s.invoke(r.Context(), func(ctx context.Context) error { return s.worker.completeDevice(ctx, request) })
 			response = struct{}{}
+		case "/v1/renew":
+			err = s.invoke(r.Context(), func(ctx context.Context) error {
+				var renewalErr error
+				response, renewalErr = s.worker.renewDevice(ctx, request)
+				return renewalErr
+			})
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 			return

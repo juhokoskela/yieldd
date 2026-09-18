@@ -7,7 +7,7 @@ struct ConnectedRunner {
     let deviceID: String
     let accept: (ConnectedOffer) throws -> String
     let complete: (ConnectedOffer) throws -> Void
-    let checkCancellation: () throws -> Void
+    let authorization: ConnectedExecutionAuthorization
     let wait: (TimeInterval) throws -> Void
     var stateChanged: (RunnerSessionState) -> Void = { _ in }
     var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
@@ -29,22 +29,27 @@ struct ConnectedRunner {
         try store.save(ConnectedLease(server: server, deviceID: deviceID, offer: offer))
         var failure: (any Error)?
         do {
-            try checkCancellation()
+            try authorization.check()
             let jit = try accept(offer)
+            authorization.start(offer)
             try validateConnectedJIT(jit, runner: offer.runner)
-            try checkCancellation()
+            try authorization.check()
             // Creation can fail after allocating a guest. Retain capacity until destruction succeeds.
             releaseOnExit = false
             try backend.create(id: id, memory: memory)
-            try checkCancellation()
+            try authorization.check()
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
                              timeout: EphemeralRunnerSession.configurationTimeout, on: id)
-            try ReservedRunnerJob(backend: backend, checkCancellation: checkCancellation, wait: wait,
+            try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
                                   stateChanged: stateChanged, currentTime: currentTime)
                 .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
         } catch {
-            failure = error
+            failure = authorization.failure ?? error
+        }
+        authorization.stop()
+        if let failure = failure as? ConnectedExecutionError {
+            stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
         releaseOnExit = false
@@ -53,7 +58,7 @@ struct ConnectedRunner {
         try cleanUp(step: .githubRunner, after: failure) { try acknowledgeConnectedRunner(offer, complete: complete) }
         try cleanUp(step: .leaseRecord, after: failure) { try store.clear() }
         stateChanged(.cleanupCompleted(id))
-        if let failure, (failure as? ConnectedRunnerError) != .http(410) { throw failure }
+        if let failure, !(failure is ConnectedExecutionError), (failure as? ConnectedRunnerError) != .http(410) { throw failure }
     }
 
     private func cleanUp(step: RunnerSessionCleanupStep, after failure: (any Error)?, operation: () throws -> Void) throws {

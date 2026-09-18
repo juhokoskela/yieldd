@@ -228,6 +228,8 @@ func reportRunnerServiceState(_ state: RunnerSessionState, platform: RunnerPlatf
         output.info("Runner \(id.value) reported job start.")
     case let .listenerExited(id, status):
         output.info("Runner listener \(id.value) exited with status \(status).")
+    case let .executionStopped(id, reason):
+        output.warning("Stopping runner \(id.value): \(reason)")
     case let .capacityReleased(id):
         output.info("Machine capacity released for \(id.value).")
     case let .cleanupCompleted(id):
@@ -252,7 +254,7 @@ func reportRunnerRecoveryState(_ state: RunnerSessionState, output: RunnerServic
     case let .leaseCleanupFailed(id, reason):
         output.warning("Could not clear runner lease for \(id.value): \(reason)")
     case .waitingForMemory, .preparing, .waitingForJob, .cleaningUp,
-         .listenerStarted, .jobStarted, .listenerExited, .capacityReleased, .cleanupCompleted:
+         .listenerStarted, .jobStarted, .listenerExited, .executionStopped, .capacityReleased, .cleanupCompleted:
         break
     }
 }

@@ -13,7 +13,7 @@ private func connectedJIT(settings: [String: Any]? = nil) throws -> String {
 }
 
 @Test(arguments: [false, true])
-func connectedRunnerKeepsPickupDeadlineWithoutLimitingExecution(started: Bool) throws {
+func connectedRunnerDestroysGuestAfterOfflineGraceDespiteGuestStatus(started: Bool) throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     let backend = ConnectedBackend()
@@ -23,17 +23,14 @@ func connectedRunnerKeepsPickupDeadlineWithoutLimitingExecution(started: Bool) t
     ]
     var now: TimeInterval = 0
     var acknowledged = false
+    var stopped = false
     var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() },
-        complete: { _ in acknowledged = true }, wait: { _ in now += 24 * 60 * 60 })
-    runner.currentTime = { now }
-    if started {
-        try runner.run(connectedOffer, memory: .constrained)
-        #expect(backend.statuses.isEmpty)
-    } else {
-        #expect(throws: RunnerAssignmentError.pickupTimedOut) { try runner.run(connectedOffer, memory: .constrained) }
-        #expect(backend.statuses.count == 1)
-    }
-    #expect(now == 24 * 60 * 60)
+        complete: { _ in acknowledged = true }, wait: { _ in now += 300 },
+        renew: { _, _ in throw ConnectedRunnerError.transport }, currentTime: { now })
+    runner.stateChanged = { if case .executionStopped = $0 { stopped = true } }
+    try runner.run(connectedOffer, memory: .constrained)
+    #expect(backend.statuses.count == 1)
+    #expect(stopped && now == 300)
     #expect(backend.destroyed && acknowledged)
     #expect(try fixture.store.load() == nil)
 }
@@ -67,6 +64,29 @@ func connectedRunnerHoldsSleepAssertionThroughCleanup(_ stage: String) throws {
     default: #expect(throws: TestFailure.runnerJob) { try runner.run(offer, memory: .constrained) }
     }
     #expect(try runnerSleepAssertions(id).isEmpty)
+}
+
+@Test
+func connectedRunnerRevocationCannotReleaseCapacityWhenDestructionFails() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend(failure: .destroy)
+    var now: TimeInterval = 0
+    backend.statuses = [#"{"phase":"listening","jobStarted":true}"#]
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() },
+        complete: { _ in Issue.record("Destruction must precede acknowledgement") },
+        wait: { _ in now += 30 }, renew: { _, _ in now == 0 }, currentTime: { now })
+    var releases = 0
+    do {
+        try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
+        Issue.record("Expected destruction failure")
+    } catch let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) {
+        #expect(operation as? ConnectedExecutionError == .revoked)
+        #expect(cleanup.count == 1 && cleanup.first?.step == .machine)
+        #expect(cleanup.first?.error as? TestFailure == .machineCleanup)
+    }
+    #expect(releases == 0 && backend.creates == 1)
+    #expect(try fixture.store.load() != nil)
 }
 
 @Test(arguments: [false, true])
@@ -263,7 +283,8 @@ func standaloneCommandsCannotBypassConnectedRecovery() throws {
         try withRunnerOwnership(in: fixture.directory) { _ in Issue.record("Standalone recovery would bypass the coordinator") }
     }
     let wrongIdentity = ConnectedRunner(backend: ConnectedBackend(), store: fixture.store, server: "https://another.example/",
-        deviceID: connectedOffer.owner, accept: { _ in "" }, complete: { _ in Issue.record("Wrong coordinator") }, checkCancellation: {}, wait: { _ in })
+        deviceID: connectedOffer.owner, accept: { _ in "" }, complete: { _ in Issue.record("Wrong coordinator") },
+        authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
     #expect(throws: ConnectedRunnerError.identityChanged) { try wrongIdentity.recover() }
 }
 
@@ -397,7 +418,7 @@ func connectedRunnerReleasesCapacityWhenJournalPublicationFails() throws {
     let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/",
         deviceID: connectedOffer.owner, accept: { _ in throw TestFailure.unexpectedBackendCall },
         complete: { _ in Issue.record("Journal publication failed before acceptance") },
-        checkCancellation: {}, wait: { _ in })
+        authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
     var releases = 0
     #expect(throws: TestFailure.runnerJob) {
         try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
@@ -521,7 +542,7 @@ func connectedPlatformsExecuteJITAndRetainIndependentJournals(_ platform: Runner
             #expect(backend.destroyed)
             #expect(accepted.runnerPlatform == platform)
             acknowledged = true
-        }, checkCancellation: {}, wait: { _ in })
+        }, authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
     try runner.run(offer, memory: .full)
     #expect(backend.creates == 1 && acknowledged)
     #expect(backend.configuration == ["yieldd-configure-runner", "--jit"])
@@ -666,9 +687,13 @@ private struct ConnectedFixture {
     func remove() { try? FileManager.default.removeItem(at: directory) }
     func runner(backend: ConnectedBackend, accept: @escaping (ConnectedOffer) throws -> String,
                 complete: @escaping (ConnectedOffer) throws -> Void, check: @escaping () throws -> Void = {},
-                wait: @escaping (TimeInterval) throws -> Void = { _ in }) -> ConnectedRunner {
+                wait: @escaping (TimeInterval) throws -> Void = { _ in },
+                renew: @escaping (ConnectedOffer, () throws -> Void) throws -> Bool = { _, _ in true },
+                currentTime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) -> ConnectedRunner {
         ConnectedRunner(backend: backend, store: store, server: "https://example.com/", deviceID: connectedOffer.owner,
-                        accept: accept, complete: complete, checkCancellation: check, wait: wait)
+                        accept: accept, complete: complete,
+                        authorization: .init(renew: renew, checkCancellation: check, currentTime: currentTime),
+                        wait: wait, currentTime: currentTime)
     }
 }
 

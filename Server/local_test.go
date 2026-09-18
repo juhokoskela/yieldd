@@ -211,7 +211,7 @@ func TestDeviceHTTPAuthenticatesAndDoesNotReplayCredentials(t *testing.T) {
 		path, token string
 		status      int
 	}{
-		{"accept", "wrong", 401}, {"poll", token, 200}, {"accept", token, 200}, {"accept", token, 410}, {"complete", token, 200}, {"complete", token, 200},
+		{"accept", "wrong", 401}, {"renew", "wrong", 401}, {"poll", token, 200}, {"accept", token, 200}, {"renew", token, 200}, {"accept", token, 410}, {"complete", token, 200}, {"complete", token, 200},
 	} {
 		r, _ := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/"+test.path, strings.NewReader(string(body)))
 		r.Header.Set("Authorization", "Bearer "+test.token)

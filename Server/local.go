@@ -11,6 +11,7 @@ const (
 	offerLifetime        = 5 * time.Second
 	availabilityLifetime = 30 * time.Second
 	registrationLifetime = 30 * time.Second
+	localStartupLifetime = 10 * time.Minute
 )
 
 type localPhase string
@@ -22,9 +23,11 @@ const (
 )
 
 type localLease struct {
-	DeviceID string     `json:"device_id"`
-	Phase    localPhase `json:"phase"`
-	Expires  time.Time  `json:"expires"`
+	DeviceID     string     `json:"device_id"`
+	Phase        localPhase `json:"phase"`
+	Expires      time.Time  `json:"expires"`
+	JobStarted   bool       `json:"job_started,omitempty"`
+	JobCompleted bool       `json:"job_completed,omitempty"`
 }
 
 func (l *localLease) expired() bool {
@@ -106,12 +109,65 @@ func (c *coordinator) acceptDevice(ctx context.Context, request deviceRequest) (
 	credential := &deviceCredential{JIT: l.JIT}
 	issued := *l.Local
 	issued.Phase = localIssued
+	issued.Expires = time.Now().UTC().Add(localStartupLifetime)
 	// Persist possible delivery before returning credentials. Never issue them a second time.
 	if err := c.saveLocal(&issued, ""); err != nil {
 		return nil, err
 	}
 	c.logger.Info("Local credentials issued", "runner", l.Name, "device", l.Local.DeviceID)
 	return credential, nil
+}
+
+type deviceAuthorization struct {
+	Continue bool `json:"continue"`
+}
+
+func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
+	if err := c.checkDevice(request); err != nil {
+		return nil, err
+	}
+	l := c.state.Lease
+	if l == nil || l.Name != request.Runner || l.Local == nil || l.Local.Phase != localIssued {
+		return &deviceAuthorization{}, nil
+	}
+	if l.CleanupIntent || l.Local.JobCompleted {
+		return &deviceAuthorization{}, nil
+	}
+	busy, err := c.bootstrap.runnerBusy(ctx, c.state.Config.Repository, l.RunnerID)
+	if err != nil {
+		return nil, err
+	}
+	if busy {
+		if !l.Local.JobStarted {
+			next := *l.Local
+			next.JobStarted = true
+			if err := c.saveLocal(&next, ""); err != nil {
+				return nil, err
+			}
+		}
+		return &deviceAuthorization{Continue: true}, nil
+	}
+	if l.Local.JobStarted {
+		// An idle response can lag a start event. Do not grant more execution
+		// time, but let the Mac's offline grace absorb temporary inconsistency.
+		return nil, &deviceError{status: http.StatusServiceUnavailable, message: "GitHub has not confirmed an active runner; execution authorization was not renewed"}
+	}
+	remaining := time.Until(l.Local.Expires)
+	return &deviceAuthorization{Continue: remaining > 0 && remaining <= localStartupLifetime}, nil
+}
+
+func (c *coordinator) recordLocalJob(runner string, id int, completed bool) error {
+	l := c.state.Lease
+	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.Name != runner || l.RunnerID != id {
+		return nil
+	}
+	next := *l.Local
+	next.JobStarted = true
+	next.JobCompleted = next.JobCompleted || completed
+	if next == *l.Local {
+		return nil
+	}
+	return c.saveLocal(&next, "")
 }
 
 func (c *coordinator) completeDevice(ctx context.Context, request deviceRequest) error {
