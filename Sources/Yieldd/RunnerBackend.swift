@@ -74,7 +74,7 @@ extension RunnerBackend {
             arguments,
             standardInput: standardInput,
             timeout: timeout,
-            outputCapture: .all,
+            outputCapture: .tail(maxBytes: 64 * 1_024),
             as: .runner,
             on: id
         )

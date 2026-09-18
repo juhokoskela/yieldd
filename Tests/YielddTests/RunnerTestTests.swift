@@ -115,7 +115,7 @@ func runnerTestConfiguresOneJobAndCleansUp() throws {
         .destroy(runnerTestID),
     ])
     #expect(backend.outputCaptures == [
-        .all,
+        .tail(maxBytes: 64 * 1_024),
         .tail(maxBytes: EphemeralRunnerSession.jobOutputTailBytes),
     ])
     #expect(states == [

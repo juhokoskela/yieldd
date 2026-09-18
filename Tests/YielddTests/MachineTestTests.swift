@@ -175,7 +175,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
             #expect(timeout == MacOSTemplateValidation.timeout)
         } else {
             #expect(standardInput == nil)
-            #expect(outputCapture == .all)
+            #expect(outputCapture == .tail(maxBytes: 64 * 1_024))
             #expect(timeout == MachineTestRunner.helloWorldTimeout)
         }
         #expect(user == .runner)

@@ -45,7 +45,7 @@ struct AppleContainerBackend: RunnerBackend {
         try exec(
             ["yieldd-runner-control", "memory", allocation.rawValue],
             timeout: Self.memoryConfigurationTimeout,
-            outputCapture: .all,
+            outputCapture: .tail(maxBytes: 64 * 1_024),
             as: .root,
             on: id
         )
@@ -110,6 +110,7 @@ struct AppleContainerBackend: RunnerBackend {
                 "yieldd-runner-control", "stop",
             ],
             timeout: Self.runnerStopTimeout,
+            outputCapture: .tail(maxBytes: 64 * 1_024),
             cancellable: false
         )
     }
