@@ -687,6 +687,7 @@ private final class ConnectedBackend: RunnerBackend {
     func exec(_ arguments: [String], standardInput: Data?, timeout: TimeInterval?, outputCapture: ProcessOutputCapture,
               as user: RunnerGuestUser, on id: RunnerID) throws -> ProcessResult {
         try onOperation()
+        if arguments.last == "--protocol-version" { return processResult(stdout: "1\n") }
         if arguments.first == "yieldd-configure-runner" {
             configuration = arguments
             payload = standardInput

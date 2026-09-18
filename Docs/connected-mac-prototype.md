@@ -59,7 +59,7 @@ Expect `Local offer created`, `Local credentials issued`, and `Local runner clea
 
 Add `--macos-fallback-runner '"macos-26"'` on the coordinator, or set `YIELDD_MACOS_FALLBACK_RUNNER='"macos-26"'` in its Compose environment file. This is an example target, not a built-in default.
 
-Update the template's guest scripts using the [macOS template setup](macos-template.md) before cloning it. The new macOS `configure-runner` and `runner-control` entry points support JIT delivery. An old template that only supports registration tokens will not work. Shut down the template VM after installing the scripts.
+Update both template guest scripts using the [macOS template setup](macos-template.md) before cloning it, then shut down the template VM. Both helpers must answer `--protocol-version` with `1`. `machine-test` checks this after boot; `connect` checks before sending credentials into the guest. Rebuild the Linux image too. These checks detect stale tooling, not a malicious guest.
 
 On the Mac, offer both platforms through one process:
 

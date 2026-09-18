@@ -37,6 +37,7 @@ struct ConnectedRunner {
             releaseOnExit = false
             try backend.create(id: id, memory: memory)
             try checkCancellation()
+            try RunnerGuestProtocol.validate(backend: backend, id: id)
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
                              timeout: EphemeralRunnerSession.configurationTimeout, on: id)
             try ReservedRunnerJob(backend: backend, checkCancellation: checkCancellation, wait: wait,
