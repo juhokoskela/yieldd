@@ -116,8 +116,9 @@ func (s *coordinatorLoop) HandleJobCompleted(ctx context.Context, job *scaleset.
 
 func listenForDevice(address, token string) (net.Listener, error) {
 	host, _, err := net.SplitHostPort(address)
-	if err != nil || !net.ParseIP(host).IsLoopback() {
-		return nil, errors.New("client-listen must use a loopback IP; terminate remote HTTPS at a trusted local proxy")
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil || (!ip.IsLoopback() && !ip.IsUnspecified()) {
+		return nil, errors.New("client-listen must use a loopback IP, or an unspecified IP inside a container with a loopback-only published port")
 	}
 	if len(token) < 32 || len(token) > 256 {
 		return nil, errors.New("YIELDD_CLIENT_TOKEN must contain 32 to 256 non-whitespace characters")

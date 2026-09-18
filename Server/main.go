@@ -32,7 +32,7 @@ func run() error {
 	flag.StringVar(&directory, "state-dir", "", "Absolute private state directory")
 	flag.BoolVar(&recoverOnly, "recover", false, "Clean up recorded assignments and exit without provisioning")
 	flag.StringVar(&cfg.DeviceID, "device-id", "", "UUID of the connected Apple Silicon Mac")
-	flag.StringVar(&clientListen, "client-listen", "", "Loopback HTTP address behind an HTTPS proxy, for example 127.0.0.1:8787")
+	flag.StringVar(&clientListen, "client-listen", "", "HTTP address behind an HTTPS proxy; use loopback on the host or 0.0.0.0 inside the Compose container")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
@@ -91,6 +91,9 @@ func run() error {
 		}
 	}
 	if deviceListener != nil {
+		if !deviceListener.Addr().(*net.TCPAddr).IP.IsLoopback() {
+			slog.Warn("Device HTTP is unencrypted; restrict the container's published port to host loopback and use an HTTPS proxy")
+		}
 		server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 		done := make(chan struct{})
 		go func() {

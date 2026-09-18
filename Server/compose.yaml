@@ -4,7 +4,11 @@ services:
   coordinator:
     image: local/yieldd-coordinator:dev
     build: .
-    network_mode: host
+    ports:
+      - "127.0.0.1:8787:8787"
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 128
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -25,7 +29,7 @@ services:
       - --device-id
       - ${YIELDD_DEVICE_ID:?Set YIELDD_DEVICE_ID}
       - --client-listen
-      - 127.0.0.1:8787
+      - 0.0.0.0:8787
       - --state-dir
       - /var/lib/yieldd
     volumes:

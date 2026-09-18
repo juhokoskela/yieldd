@@ -230,12 +230,19 @@ func TestDeviceHTTPAuthenticatesAndDoesNotReplayCredentials(t *testing.T) {
 	}
 }
 
-func TestDeviceListenerRejectsPublicCleartextAndWeakTokens(t *testing.T) {
-	for _, address := range []string{"0.0.0.0:0", "localhost:0", "192.168.1.2:0"} {
+func TestDeviceListenerRequiresExplicitLoopbackOrContainerBindingAndStrongTokens(t *testing.T) {
+	for _, address := range []string{":0", "localhost:0", "192.168.1.2:0"} {
 		if listener, err := listenForDevice(address, strings.Repeat("x", 32)); err == nil {
 			listener.Close()
 			t.Fatal("public cleartext enabled")
 		}
+	}
+	for _, address := range []string{"127.0.0.1:0", "0.0.0.0:0"} {
+		listener, err := listenForDevice(address, strings.Repeat("x", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.Close()
 	}
 	if listener, err := listenForDevice("127.0.0.1:0", "short"); err == nil {
 		listener.Close()

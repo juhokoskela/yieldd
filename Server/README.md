@@ -36,7 +36,9 @@ The state directory is created with mode `0700`; existing permissive directories
 
 The [Dockerfile](Dockerfile) builds a static binary with Go 1.27.1. Its runtime image contains the coordinator and TLS root certificates, runs as UID/GID `65532`, and needs neither a Docker socket nor privileged mode. The Mac still runs `yieldd connect` natively to manage its containers and VMs.
 
-The [Compose configuration](compose.yaml) targets Docker Engine on Linux. It uses [host networking](https://docs.docker.com/engine/network/drivers/host/) so the device API can keep its loopback-only binding at `127.0.0.1:8787`. Terminate HTTPS with a reverse proxy on that same Linux host. Do not expose port 8787 directly or assume this networking arrangement works unchanged on macOS.
+The [Compose configuration](compose.yaml) targets Docker Engine on Linux. The coordinator uses a bridge network and listens on `0.0.0.0:8787` inside its container. Docker publishes that port only on host `127.0.0.1:8787`. Terminate HTTPS with a reverse proxy on that same Linux host. Do not publish port 8787 on a public interface. For a bare binary, keep `--client-listen 127.0.0.1:8787`; an unspecified bind address is intended only for the container setup.
+
+Use Docker Engine 28 or newer with the default NAT bridge settings. [Older releases can expose localhost-published ports to the same layer-2 network](https://docs.docker.com/engine/network/port-publishing/). Keep port 8787 closed in the EC2 security group or host ingress firewall too. Do not enable direct routing to the coordinator's bridge.
 
 Before moving from the Mac, let its active assignment finish and verify both client cleanup and coordinator cleanup. Stop the old coordinator before starting this one. Do not migrate with an outstanding lease or connected-client journal, and do not run two coordinators for the same scale set.
 
@@ -78,7 +80,7 @@ Use your actual domain with a publicly trusted certificate. Then start the Mac c
   --device-id "$YIELDD_DEVICE_ID"
 ```
 
-Compose keeps state in the named volume `yieldd-coordinator-state`, with a private directory owned by UID `65532`. The root filesystem is read-only; only the state volume is writable. Recreating the container preserves the volume and coordinator identity. Back it up as sensitive data. Never use `docker compose down --volumes` or prune this volume while recovery obligations remain. Host networking is shared with other host processes, not an additional network isolation boundary.
+Compose keeps state in the named volume `yieldd-coordinator-state`, with a private directory owned by UID `65532`. The root filesystem is read-only; only the state volume is writable. It limits the service to one CPU, 512 MiB RAM, and 128 processes/threads. Recreating the container preserves the volume and coordinator identity. Back it up as sensitive data. Never use `docker compose down --volumes` or prune this volume while recovery obligations remain. Bridge networking removes direct access to the host's loopback namespace; it is not an outbound LAN firewall. Existing host-proxy configurations can keep forwarding to `127.0.0.1:8787` after recreation.
 
 Compose restarts the coordinator unless explicitly stopped and allows 90 seconds for shutdown. Repeated errors still require operator attention; restarting does not make an ambiguous dispatch safe to repeat. To stop without deleting state:
 
