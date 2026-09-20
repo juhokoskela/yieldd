@@ -214,15 +214,12 @@ struct MacOSGuestConnection {
             checkCancellation: checkCancellation,
             wait: wait
         )
-        try checkCancellation()
-        let remaining = deadline - currentTime()
-        guard remaining > 0 else {
-            throw MacOSGuestConnectionError.transportTimedOut(
-                address: address,
-                lastError: nil
-            )
-        }
-        try validateGuest(address, min(Self.sshAttemptTimeout, remaining))
+        try waitForGuestSession(
+            address: address,
+            deadline: deadline,
+            checkCancellation: checkCancellation,
+            wait: wait
+        )
         return address
     }
 
@@ -278,6 +275,43 @@ struct MacOSGuestConnection {
         }
     }
 
+    private func waitForGuestSession(
+        address: String,
+        deadline: TimeInterval,
+        checkCancellation: () throws -> Void,
+        wait: (TimeInterval) throws -> Void
+    ) throws {
+        var lastError: ProcessExecutionError?
+
+        while true {
+            try checkCancellation()
+            let remaining = deadline - currentTime()
+            guard remaining > 0 else {
+                throw MacOSGuestConnectionError.guestReadinessTimedOut(
+                    address: address,
+                    lastError: lastError
+                )
+            }
+            do {
+                try validateGuest(address, min(Self.sshAttemptTimeout, remaining))
+                return
+            } catch let error as ProcessExecutionError {
+                // The ready helper exits 1 until runner has a console and GUI session.
+                if case let .nonZeroExit(_, result) = error, result.terminationStatus == 1 {
+                    lastError = error
+                } else if Self.isRetryableTransportFailure(error) {
+                    lastError = error
+                } else {
+                    throw error
+                }
+            }
+            let remainingAfterAttempt = deadline - currentTime()
+            if remainingAfterAttempt > 0 {
+                try wait(min(Self.retryDelay, remainingAfterAttempt))
+            }
+        }
+    }
+
     private static func isRetryableTransportFailure(
         _ error: ProcessExecutionError
     ) -> Bool {
@@ -321,6 +355,7 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 enum MacOSGuestConnectionError: Error, LocalizedError {
     case addressTimedOut(macAddress: String)
     case transportTimedOut(address: String, lastError: ProcessExecutionError?)
+    case guestReadinessTimedOut(address: String, lastError: ProcessExecutionError?)
 
     var errorDescription: String? {
         switch self {
@@ -331,6 +366,12 @@ enum MacOSGuestConnectionError: Error, LocalizedError {
                 "Timed out waiting for SSH on macOS guest \(address): \(describeError(lastError))"
             } else {
                 "Timed out waiting for SSH on macOS guest \(address)."
+            }
+        case let .guestReadinessTimedOut(address, lastError):
+            if let lastError {
+                "Timed out waiting for the runner GUI session on macOS guest \(address): \(describeError(lastError))"
+            } else {
+                "Timed out waiting for the runner GUI session on macOS guest \(address)."
             }
         }
     }

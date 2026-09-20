@@ -198,6 +198,36 @@ func guestConnectionWaitsForDHCPAndRetriesSSHTransport() throws {
 }
 
 @Test
+func guestConnectionWaitsForTheRunnerGUISessionAfterSSHIsReady() throws {
+    let clock = GuestConnectionClock()
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .success(processResult(stderr: "the runner account is not logged in", status: 1)),
+        .success(processResult(stderr: "the runner GUI launchd domain is unavailable", status: 1)),
+        .success(processResult()),
+    ])
+    let connection = MacOSGuestConnection(
+        resolver: StubGuestAddressResolver(addresses: ["192.168.65.5"]),
+        ssh: MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), executor: executor),
+        currentTime: clock.read
+    )
+
+    let address = try connection.waitUntilReady(
+        macAddress: "02:00:00:00:00:0f",
+        wait: clock.wait
+    )
+
+    #expect(address == "192.168.65.5")
+    #expect(clock.waits == [0.5, 0.5])
+    #expect(executor.requests.map { $0.arguments.last } == [
+        "/usr/bin/true",
+        "/Users/runner/bin/yieldd-runner-control ready",
+        "/Users/runner/bin/yieldd-runner-control ready",
+        "/Users/runner/bin/yieldd-runner-control ready",
+    ])
+}
+
+@Test
 func guestConnectionTimesOutWhileWaitingForDHCP() throws {
     let resolver = StubGuestAddressResolver(addresses: [nil])
     let clock = GuestConnectionClock()
@@ -287,11 +317,11 @@ func guestConnectionDoesNotRetryLocalTransportFailure() throws {
     #expect(clock.waits.isEmpty)
 }
 
-@Test
-func guestConnectionPropagatesGuestValidationFailureWithoutRetry() throws {
+@Test(arguments: [Int32(2), 126, 127])
+func guestConnectionPropagatesGuestValidationFailureWithoutRetry(status: Int32) throws {
     let resolver = StubGuestAddressResolver(addresses: ["192.168.65.5"])
     let clock = GuestConnectionClock()
-    let validationError = sshFailure(status: 1)
+    let validationError = sshFailure(status: status)
     var transportAttempts = 0
     var validationAttempts = 0
     let connection = MacOSGuestConnection(
@@ -311,12 +341,128 @@ func guestConnectionPropagatesGuestValidationFailureWithoutRetry() throws {
         )
         Issue.record("Expected guest validation to fail")
     } catch let ProcessExecutionError.nonZeroExit(_, result) {
-        #expect(result.terminationStatus == 1)
+        #expect(result.terminationStatus == status)
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
     #expect(transportAttempts == 1)
     #expect(validationAttempts == 1)
+    #expect(clock.waits.isEmpty)
+}
+
+@Test
+func guestConnectionReadinessSharesTheDHCPAndSSHDeadline() throws {
+    let clock = GuestConnectionClock()
+    var transportAttempts = 0
+    var validationTimeouts: [TimeInterval] = []
+    let diagnostic = "the runner GUI launchd domain is unavailable; enable automatic login for runner"
+    let connection = MacOSGuestConnection(
+        resolver: StubGuestAddressResolver(addresses: [nil, "192.168.65.5"]),
+        currentTime: clock.read,
+        checkTransport: { _, _ in
+            transportAttempts += 1
+            if transportAttempts == 1 { throw sshFailure() }
+        },
+        validateGuest: { _, timeout in
+            validationTimeouts.append(timeout)
+            throw sshFailure(status: 1, stderr: diagnostic)
+        }
+    )
+
+    do {
+        _ = try connection.waitUntilReady(
+            macAddress: "02:00:00:00:00:0f",
+            timeout: 1.75,
+            wait: clock.wait
+        )
+        Issue.record("Expected guest readiness to time out")
+    } catch let error as MacOSGuestConnectionError {
+        guard case let .guestReadinessTimedOut(address, lastError) = error else {
+            Issue.record("Unexpected connection error: \(error)")
+            return
+        }
+        #expect(address == "192.168.65.5")
+        #expect(lastError != nil)
+        #expect(error.localizedDescription.contains(diagnostic))
+    }
+    #expect(transportAttempts == 2)
+    #expect(validationTimeouts == [0.75, 0.25])
+    #expect(clock.waits == [0.5, 0.5, 0.5, 0.25])
+    #expect(clock.value == 1.75)
+}
+
+@Test
+func guestConnectionRetriesTransportFailuresDuringReadiness() throws {
+    let clock = GuestConnectionClock()
+    let request = ProcessRequest(executableURL: sshURL, arguments: [], timeout: 5)
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .failure(ProcessExecutionError.timedOut(request: request, result: processResult())),
+        .success(processResult(stderr: "connection refused", status: 255)),
+        .success(processResult()),
+    ])
+    let connection = MacOSGuestConnection(
+        resolver: StubGuestAddressResolver(addresses: ["192.168.65.5"]),
+        ssh: MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), executor: executor),
+        currentTime: clock.read
+    )
+
+    #expect(try connection.waitUntilReady(
+        macAddress: "02:00:00:00:00:0f", wait: clock.wait
+    ) == "192.168.65.5")
+    #expect(executor.requests.count == 4)
+    #expect(clock.waits == [0.5, 0.5])
+}
+
+@Test
+func guestConnectionCancellationStopsGUIPolling() throws {
+    let clock = GuestConnectionClock()
+    var validationAttempts = 0
+    let connection = MacOSGuestConnection(
+        resolver: StubGuestAddressResolver(addresses: ["192.168.65.5"]),
+        currentTime: clock.read,
+        checkTransport: { _, _ in },
+        validateGuest: { _, _ in
+            validationAttempts += 1
+            throw sshFailure(status: 1)
+        }
+    )
+
+    #expect(throws: SignalInterruption(signal: SIGTERM)) {
+        _ = try connection.waitUntilReady(
+            macAddress: "02:00:00:00:00:0f",
+            checkCancellation: {
+                if validationAttempts > 0 { throw SignalInterruption(signal: SIGTERM) }
+            },
+            wait: clock.wait
+        )
+    }
+    #expect(validationAttempts == 1)
+    #expect(clock.waits == [0.5])
+}
+
+@Test
+func guestConnectionPreservesReadinessProcessCancellation() throws {
+    let clock = GuestConnectionClock()
+    let request = ProcessRequest(executableURL: sshURL, arguments: [])
+    let connection = MacOSGuestConnection(
+        resolver: StubGuestAddressResolver(addresses: ["192.168.65.5"]),
+        currentTime: clock.read,
+        checkTransport: { _, _ in },
+        validateGuest: { _, _ in
+            throw ProcessExecutionError.cancelled(
+                request: request, result: processResult(), underlying: SignalInterruption(signal: SIGTERM)
+            )
+        }
+    )
+
+    do {
+        _ = try connection.waitUntilReady(macAddress: "02:00:00:00:00:0f", wait: clock.wait)
+        Issue.record("Expected guest readiness to be cancelled")
+    } catch let ProcessExecutionError.cancelled(actualRequest, _, underlying) {
+        #expect(actualRequest == request)
+        #expect(underlying as? SignalInterruption == SignalInterruption(signal: SIGTERM))
+    }
     #expect(clock.waits.isEmpty)
 }
 
@@ -360,11 +506,11 @@ func macOSGuestScriptsAreExecutableAndParseAsBash(filename: String) throws {
     try ProcessExecutor().execute(request).requireSuccess(for: request)
 }
 
-private func sshFailure(status: Int32 = 255) -> ProcessExecutionError {
+private func sshFailure(status: Int32 = 255, stderr: String = "connection refused") -> ProcessExecutionError {
     let request = ProcessRequest(executableURL: sshURL, arguments: [])
     return .nonZeroExit(
         request: request,
-        result: processResult(stderr: "connection refused", status: status)
+        result: processResult(stderr: stderr, status: status)
     )
 }
 
