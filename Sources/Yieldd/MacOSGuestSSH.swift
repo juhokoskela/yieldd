@@ -208,15 +208,27 @@ struct MacOSGuestConnection {
             checkCancellation: checkCancellation,
             wait: wait
         )
-        try waitForTransport(
+        try waitForSSH(
             address: address,
             deadline: deadline,
+            attempt: checkTransport,
+            shouldRetry: Self.isRetryableTransportFailure,
+            timeoutError: MacOSGuestConnectionError.transportTimedOut,
             checkCancellation: checkCancellation,
             wait: wait
         )
-        try waitForGuestSession(
+        try waitForSSH(
             address: address,
             deadline: deadline,
+            attempt: validateGuest,
+            shouldRetry: { error in
+                // The ready helper exits 1 until runner has a console and GUI session.
+                if case let .nonZeroExit(_, result) = error, result.terminationStatus == 1 {
+                    return true
+                }
+                return Self.isRetryableTransportFailure(error)
+            },
+            timeoutError: MacOSGuestConnectionError.guestReadinessTimedOut,
             checkCancellation: checkCancellation,
             wait: wait
         )
@@ -242,67 +254,34 @@ struct MacOSGuestConnection {
         }
     }
 
-    private func waitForTransport(
+    private func waitForSSH(
         address: String,
         deadline: TimeInterval,
+        attempt: (String, TimeInterval) throws -> Void,
+        shouldRetry: (ProcessExecutionError) -> Bool,
+        timeoutError: (String, ProcessExecutionError?) -> MacOSGuestConnectionError,
         checkCancellation: () throws -> Void,
         wait: (TimeInterval) throws -> Void
     ) throws {
         var lastError: ProcessExecutionError?
+        var readinessError: ProcessExecutionError?
 
         while true {
             try checkCancellation()
             let remaining = deadline - currentTime()
             guard remaining > 0 else {
-                throw MacOSGuestConnectionError.transportTimedOut(
-                    address: address,
-                    lastError: lastError
-                )
+                throw timeoutError(address, readinessError ?? lastError)
             }
             do {
-                try checkTransport(address, min(Self.sshAttemptTimeout, remaining))
+                try attempt(address, min(Self.sshAttemptTimeout, remaining))
                 return
             } catch let error as ProcessExecutionError {
-                guard Self.isRetryableTransportFailure(error) else {
+                guard shouldRetry(error) else {
                     throw error
                 }
                 lastError = error
-            }
-            let remainingAfterAttempt = deadline - currentTime()
-            if remainingAfterAttempt > 0 {
-                try wait(min(Self.retryDelay, remainingAfterAttempt))
-            }
-        }
-    }
-
-    private func waitForGuestSession(
-        address: String,
-        deadline: TimeInterval,
-        checkCancellation: () throws -> Void,
-        wait: (TimeInterval) throws -> Void
-    ) throws {
-        var lastError: ProcessExecutionError?
-
-        while true {
-            try checkCancellation()
-            let remaining = deadline - currentTime()
-            guard remaining > 0 else {
-                throw MacOSGuestConnectionError.guestReadinessTimedOut(
-                    address: address,
-                    lastError: lastError
-                )
-            }
-            do {
-                try validateGuest(address, min(Self.sshAttemptTimeout, remaining))
-                return
-            } catch let error as ProcessExecutionError {
-                // The ready helper exits 1 until runner has a console and GUI session.
                 if case let .nonZeroExit(_, result) = error, result.terminationStatus == 1 {
-                    lastError = error
-                } else if Self.isRetryableTransportFailure(error) {
-                    lastError = error
-                } else {
-                    throw error
+                    readinessError = error
                 }
             }
             let remainingAfterAttempt = deadline - currentTime()

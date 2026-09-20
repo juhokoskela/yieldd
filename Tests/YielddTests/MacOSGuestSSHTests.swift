@@ -287,6 +287,31 @@ func guestConnectionPreservesTheLastTransportFailureOnTimeout() throws {
 }
 
 @Test
+func guestConnectionDoesNotRetryExitStatusOneDuringTransport() throws {
+    let clock = GuestConnectionClock()
+    var attempts = 0
+    let connection = MacOSGuestConnection(
+        resolver: StubGuestAddressResolver(addresses: ["192.168.65.5"]),
+        currentTime: clock.read,
+        checkTransport: { _, _ in
+            attempts += 1
+            throw sshFailure(status: 1, stderr: "transport failed")
+        },
+        validateGuest: { _, _ in Issue.record("Guest validation must not run") }
+    )
+
+    do {
+        _ = try connection.waitUntilReady(macAddress: "02:00:00:00:00:0f", wait: clock.wait)
+        Issue.record("Expected SSH transport to fail")
+    } catch let ProcessExecutionError.nonZeroExit(_, result) {
+        #expect(result.terminationStatus == 1)
+        #expect(result.stderrText == "transport failed")
+    }
+    #expect(attempts == 1)
+    #expect(clock.waits.isEmpty)
+}
+
+@Test
 func guestConnectionDoesNotRetryLocalTransportFailure() throws {
     let resolver = StubGuestAddressResolver(addresses: ["192.168.65.5"])
     let clock = GuestConnectionClock()
@@ -365,6 +390,11 @@ func guestConnectionReadinessSharesTheDHCPAndSSHDeadline() throws {
         },
         validateGuest: { _, timeout in
             validationTimeouts.append(timeout)
+            if timeout < 0.5 {
+                clock.wait(timeout)
+                throw ProcessExecutionError.timedOut(
+                    request: ProcessRequest(executableURL: sshURL, arguments: [], timeout: timeout), result: processResult())
+            }
             throw sshFailure(status: 1, stderr: diagnostic)
         }
     )
