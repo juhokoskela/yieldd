@@ -208,21 +208,30 @@ struct MacOSGuestConnection {
             checkCancellation: checkCancellation,
             wait: wait
         )
-        try waitForTransport(
+        try waitForSSH(
             address: address,
             deadline: deadline,
+            attempt: checkTransport,
+            shouldRetry: Self.isRetryableTransportFailure,
+            timeoutError: MacOSGuestConnectionError.transportTimedOut,
             checkCancellation: checkCancellation,
             wait: wait
         )
-        try checkCancellation()
-        let remaining = deadline - currentTime()
-        guard remaining > 0 else {
-            throw MacOSGuestConnectionError.transportTimedOut(
-                address: address,
-                lastError: nil
-            )
-        }
-        try validateGuest(address, min(Self.sshAttemptTimeout, remaining))
+        try waitForSSH(
+            address: address,
+            deadline: deadline,
+            attempt: validateGuest,
+            shouldRetry: { error in
+                // The ready helper exits 1 until runner has a console and GUI session.
+                if case let .nonZeroExit(_, result) = error, result.terminationStatus == 1 {
+                    return true
+                }
+                return Self.isRetryableTransportFailure(error)
+            },
+            timeoutError: MacOSGuestConnectionError.guestReadinessTimedOut,
+            checkCancellation: checkCancellation,
+            wait: wait
+        )
         return address
     }
 
@@ -245,31 +254,35 @@ struct MacOSGuestConnection {
         }
     }
 
-    private func waitForTransport(
+    private func waitForSSH(
         address: String,
         deadline: TimeInterval,
+        attempt: (String, TimeInterval) throws -> Void,
+        shouldRetry: (ProcessExecutionError) -> Bool,
+        timeoutError: (String, ProcessExecutionError?) -> MacOSGuestConnectionError,
         checkCancellation: () throws -> Void,
         wait: (TimeInterval) throws -> Void
     ) throws {
         var lastError: ProcessExecutionError?
+        var readinessError: ProcessExecutionError?
 
         while true {
             try checkCancellation()
             let remaining = deadline - currentTime()
             guard remaining > 0 else {
-                throw MacOSGuestConnectionError.transportTimedOut(
-                    address: address,
-                    lastError: lastError
-                )
+                throw timeoutError(address, readinessError ?? lastError)
             }
             do {
-                try checkTransport(address, min(Self.sshAttemptTimeout, remaining))
+                try attempt(address, min(Self.sshAttemptTimeout, remaining))
                 return
             } catch let error as ProcessExecutionError {
-                guard Self.isRetryableTransportFailure(error) else {
+                guard shouldRetry(error) else {
                     throw error
                 }
                 lastError = error
+                if case let .nonZeroExit(_, result) = error, result.terminationStatus == 1 {
+                    readinessError = error
+                }
             }
             let remainingAfterAttempt = deadline - currentTime()
             if remainingAfterAttempt > 0 {
@@ -321,6 +334,7 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 enum MacOSGuestConnectionError: Error, LocalizedError {
     case addressTimedOut(macAddress: String)
     case transportTimedOut(address: String, lastError: ProcessExecutionError?)
+    case guestReadinessTimedOut(address: String, lastError: ProcessExecutionError?)
 
     var errorDescription: String? {
         switch self {
@@ -331,6 +345,12 @@ enum MacOSGuestConnectionError: Error, LocalizedError {
                 "Timed out waiting for SSH on macOS guest \(address): \(describeError(lastError))"
             } else {
                 "Timed out waiting for SSH on macOS guest \(address)."
+            }
+        case let .guestReadinessTimedOut(address, lastError):
+            if let lastError {
+                "Timed out waiting for the runner GUI session on macOS guest \(address): \(describeError(lastError))"
+            } else {
+                "Timed out waiting for the runner GUI session on macOS guest \(address)."
             }
         }
     }

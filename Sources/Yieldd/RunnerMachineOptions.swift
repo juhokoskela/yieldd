@@ -19,9 +19,9 @@ struct RunnerMachineOptions: ParsableArguments {
     ) throws -> any RunnerBackend {
         if let template {
             try VirtualizationEntitlement.requireCurrentProcess()
-            return try MacOSVirtualizationBackend(
+            return try MacOSVirtualizationBackend(stateDirectory: leaseStore.directory,
                 templateURL: URL(fileURLWithPath: template),
-                cloneRootURL: MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).rootURL,
+                cloneRootURL: RunnerStorage.cloneRoot(in: leaseStore.directory),
                 executor: executor,
                 checkCancellation: checkCancellation,
                 wait: wait
@@ -30,6 +30,7 @@ struct RunnerMachineOptions: ParsableArguments {
         return AppleContainerBackend(
             containerURL: try ExecutableLocator().locate("container"),
             executor: executor,
+            stateDirectory: leaseStore.directory,
             dockerReadiness: DockerReadiness(
                 wait: wait,
                 checkCancellation: checkCancellation

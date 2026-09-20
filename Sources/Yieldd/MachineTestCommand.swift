@@ -24,7 +24,7 @@ struct MachineTestCommand: ParsableCommand {
                     leaseStore: leaseStore,
                     makeGitHub: { GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor) },
                     makeLinuxBackend: {
-                        AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor)
+                        AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
                     },
                     checkCancellation: signalMonitor.check,
                     wait: signalMonitor.wait
@@ -74,8 +74,9 @@ struct MachineTestRunner {
         var machineMayExist = false
         let operation = Result<Void, any Error> {
             try checkCancellation()
-            machineMayExist = true
-            try backend.create(id: id, memory: reservation.allocation)
+            try backend.create(id: id, memory: reservation.allocation) {
+                machineMayExist = true
+            }
             try checkCancellation()
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             switch backend.platform {

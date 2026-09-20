@@ -2,7 +2,8 @@ import Foundation
 
 func recoverConnectedPlatforms(
     directory: URL, server: URL, deviceID: String, token: String,
-    confirmation: String?, stop: RunnerPoolStop
+    confirmation: String?, stop: RunnerPoolStop,
+    makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil
 ) throws {
     var confirmed = false
     for platform in [RunnerPlatform.macOS, .linux] {
@@ -18,12 +19,13 @@ func recoverConnectedPlatforms(
                     confirmRegistrationRemoved: confirmation, destroy: { id in
                         switch platform {
                         case .macOS:
-                            try MacOSRunnerCloneStore(stateDirectory: directory).remove(id)
+                            let clones = try (makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) })(.runners)
+                            try clones.remove(id)
                         case .linux:
                             let container = try ExecutableLocator().locate("container")
                             let executor = ProcessExecutor(checkCancellation: stop.check)
-                            try AppleContainerSystem(containerURL: container, executor: executor).start()
-                            try AppleContainerBackend(containerURL: container, executor: executor).destroy(id)
+                            try AppleContainerSystem(containerURL: container, executor: executor, stateDirectory: directory).start()
+                            try AppleContainerBackend(containerURL: container, executor: executor, stateDirectory: directory).destroy(id)
                         }
                     }, complete: client.complete)
                 confirmed = true

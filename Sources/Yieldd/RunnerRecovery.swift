@@ -4,22 +4,23 @@ import Foundation
 struct RunnerRecovery {
     private let linuxBackend: () throws -> any RunnerBackend
     private let leaseStore: RunnerLeaseStore
-    private let clones: MacOSRunnerCloneStore
     private let cleanup: RunnerCleanup
     private let checkCancellation: () throws -> Void
+    private let makeCloneStore: (RunnerCloneKind) throws -> MacOSRunnerCloneStore
 
     init(
         linuxBackend: @escaping () throws -> any RunnerBackend,
         github: any GitHubRunnerManaging,
         leaseStore: RunnerLeaseStore,
+        makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil,
         recoveryWait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         checkCancellation: @escaping () throws -> Void = {},
         stateChanged: @escaping (RunnerSessionState) -> Void = { _ in }
     ) {
         self.linuxBackend = linuxBackend
         self.leaseStore = leaseStore
-        clones = MacOSRunnerCloneStore(stateDirectory: leaseStore.directory)
         self.checkCancellation = checkCancellation
+        self.makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: leaseStore.directory, kind: $0) }
         cleanup = RunnerCleanup(github: github, recoveryWait: recoveryWait, stateChanged: stateChanged, leaseStore: leaseStore)
     }
 
@@ -32,11 +33,14 @@ struct RunnerRecovery {
         )] = []
         var recoveryFailures: [RunnerSessionCleanupFailure] = []
 
-        do {
-            try clones.removeUnleased(keeping: Set(leases.map(\.runnerID)), checkCancellation: checkCancellation)
-        } catch {
-            if isCancellation(error) { throw error }
-            recoveryFailures.append(RunnerSessionCleanupFailure(step: .machine, error: error))
+        for kind in RunnerCloneKind.allCases {
+            do {
+                try makeCloneStore(kind).removeUnleased(
+                    keeping: kind == .runners ? Set(leases.map(\.runnerID)) : [], checkCancellation: checkCancellation)
+            } catch {
+                if isCancellation(error) { throw error }
+                recoveryFailures.append(RunnerSessionCleanupFailure(step: .machine, error: error))
+            }
         }
 
         for lease in leases {
@@ -56,8 +60,8 @@ struct RunnerRecovery {
                 }
             case .macOS:
                 failures = cleanup.removeRegistrationAndClone(
-                    id: lease.runnerID, repository: lease.repository, clones: clones
-                )
+                    id: lease.runnerID, repository: lease.repository
+                ) { try makeCloneStore(.runners).remove(lease.runnerID) }
             }
 
             if failures.isEmpty {

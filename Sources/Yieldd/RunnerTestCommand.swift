@@ -98,7 +98,7 @@ struct RunnerTestCommand: ParsableCommand {
 
         let recovery = RunnerRecovery(
             linuxBackend: {
-                AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor)
+                AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
             },
             github: github, leaseStore: leaseStore,
             recoveryWait: signalMonitor.wait, checkCancellation: signalMonitor.check,

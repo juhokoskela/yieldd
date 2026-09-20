@@ -23,11 +23,13 @@ struct ConnectedRunner {
         defer { if releaseOnExit { releaseCapacity() } }
         guard offer.runnerPlatform == backend.platform else { throw ConnectedRunnerError.invalidOffer }
         guard try store.load() == nil else { throw ConnectedRunnerError.recoveryRequired }
+        try backend.prepare()
         let id = RunnerID(value: offer.runner)
         let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(id.value)")
         defer { ProcessInfo.processInfo.endActivity(activity) }
         try store.save(ConnectedLease(server: server, deviceID: deviceID, offer: offer))
         var failure: (any Error)?
+        var machineMayExist = false
         do {
             try authorization.check()
             let jit = try accept(offer)
@@ -35,8 +37,10 @@ struct ConnectedRunner {
             try validateConnectedJIT(jit, runner: offer.runner)
             try authorization.check()
             // Creation can fail after allocating a guest. Retain capacity until destruction succeeds.
-            releaseOnExit = false
-            try backend.create(id: id, memory: memory)
+            try backend.create(id: id, memory: memory) {
+                releaseOnExit = false
+                machineMayExist = true
+            }
             try authorization.check()
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
@@ -51,7 +55,9 @@ struct ConnectedRunner {
         if let failure = failure as? ConnectedExecutionError {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
-        try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
+        if machineMayExist {
+            try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
+        }
         releaseOnExit = false
         releaseCapacity()
         stateChanged(.capacityReleased(id))

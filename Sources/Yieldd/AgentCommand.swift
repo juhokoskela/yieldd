@@ -59,10 +59,11 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
                 )
             )
 
-            try MacOSVirtualizationProbe().run(
+            try validateRunnerServiceTemplate(templateURL, stateDirectory: leaseStore.directory)
+            try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: Set(leaseStore.load().map(\.runnerID)))
+            try MacOSVirtualizationProbe(stateDirectory: leaseStore.directory).run(
                 templateURL: templateURL,
-                cloneRootURL: leaseStore.directory
-                    .appendingPathComponent("macos-probes", isDirectory: true),
+                cloneRootURL: RunnerStorage.required(in: leaseStore.directory).probesURL,
                 memory: reservation.allocation,
                 hold: hold,
                 checkCancellation: signalMonitor.check,
@@ -113,13 +114,17 @@ struct AgentInstallCommand: ParsableCommand {
     func run(
         locateExecutable: (String) throws -> URL,
         stateDirectory: URL? = nil,
-        memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission()
+        memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission(),
+        loadStorage: ((URL) throws -> RunnerStorage?)? = nil
     ) throws {
         let slots = try runners.serviceConfiguration()
         try memoryAdmission.validateCapacity(reserving: slots.memoryReservationBytes)
         let configuration = try AgentConfiguration.resolve(runners: slots, locateExecutable: locateExecutable)
         let store = try AgentConfigurationStore(directory: stateDirectory)
+        let storage = try (loadStorage ?? { try RunnerStorage.validated(in: $0) })(store.directory)
+        if slots.requiresLinux, let storage { try storage.validatePath(storage.containerURL) }
         if let templateURL = configuration.runners.macOSTemplateURL {
+            if let storage { try storage.validateMacOS(template: templateURL, clones: storage.clonesURL) }
             try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory)
         }
         guard !preflightOnly else {
@@ -207,7 +212,7 @@ struct AgentRunCommand: ParsableCommand {
                     ghURL: configuration.ghURL,
                     stop: stop,
                     output: .agentLog,
-                    prepareContainer: agentContainerPreparation(configuration: configuration, executor: executor)
+                    prepareContainer: agentContainerPreparation(configuration: configuration, executor: executor, stateDirectory: store.directory)
                 )
             }
         } catch where isCancellation(error) {
@@ -219,20 +224,22 @@ struct AgentRunCommand: ParsableCommand {
     }
 }
 
-func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, executor: any ProcessExecuting) throws {
+func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, executor: any ProcessExecuting,
+                         makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     try withRunnerOwnership(in: store.directory) { leaseStore in
         if try leaseStore.load().isEmpty {
-            try MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).removeUnleased(keeping: [])
+            try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: [], makeCloneStore: makeCloneStore)
             return
         }
 
         let configuration = try store.load()
         let recovery = makeRunnerRecovery(
             leaseStore: leaseStore,
-            resolveContainer: agentContainerPreparation(configuration: configuration, executor: executor),
+            resolveContainer: agentContainerPreparation(configuration: configuration, executor: executor, stateDirectory: store.directory),
             ghURL: configuration.ghURL,
             stop: stop,
             executor: executor,
+            makeCloneStore: makeCloneStore,
             stateChanged: { reportRunnerRecoveryState($0) }
         )
         for id in try recovery.run() {
@@ -242,7 +249,7 @@ func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, e
 }
 
 func agentContainerPreparation(
-    configuration: AgentConfiguration, executor: any ProcessExecuting
+    configuration: AgentConfiguration, executor: any ProcessExecuting, stateDirectory: URL
 ) -> () throws -> URL {
     // Startup and recovery call this synchronously, before concurrent runner slots begin.
     var prepared: Result<URL, any Error>?
@@ -253,7 +260,7 @@ func agentContainerPreparation(
             guard FileManager.default.isExecutableFile(atPath: url.path) else {
                 throw AgentConfigurationError.executableUnavailable(path: url.path)
             }
-            try AppleContainerSystem(containerURL: url, executor: executor).start()
+            try AppleContainerSystem(containerURL: url, executor: executor, stateDirectory: stateDirectory).start()
             return url
         }
         prepared = result

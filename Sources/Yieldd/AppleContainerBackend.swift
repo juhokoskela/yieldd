@@ -15,18 +15,34 @@ struct AppleContainerBackend: RunnerBackend {
     let containerURL: URL
     let executor: any ProcessExecuting
     let dockerReadiness: DockerReadiness
+    private let loadStorage: () throws -> RunnerStorage?
 
     init(
         containerURL: URL,
         executor: any ProcessExecuting,
+        stateDirectory: URL,
+        loadStorage: (() throws -> RunnerStorage?)? = nil,
         dockerReadiness: DockerReadiness = DockerReadiness()
     ) {
         self.containerURL = containerURL
         self.executor = executor
         self.dockerReadiness = dockerReadiness
+        self.loadStorage = loadStorage ?? {
+            let storage = try RunnerStorage.validated(in: stateDirectory, executor: executor)
+            try storage.validateContainer(containerExecutable: containerURL, executor: executor)
+            return storage
+        }
     }
 
+    func prepare() throws { _ = try loadStorage() }
+
     func create(id: RunnerID, memory allocation: RunnerMemoryAllocation) throws {
+        try create(id: id, memory: allocation, recordIntent: {})
+    }
+
+    func create(id: RunnerID, memory allocation: RunnerMemoryAllocation, recordIntent: () throws -> Void) throws {
+        try prepare()
+        try recordIntent()
         _ = try run([
             "machine", "create",
             "--name", id.value,
@@ -82,7 +98,9 @@ struct AppleContainerBackend: RunnerBackend {
     }
 
     func destroy(_ id: RunnerID) throws {
+        let storage = try loadStorage()
         guard try machineIDs().contains(id.value) else {
+            try storage?.requireMachineRemoved(id)
             return
         }
         do {
@@ -98,9 +116,11 @@ struct AppleContainerBackend: RunnerBackend {
                 throw deletionError
             }
         }
+        try storage?.requireMachineRemoved(id)
     }
 
     func stopRunner(on id: RunnerID) throws {
+        _ = try loadStorage()
         _ = try run(
             [
                 "machine", "run",

@@ -12,10 +12,10 @@ func doctorReportsSuccessfulChecks() throws {
         .success(processResult()),
     ])
 
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        supportsAppleSilicon: { true }
+        loadStorage: { nil }, supportsAppleSilicon: { true }
     ).run()
 
     #expect(report.succeeded)
@@ -26,6 +26,7 @@ func doctorReportsSuccessfulChecks() throws {
         .passed("available"),
         .passed(fixture.executable(named: "gh").path),
         .passed("authenticated"),
+        .passed("quota-backed"),
     ])
     #expect(executor.requests.map(\.arguments) == [
         ["system", "status", "--format", "json"],
@@ -40,14 +41,14 @@ func doctorSkipsDependentChecksWhenContainerIsMissing() {
     let directory = "/tmp/yieldd-empty-path-\(UUID().uuidString)"
     let executor = RecordingProcessExecutor(outcomes: [])
 
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: directory),
-        supportsAppleSilicon: { true }
+        loadStorage: { nil }, supportsAppleSilicon: { true }
     ).run()
 
     #expect(!report.succeeded)
-    #expect(report.checks.count == 6)
+    #expect(report.checks.count == 7)
     #expect(report.checks[2].status == .skipped("container executable is unavailable"))
     #expect(report.checks[3].status == .skipped("container executable is unavailable"))
     guard case .failed = report.checks[4].status else {
@@ -69,10 +70,10 @@ func doctorAggregatesHostAndSystemFailures() throws {
         .success(processResult(stderr: "not running", status: 1)),
     ])
 
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        supportsAppleSilicon: { false }
+        loadStorage: { nil }, supportsAppleSilicon: { false }
     ).run()
 
     #expect(report.checks[0].status == .failed("this host does not report Apple Silicon support"))
@@ -92,10 +93,10 @@ func doctorChecksGitHubEvenWhenContainerIsMissing() throws {
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
 
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        supportsAppleSilicon: { true }
+        loadStorage: { nil }, supportsAppleSilicon: { true }
     ).run()
 
     #expect(!report.succeeded)
@@ -111,10 +112,10 @@ func macOSDoctorDoesNotRequireOrInvokeContainer() throws {
     let fixture = try ExecutableFixture(names: ["gh"])
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        supportsAppleSilicon: { true }
+        loadStorage: { nil }, supportsAppleSilicon: { true }
     ).run(templateURL: fixture.directory.appendingPathComponent("missing.bundle"))
 
     #expect(!report.succeeded)

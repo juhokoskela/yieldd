@@ -12,7 +12,7 @@ struct DoctorCommand: ParsableCommand {
     var machine: RunnerMachineOptions
 
     mutating func run() throws {
-        let report = Doctor().run(templateURL: machine.template.map { URL(fileURLWithPath: $0) })
+        let report = Doctor(stateDirectory: try yielddApplicationSupportDirectory()).run(templateURL: machine.template.map { URL(fileURLWithPath: $0) })
         for check in report.checks {
             print(check.formatted)
         }
@@ -24,15 +24,21 @@ struct Doctor {
     let executor: any ProcessExecuting
     let executableLocator: ExecutableLocator
     let supportsAppleSilicon: () -> Bool
+    let stateDirectory: URL
+    let loadStorage: () throws -> RunnerStorage?
 
     init(
+        stateDirectory: URL,
         executor: any ProcessExecuting = ProcessExecutor(),
         executableLocator: ExecutableLocator = ExecutableLocator(),
+        loadStorage: (() throws -> RunnerStorage?)? = nil,
         supportsAppleSilicon: @escaping () -> Bool = HostCapabilities.supportsAppleSilicon
     ) {
         self.executor = executor
         self.executableLocator = executableLocator
         self.supportsAppleSilicon = supportsAppleSilicon
+        self.stateDirectory = stateDirectory
+        self.loadStorage = loadStorage ?? { try RunnerStorage.validated(in: stateDirectory, executor: executor) }
     }
 
     func run(templateURL: URL? = nil) -> DoctorReport {
@@ -49,6 +55,18 @@ struct Doctor {
             checks.append(contentsOf: containerChecks())
         }
         checks.append(contentsOf: githubChecks())
+        do {
+            if let storage = try loadStorage() {
+                if let templateURL {
+                    try storage.validateMacOS(template: templateURL, clones: storage.clonesURL)
+                } else {
+                    try storage.validateContainer(containerExecutable: executableLocator.locate("container"), executor: executor)
+                }
+            }
+            checks.append(DoctorCheck(name: "Runner storage", status: .passed("quota-backed")))
+        } catch {
+            checks.append(DoctorCheck(name: "Runner storage", status: .failed(describeError(error))))
+        }
         return DoctorReport(checks: checks)
     }
 
@@ -58,7 +76,7 @@ struct Doctor {
             ("Virtualization entitlement", { try VirtualizationEntitlement.requireCurrentProcess() }),
             ("macOS template", {
                 try validateRunnerServiceTemplate(
-                    templateURL, stateDirectory: try yielddApplicationSupportDirectory()
+                    templateURL, stateDirectory: stateDirectory
                 )
             }),
             ("macOS memory capacity", {

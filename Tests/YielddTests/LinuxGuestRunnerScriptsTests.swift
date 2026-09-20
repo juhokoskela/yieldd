@@ -54,7 +54,7 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
         .success(try ProcessExecutor().execute(status)),
         .success(replay),
     ])
-    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor)
+    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
     do {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in
             Issue.record("The listener has already completed")

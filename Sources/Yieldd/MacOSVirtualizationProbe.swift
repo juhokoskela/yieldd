@@ -387,15 +387,19 @@ struct MacOSVirtualizationProbe {
     static let runDuration: TimeInterval = 5
 
     private let requireEntitlement: () throws -> Void
+    private let loadStorage: () throws -> RunnerStorage?
     private let makeMachine: (URL, UInt64) throws -> any MacOSVirtualMachineControlling
 
     init(
+        stateDirectory: URL,
         requireEntitlement: @escaping () throws -> Void =
             VirtualizationEntitlement.requireCurrentProcess,
+        loadStorage: (() throws -> RunnerStorage?)? = nil,
         makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
             MacOSVirtualMachineLifecycle.makeMachine
     ) {
         self.requireEntitlement = requireEntitlement
+        self.loadStorage = loadStorage ?? { try RunnerStorage.validated(in: stateDirectory) }
         self.makeMachine = makeMachine
     }
 
@@ -413,6 +417,7 @@ struct MacOSVirtualizationProbe {
     ) throws {
         try requireEntitlement()
         try checkCancellation()
+        try loadStorage()?.validateMacOS(template: templateURL, clones: cloneRootURL)
         let clone = try MacOSVirtualizationProbeClone.create(
             templateURL: templateURL,
             cloneRootURL: cloneRootURL
@@ -452,6 +457,7 @@ struct MacOSVirtualizationProbe {
             }
         }
         let removalResult = Result<Void, any Error> {
+            try loadStorage()?.validatePath(cloneRootURL)
             try clone.remove()
         }
         let cleanup: Result<Void, any Error>

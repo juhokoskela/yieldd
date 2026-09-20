@@ -7,15 +7,16 @@
 - An Apple Silicon Mac running macOS 26 or newer
 - Swift 6.2 or newer
 - For Linux runners: Apple `container` with container machine support and a running container system
-- For macOS runners: a user-prepared template bundle on the same APFS volume as yieldd's Application Support directory
+- A configured [quota-limited APFS volume](Docs/runner-storage.md) for guest storage, separate from recovery records
+- For macOS runners: a user-prepared template bundle on that guest-storage volume
 - For GitHub jobs or abandoned-runner recovery: GitHub CLI authenticated to `github.com` with administration access to the repository
 
 For safety, `yieldd` rejects empty `PATH` components instead of interpreting them as the working directory.
 
-Start the container system outside `yieldd` if needed:
+Configure [runner storage](Docs/runner-storage.md) first. Start the container system outside `yieldd` if needed, using the configured guest volume:
 
 ```sh
-container system start
+container system start --app-root /Volumes/YielddRunners/container
 ```
 
 `yieldd doctor` never starts or changes the container system.
@@ -101,7 +102,9 @@ macOS runners have the `yieldd-macos` label and no default labels. Their names s
 
 `machine-test`, `runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock. GitHub runner sessions record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, `runner-test`, `serve`, the local agent, and macOS `machine-test` recover those exact runners before creating another machine. Linux `machine-test` does not perform recovery. If GitHub still considers an interrupted runner busy, recovery keeps its lease and waits with exponential backoff until GitHub releases it.
 
-Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased runner directories from `~/Library/Application Support/yieldd/macos-runners/`, leaving unrelated files and symbolic links untouched.
+Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased clones from the configured volume's `macos-runners/` and `macos-probes/`, leaving unrelated files and symbolic links untouched.
+
+Before upgrading from an unconfigured storage layout, finish outstanding cleanup with the previous version. This version requires `storage.json` for disk cleanup and does not search or migrate legacy Container roots or clone directories. See the [storage setup instructions](Docs/runner-storage.md#set-up-a-mac).
 
 ## Standalone recovery
 

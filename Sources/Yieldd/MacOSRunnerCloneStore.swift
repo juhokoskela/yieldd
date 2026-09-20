@@ -1,15 +1,39 @@
 import Darwin
 import Foundation
 
+func removeUnleasedMacOSClones(in directory: URL, keeping ids: Set<RunnerID>, checkCancellation: () throws -> Void = {},
+                               makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
+    let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) }
+    var failures: [RunnerSessionCleanupFailure] = []
+    for kind in RunnerCloneKind.allCases {
+        do {
+            try makeCloneStore(kind)
+                .removeUnleased(keeping: kind == .runners ? ids : [], checkCancellation: checkCancellation)
+        } catch {
+            if isCancellation(error) { throw error }
+            failures.append(.init(step: .machine, error: error))
+        }
+    }
+    if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
+}
+
 struct MacOSRunnerCloneStore {
     let rootURL: URL
+    private let validateRoot: () throws -> Void
 
     init(rootURL: URL) {
         self.rootURL = rootURL
+        validateRoot = {}
     }
 
-    init(stateDirectory: URL) {
-        rootURL = stateDirectory.appendingPathComponent("macos-runners", isDirectory: true)
+    init(stateDirectory: URL, kind: RunnerCloneKind = .runners) throws {
+        let storage = try RunnerStorage.required(in: stateDirectory)
+        rootURL = storage.cloneRoot(kind)
+        validateRoot = {
+            let current = try RunnerStorage.validated(in: stateDirectory)
+            guard current == storage else { throw RunnerStorageError.volumeUnavailable(path: storage.volumePath) }
+            try current.validatePath(current.cloneRoot(kind))
+        }
     }
 
     func removeUnleased(
@@ -39,6 +63,7 @@ struct MacOSRunnerCloneStore {
     }
 
     private func rootExists() throws -> Bool {
+        try validateRoot()
         var status = stat()
         guard Darwin.lstat(rootURL.path, &status) == 0 else {
             if errno == ENOENT { return false }

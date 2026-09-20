@@ -258,7 +258,7 @@ func agentUninstallRecoversMacOSLeasesWithoutContainer(mixed: Bool) async throws
     let leases = try RunnerLeaseStore(directory: fixture.directory)
     let id = RunnerID(value: "yieldd-abandoned")
     try leases.save(RunnerLease(runnerID: id, repository: repository, platform: .macOS))
-    let clone = try MacOSRunnerCloneStore(stateDirectory: fixture.directory).bundleURL(for: id)
+    let clone = try testCloneStores(in: fixture.directory)(.runners).bundleURL(for: id)
     try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
     try fixture.store.save(configuration)
     let executor = RecordingProcessExecutor(outcomes: [
@@ -266,7 +266,7 @@ func agentUninstallRecoversMacOSLeasesWithoutContainer(mixed: Bool) async throws
         .success(processResult()),
     ])
     try await uninstallAgent(store: fixture.store, service: fixture.service, recover: {
-        try recoverAgentRunners(store: fixture.store, stop: RunnerPoolStop(), executor: executor)
+        try recoverAgentRunners(store: fixture.store, stop: RunnerPoolStop(), executor: executor, makeCloneStore: testCloneStores(in: fixture.directory))
     })
     #expect(try leases.load().isEmpty)
     #expect(!FileManager.default.fileExists(atPath: clone.path))
@@ -293,15 +293,15 @@ func agentRecoveryKeepsLinuxFailuresIndependentOfMacOSCleanup(missingContainerPa
     for id in linuxIDs { try leases.save(RunnerLease(runnerID: id, repository: repository)) }
     let macID = RunnerID(value: "yieldd-z-macos")
     try leases.save(RunnerLease(runnerID: macID, repository: repository, platform: .macOS))
-    let clone = try MacOSRunnerCloneStore(stateDirectory: fixture.directory).bundleURL(for: macID)
+    let clone = try testCloneStores(in: fixture.directory)(.runners).bundleURL(for: macID)
     try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
-    let outcomes: [Result<ProcessResult, any Error>] = (missingContainerPath ? [] : [.failure(TestFailure.create)]) + [
+    let outcomes: [Result<ProcessResult, any Error>] = [
         .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-z-macos","busy":false}]}]"#)),
         .success(processResult()),
     ]
     let executor = RecordingProcessExecutor(outcomes: outcomes)
     let error = try #require(#expect(throws: RunnerSessionError.self) {
-        try recoverAgentRunners(store: fixture.store, stop: RunnerPoolStop(), executor: executor)
+        try recoverAgentRunners(store: fixture.store, stop: RunnerPoolStop(), executor: executor, makeCloneStore: testCloneStores(in: fixture.directory))
     })
     guard case let .cleanupFailed(failures) = error else {
         Issue.record("Expected independent Linux cleanup failures")
@@ -316,12 +316,12 @@ func agentRecoveryKeepsLinuxFailuresIndependentOfMacOSCleanup(missingContainerPa
         if missingContainerPath {
             #expect(underlying as? AgentConfigurationError == .containerPathNotRecorded)
         } else {
-            #expect(underlying as? TestFailure == .create)
+            #expect(underlying as? RunnerStorageError == .notConfigured)
         }
     }
     #expect(try leases.load().map(\.runnerID) == linuxIDs)
     #expect(!FileManager.default.fileExists(atPath: clone.path))
-    #expect(executor.requests.filter { $0.executableURL == configuration.containerURL }.count == (missingContainerPath ? 0 : 1))
+    #expect(executor.requests.filter { $0.executableURL == configuration.containerURL }.isEmpty)
     #expect(executor.requests.last?.arguments.contains("DELETE") == true)
     #expect(try fixture.store.load() == configuration)
 }
@@ -347,7 +347,7 @@ func mixedAgentRecoversMacOSAfterContainerBecomesUnavailable(nonExecutable: Bool
     let macID = RunnerID(value: "yieldd-z-macos")
     try leases.save(RunnerLease(runnerID: linuxID, repository: repository))
     try leases.save(RunnerLease(runnerID: macID, repository: repository, platform: .macOS))
-    let clone = try MacOSRunnerCloneStore(stateDirectory: fixture.directory).bundleURL(for: macID)
+    let clone = try testCloneStores(in: fixture.directory)(.runners).bundleURL(for: macID)
     try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
     let loaded = try fixture.store.load()
     try loaded.requireGitHubCLI()
@@ -356,8 +356,8 @@ func mixedAgentRecoversMacOSAfterContainerBecomesUnavailable(nonExecutable: Bool
         .success(processResult()),
     ])
     let recovery = makeRunnerRecovery(
-        leaseStore: leases, resolveContainer: agentContainerPreparation(configuration: loaded, executor: executor),
-        ghURL: loaded.ghURL, stop: RunnerPoolStop(), executor: executor, stateChanged: { _ in }
+        leaseStore: leases, resolveContainer: agentContainerPreparation(configuration: loaded, executor: executor, stateDirectory: unconfiguredContainerStateDirectory),
+        ghURL: loaded.ghURL, stop: RunnerPoolStop(), executor: executor, makeCloneStore: testCloneStores(in: fixture.directory), stateChanged: { _ in }
     )
     let error = try #require(#expect(throws: RunnerSessionError.self) { try recovery.run() })
     guard case let .cleanupFailed(failures) = error,

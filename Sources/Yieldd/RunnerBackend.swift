@@ -50,7 +50,9 @@ enum RunnerMemoryAllocation: String, Equatable, Sendable {
 
 protocol RunnerBackend {
     var platform: RunnerPlatform { get }
+    func prepare() throws
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws
+    func create(id: RunnerID, memory: RunnerMemoryAllocation, recordIntent: () throws -> Void) throws
     @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
@@ -64,6 +66,14 @@ protocol RunnerBackend {
 }
 
 extension RunnerBackend {
+    func prepare() throws {}
+
+    func create(id: RunnerID, memory: RunnerMemoryAllocation, recordIntent: () throws -> Void) throws {
+        try prepare()
+        try recordIntent()
+        try create(id: id, memory: memory)
+    }
+
     @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data? = nil,
