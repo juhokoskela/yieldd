@@ -387,22 +387,19 @@ struct MacOSVirtualizationProbe {
     static let runDuration: TimeInterval = 5
 
     private let requireEntitlement: () throws -> Void
-    private let validateStorageQuota: (URL, URL) throws -> Void
+    private let loadStorage: () throws -> RunnerStorage?
     private let makeMachine: (URL, UInt64) throws -> any MacOSVirtualMachineControlling
 
     init(
+        stateDirectory: URL,
         requireEntitlement: @escaping () throws -> Void =
             VirtualizationEntitlement.requireCurrentProcess,
-        validateStorageQuota: @escaping (URL, URL) throws -> Void = { template, clones in
-            let directory = try yielddApplicationSupportDirectory()
-            try RunnerStorage.required(in: directory).validateMacOS(
-                template: template, clones: clones, stateDirectory: directory)
-        },
+        loadStorage: (() throws -> RunnerStorage?)? = nil,
         makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
             MacOSVirtualMachineLifecycle.makeMachine
     ) {
         self.requireEntitlement = requireEntitlement
-        self.validateStorageQuota = validateStorageQuota
+        self.loadStorage = loadStorage ?? { try RunnerStorage.validated(in: stateDirectory) }
         self.makeMachine = makeMachine
     }
 
@@ -420,7 +417,7 @@ struct MacOSVirtualizationProbe {
     ) throws {
         try requireEntitlement()
         try checkCancellation()
-        try validateStorageQuota(templateURL, cloneRootURL)
+        try loadStorage()?.validateMacOS(template: templateURL, clones: cloneRootURL)
         let clone = try MacOSVirtualizationProbeClone.create(
             templateURL: templateURL,
             cloneRootURL: cloneRootURL
@@ -460,7 +457,7 @@ struct MacOSVirtualizationProbe {
             }
         }
         let removalResult = Result<Void, any Error> {
-            try validateStorageQuota(templateURL, cloneRootURL)
+            try loadStorage()?.validatePath(cloneRootURL)
             try clone.remove()
         }
         let cleanup: Result<Void, any Error>

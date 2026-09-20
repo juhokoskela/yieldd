@@ -5,6 +5,14 @@ import Foundation
 let unconfiguredContainerStateDirectory = FileManager.default.temporaryDirectory
     .appendingPathComponent("yieldd-unconfigured-\(UUID().uuidString)")
 
+func testCloneStores(in directory: URL) -> (RunnerCloneKind) -> MacOSRunnerCloneStore {
+    { MacOSRunnerCloneStore(rootURL: directory.appendingPathComponent($0.rawValue)) }
+}
+
+func saveTestStorageBinding(in directory: URL) throws {
+    try RunnerStorage(volumePath: directory.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString).save(in: directory)
+}
+
 extension AgentConfiguration {
     init(
         repositories: [GitHubRepository], macOSRepositories: [GitHubRepository] = [],

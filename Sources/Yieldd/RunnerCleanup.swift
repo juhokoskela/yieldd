@@ -99,13 +99,13 @@ struct RunnerCleanup {
     func removeRegistrationAndClone(
         id: RunnerID,
         repository: GitHubRepository,
-        clones: MacOSRunnerCloneStore
+        removeClone: () throws -> Void
     ) -> [RunnerSessionCleanupFailure] {
         [
             cleanupFailure(step: .githubRunner) {
                 try github.removeRunners(named: id.value, from: repository)
             },
-            cleanupFailure(step: .machine) { try clones.remove(id) },
+            cleanupFailure(step: .machine, operation: removeClone),
         ].compactMap { $0 }
     }
 }

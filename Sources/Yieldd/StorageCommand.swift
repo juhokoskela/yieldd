@@ -37,9 +37,11 @@ struct StorageStatusCommand: ParsableCommand {
         let storage = try RunnerStorage.required(in: directory)
         let volume = try storage.validate(stateDirectory: directory)
         print("Guest volume: \(storage.volumePath) (\(storage.volumeUUID))")
-        print("Shared hard quota: \(volume.quotaBytes) bytes (\(Double(volume.quotaBytes) / 1_073_741_824) GiB).")
+        let quota = ByteCountFormatter.string(fromByteCount: Int64(clamping: volume.quotaBytes), countStyle: .binary)
+        print("Shared hard quota: \(quota) (\(volume.quotaBytes) bytes).")
         print("Apple Container data: \(storage.containerURL.path)")
         print("macOS clones: \(storage.clonesURL.path)")
+        print("macOS probe clones: \(storage.probesURL.path)")
         print("Recovery records: \(directory.path)")
     }
 }
@@ -51,26 +53,20 @@ func configureRunnerStorage(volume: URL, leaseStore: RunnerLeaseStore,
           try ConnectedRunnerStore(directory: leaseStore.directory, platform: .macOS).load() == nil else {
         throw RunnerStorageError.outstandingRecovery
     }
-    for name in ["macos-runners", "macos-probes"] {
-        let legacy = leaseStore.directory.appendingPathComponent(name)
-        if FileManager.default.fileExists(atPath: legacy.path),
-           try !FileManager.default.contentsOfDirectory(atPath: legacy.path).isEmpty {
-            throw RunnerStorageError.legacyClones
-        }
-    }
     let url = volume.standardizedFileURL
     let info = try APFSQuotaVolume.read(at: url, using: executor)
     let storage = RunnerStorage(volumePath: url.path, volumeUUID: info.uuid)
-    try storage.validate(stateDirectory: leaseStore.directory, executor: executor)
+    try storage.validate(info, stateDirectory: leaseStore.directory)
     if let existing = try RunnerStorage.load(in: leaseStore.directory), existing != storage {
         throw RunnerStorageError.alreadyConfigured
     }
-    for directory in [storage.containerURL, storage.clonesURL, storage.probesURL] {
-        try storage.validatePath(directory)
+    let directories = [storage.containerURL, storage.clonesURL, storage.probesURL]
+    try storage.validatePaths(directories)
+    for directory in directories {
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
             guard isDirectory.boolValue, directory.resolvingSymlinksInPath() == directory else {
-                throw RunnerStorageError.invalidDirectory(directory.path)
+                throw RunnerStorageError.invalidDirectory(path: directory.path)
             }
         } else {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,

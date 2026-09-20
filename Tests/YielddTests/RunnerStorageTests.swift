@@ -28,7 +28,10 @@ func storageRefusesMalformedOrSymlinkedConfiguration() throws {
     defer { fixture.remove() }
     let file = fixture.directory.appendingPathComponent("storage.json")
     try Data("{}".utf8).write(to: file)
-    #expect(throws: RunnerStorageError.invalidConfiguration) { try RunnerStorage.load(in: fixture.directory) }
+    let error = try #require(#expect(throws: RunnerStorageError.self) { try RunnerStorage.load(in: fixture.directory) })
+    guard case let .invalidConfiguration(path, reason) = error else { Issue.record("Expected decoding diagnostic"); return }
+    #expect(path == file.path)
+    #expect(!reason.isEmpty)
     try FileManager.default.removeItem(at: file)
     try FileManager.default.createSymbolicLink(at: file, withDestinationURL: fixture.directory.appendingPathComponent("absent"))
     #expect(throws: POSIXError.self) { try RunnerStorage.load(in: fixture.directory) }
@@ -54,17 +57,29 @@ func storageConfigurationRefusesUnresolvedLeases(connected: Bool) throws {
     #expect(try RunnerStorage.load(in: fixture.directory) == nil)
 }
 
-@Test
-func storageRefusesLegacyClonesWithoutRemovingThem() throws {
+@Test(arguments: [false, true])
+func storageConfigurationValidatesTheVolumeWithoutReadingItAgain(hasQuota: Bool) throws {
     let fixture = try StorageFixture()
     defer { fixture.remove() }
+    let volume = fixture.directory.resolvingSymlinksInPath()
     let leases = try RunnerLeaseStore(directory: fixture.directory)
-    let clone = fixture.directory.appendingPathComponent("macos-runners/yieldd-old.bundle")
-    try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
-    #expect(throws: RunnerStorageError.legacyClones) {
-        try configureRunnerStorage(volume: fixture.directory, leaseStore: leases, executor: RecordingProcessExecutor(outcomes: []))
+    let uuid = UUID().uuidString
+    let info = try plist(["VolumeUUID": uuid, "MountPoint": volume.path, "FilesystemType": "apfs"])
+    let listing = try plist(["Containers": [["Volumes": [["APFSVolumeUUID": uuid, "CapacityQuota": hasQuota ? 12345 : 0]]]]])
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(ProcessResult(stdout: info, stderr: Data(), terminationReason: .exit, terminationStatus: 0)),
+        .success(ProcessResult(stdout: listing, stderr: Data(), terminationReason: .exit, terminationStatus: 0)),
+    ])
+    let expected: RunnerStorageError = hasQuota ? .journalOnGuestVolume : .noQuota(path: volume.path)
+
+    #expect(throws: expected) {
+        try configureRunnerStorage(volume: volume, leaseStore: leases, executor: executor)
     }
-    #expect(FileManager.default.fileExists(atPath: clone.path))
+    #expect(executor.requests.map(\.arguments) == [
+        ["info", "-plist", volume.path],
+        ["apfs", "list", "-plist"],
+    ])
+    #expect(try RunnerStorage.load(in: leases.directory) == nil)
 }
 
 @Test(arguments: ["missing", "identity", "unlimited", "journal"])
@@ -83,9 +98,9 @@ func storageValidationFailsClosed(failure: String) throws {
         .success(ProcessResult(stdout: listing, stderr: Data(), terminationReason: .exit, terminationStatus: 0)),
     ])
     let expected: RunnerStorageError = switch failure {
-    case "unlimited": .noQuota(path)
+    case "unlimited": .noQuota(path: path)
     case "journal": .journalOnGuestVolume
-    default: .volumeUnavailable(path)
+    default: .volumeUnavailable(path: path)
     }
     #expect(throws: expected) { try storage.validate(stateDirectory: fixture.directory, executor: executor) }
 }
@@ -98,11 +113,11 @@ func storageRejectsSymlinkEscapesAndMissingMachineCleanup() throws {
     try FileManager.default.createDirectory(at: volume, withIntermediateDirectories: false)
     let storage = RunnerStorage(volumePath: volume.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
     try FileManager.default.createSymbolicLink(at: storage.clonesURL, withDestinationURL: fixture.directory)
-    #expect(throws: RunnerStorageError.outsideVolume(storage.clonesURL.path)) { try storage.validatePath(storage.clonesURL) }
+    #expect(throws: RunnerStorageError.outsideVolume(path: storage.clonesURL.path)) { try storage.validatePath(storage.clonesURL) }
     let id = RunnerID(value: "yieldd-retained")
     let machine = storage.containerURL.appendingPathComponent("plugin-state/machine-apiserver/machines/\(id.value)")
     try FileManager.default.createDirectory(at: machine, withIntermediateDirectories: true)
-    #expect(throws: RunnerStorageError.machineStorageRemains(id.value)) { try storage.requireMachineRemoved(id) }
+    #expect(throws: RunnerStorageError.machineStorageRemains(runner: id.value, path: machine.path)) { try storage.requireMachineRemoved(id) }
     try FileManager.default.removeItem(at: machine)
     try storage.requireMachineRemoved(id)
 }
@@ -111,13 +126,13 @@ func storageRejectsSymlinkEscapesAndMissingMachineCleanup() throws {
 func backendStorageFailurePreventsGuestCreation() throws {
     let executor = RecordingProcessExecutor(outcomes: [])
     let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/missing/container"), executor: executor,
-        validateStorage: { throw RunnerStorageError.notConfigured })
+        stateDirectory: unconfiguredContainerStateDirectory)
     #expect(throws: RunnerStorageError.notConfigured) { try backend.create(id: RunnerID(value: "yieldd-test"), memory: .full) }
     #expect(executor.requests.isEmpty)
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
-    let mac = try MacOSVirtualizationBackend(templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
-        executor: executor, requireEntitlement: {}, validateStorageQuota: { _, _ in throw RunnerStorageError.notConfigured },
+    let mac = try MacOSVirtualizationBackend(stateDirectory: unconfiguredContainerStateDirectory, templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
+        executor: executor, requireEntitlement: {},
         makeMachine: { _, _ in Issue.record("No VM may be created without a quota"); throw TestFailure.create })
     #expect(throws: RunnerStorageError.notConfigured) { try mac.create(id: RunnerID(value: "yieldd-test"), memory: .full) }
     #expect(!FileManager.default.fileExists(atPath: fixture.cloneRootURL.path))
@@ -127,6 +142,71 @@ func backendStorageFailurePreventsGuestCreation() throws {
 func storageCLIRejectsRelativeVolume() throws {
     let error = try #require(#expect(throws: (any Error).self) { try StorageConfigureCommand.parse(["--volume", "relative"]) })
     #expect(StorageConfigureCommand.message(for: error) == "--volume must be an absolute mount point.")
+}
+
+@Test(arguments: [false, true])
+func storageRejectsExistingAndDanglingSymlinkPrefixes(dangling: Bool) throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let root = fixture.directory.resolvingSymlinksInPath().appendingPathComponent("volume")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    let storage = RunnerStorage(volumePath: root.path, volumeUUID: UUID().uuidString)
+    let target = dangling ? fixture.directory.appendingPathComponent("absent") : fixture.directory
+    let link = root.appendingPathComponent("escape")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+    let absentChild = link.appendingPathComponent("not-created/guest.bundle")
+    #expect(throws: RunnerStorageError.outsideVolume(path: absentChild.path)) { try storage.validatePath(absentChild) }
+    try storage.validatePath(root.appendingPathComponent("safe/not-created/guest.bundle"))
+}
+
+@Test
+func missingStorageBindingBlocksBothDestructionBackends() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let linux = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/missing/container"), executor: executor,
+                                      stateDirectory: fixture.rootURL)
+    let mac = try MacOSVirtualizationBackend(stateDirectory: fixture.rootURL, templateURL: fixture.templateURL,
+        cloneRootURL: fixture.cloneRootURL, executor: executor)
+    let id = RunnerID(value: "yieldd-retained")
+    let bundle = try MacOSRunnerCloneStore(rootURL: fixture.cloneRootURL).bundleURL(for: id)
+    try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+    for backend: any RunnerBackend in [linux, mac] {
+        #expect(throws: RunnerStorageError.notConfigured) { try backend.destroy(id) }
+    }
+    #expect(executor.requests.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: bundle.path))
+}
+
+@Test
+func doctorAndInstallerRejectMissingStorageWithoutStartingAnything() throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let report = Doctor(stateDirectory: fixture.directory, executor: executor,
+        executableLocator: ExecutableLocator(searchPath: fixture.directory.path)).run()
+    #expect(!report.succeeded)
+    #expect(report.checks.last == DoctorCheck(name: "Runner storage", status: .failed(describeError(RunnerStorageError.notConfigured))))
+    let command = try AgentInstallCommand.parse(["owner/repo", "--preflight-only"])
+    #expect(throws: RunnerStorageError.notConfigured) {
+        try command.run(locateExecutable: { _ in URL(fileURLWithPath: "/usr/bin/true") }, stateDirectory: fixture.directory,
+                        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 32 * 1_024 * 1_024 * 1_024))
+    }
+    #expect(executor.requests.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("agent.json").path))
+}
+
+@Test
+func stoppedContainerReportsItsRequiredStartupRoot() throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let storage = RunnerStorage(volumePath: fixture.directory.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stderr: "service stopped", status: 1))])
+    let error = try #require(#expect(throws: RunnerStorageError.self) {
+        try storage.validateContainer(containerExecutable: URL(fileURLWithPath: "/test/container"), executor: executor)
+    })
+    #expect(describeError(error).contains("--app-root"))
+    #expect(describeError(error).contains("service stopped"))
 }
 
 private func plist(_ object: [String: Any]) throws -> Data {

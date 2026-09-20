@@ -15,29 +15,34 @@ struct AppleContainerBackend: RunnerBackend {
     let containerURL: URL
     let executor: any ProcessExecuting
     let dockerReadiness: DockerReadiness
-    private let stateDirectory: URL?
-    private let validateStorage: () throws -> Void
+    private let loadStorage: () throws -> RunnerStorage?
 
     init(
         containerURL: URL,
         executor: any ProcessExecuting,
-        stateDirectory: URL? = nil,
-        validateStorage: (() throws -> Void)? = nil,
+        stateDirectory: URL,
+        loadStorage: (() throws -> RunnerStorage?)? = nil,
         dockerReadiness: DockerReadiness = DockerReadiness()
     ) {
         self.containerURL = containerURL
         self.executor = executor
         self.dockerReadiness = dockerReadiness
-        self.stateDirectory = stateDirectory
-        self.validateStorage = validateStorage ?? {
-            let directory = try stateDirectory ?? yielddApplicationSupportDirectory()
-            try RunnerStorage.required(in: directory).validateContainer(
-                containerExecutable: containerURL, stateDirectory: directory, executor: executor)
+        self.loadStorage = loadStorage ?? {
+            let storage = try RunnerStorage.validated(in: stateDirectory, executor: executor)
+            try storage.validateContainer(containerExecutable: containerURL, executor: executor)
+            return storage
         }
     }
 
+    func prepare() throws { _ = try loadStorage() }
+
     func create(id: RunnerID, memory allocation: RunnerMemoryAllocation) throws {
-        try validateStorage()
+        try create(id: id, memory: allocation, recordIntent: {})
+    }
+
+    func create(id: RunnerID, memory allocation: RunnerMemoryAllocation, recordIntent: () throws -> Void) throws {
+        try prepare()
+        try recordIntent()
         _ = try run([
             "machine", "create",
             "--name", id.value,
@@ -93,11 +98,7 @@ struct AppleContainerBackend: RunnerBackend {
     }
 
     func destroy(_ id: RunnerID) throws {
-        let directory = try stateDirectory ?? yielddApplicationSupportDirectory()
-        let storage = try RunnerStorage.load(in: directory)
-        if let storage {
-            try storage.validateContainer(containerExecutable: containerURL, stateDirectory: directory, executor: executor)
-        }
+        let storage = try loadStorage()
         guard try machineIDs().contains(id.value) else {
             try storage?.requireMachineRemoved(id)
             return

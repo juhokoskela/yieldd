@@ -24,7 +24,7 @@ struct MachineTestCommand: ParsableCommand {
                     leaseStore: leaseStore,
                     makeGitHub: { GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor) },
                     makeLinuxBackend: {
-                        AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor)
+                        AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
                     },
                     checkCancellation: signalMonitor.check,
                     wait: signalMonitor.wait

@@ -45,7 +45,8 @@ func serviceRejectsManagedTemplateBeforeRecovery(symlink: Bool) throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("yieldd-service-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
-    let template = try MacOSRunnerCloneStore(stateDirectory: directory).bundleURL(for: RunnerID(value: "yieldd-template"))
+    try saveTestStorageBinding(in: directory)
+    let template = try testCloneStores(in: directory)(.runners).bundleURL(for: RunnerID(value: "yieldd-template"))
     try FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
     let disk = template.appendingPathComponent("Disk.img")
     try Data("must survive".utf8).write(to: disk)
@@ -75,6 +76,7 @@ func serviceRejectsManagedTemplateBeforeRecovery(symlink: Bool) throws {
 @Test(arguments: [RunnerPlatform.linux, .macOS])
 func serviceSessionSelectsBackendAndJobLabel(platform: RunnerPlatform) throws {
     let fixture = try ProbeBundleFixture()
+    try saveTestStorageBinding(in: fixture.rootURL)
     defer { fixture.remove() }
     let session = try makeRunnerSession(
         backend: platform == .macOS ? .macOS(templateURL: fixture.templateURL) : .linux(containerURL: URL(fileURLWithPath: "/missing/container")),
@@ -94,10 +96,11 @@ func serviceSessionSelectsBackendAndJobLabel(platform: RunnerPlatform) throws {
 @Test
 func serviceRejectsOversubscribedMixedSlotsBeforeRecovery() throws {
     let fixture = try ProbeBundleFixture()
+    try saveTestStorageBinding(in: fixture.rootURL)
     defer { fixture.remove() }
     let leases = try RunnerLeaseStore(directory: fixture.rootURL)
     let repository = try GitHubRepository("owner/repo")
-    let orphan = try MacOSRunnerCloneStore(stateDirectory: fixture.rootURL)
+    let orphan = try testCloneStores(in: fixture.rootURL)(.runners)
         .bundleURL(for: RunnerID(value: "yieldd-abandoned"))
     try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
     let messages = ServiceMessages()
@@ -163,11 +166,12 @@ func serviceConfigurationRejectsNonAbsoluteFileURLs(value: String) throws {
 @Test
 func serviceRejectsMissingEntitlementBeforeRecovery() throws {
     let fixture = try ProbeBundleFixture()
+    try saveTestStorageBinding(in: fixture.rootURL)
     defer { fixture.remove() }
     let leases = try RunnerLeaseStore(directory: fixture.rootURL)
     let lease = RunnerLease(runnerID: RunnerID(value: "yieldd-abandoned"), repository: try GitHubRepository("owner/repo"))
     try leases.save(lease)
-    let orphan = try MacOSRunnerCloneStore(stateDirectory: fixture.rootURL).bundleURL(for: RunnerID(value: "yieldd-orphan"))
+    let orphan = try testCloneStores(in: fixture.rootURL)(.runners).bundleURL(for: RunnerID(value: "yieldd-orphan"))
     try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
     let messages = ServiceMessages()
     let error = try #require(#expect(throws: MacOSVirtualizationProbeError.self) {
@@ -191,13 +195,14 @@ func serviceRejectsMissingEntitlementBeforeRecovery() throws {
 @Test
 func serviceRecoveryReportsMissingContainerAndRetainsLinuxLease() throws {
     let fixture = try ProbeBundleFixture()
+    try saveTestStorageBinding(in: fixture.rootURL)
     defer { fixture.remove() }
     let leases = try RunnerLeaseStore(directory: fixture.rootURL)
     let lease = RunnerLease(runnerID: RunnerID(value: "yieldd-abandoned"), repository: try GitHubRepository("owner/repo"))
     let executor = RecordingProcessExecutor(outcomes: [])
     let recovery = makeRunnerRecovery(
         leaseStore: leases, resolveContainer: { try ExecutableLocator(searchPath: fixture.rootURL.path).locate("container") },
-        ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), executor: executor, stateChanged: { _ in }
+        ghURL: URL(fileURLWithPath: "/missing/gh"), stop: RunnerPoolStop(), executor: executor, makeCloneStore: testCloneStores(in: fixture.rootURL), stateChanged: { _ in }
     )
     #expect(try recovery.run().isEmpty)
     try leases.save(lease)

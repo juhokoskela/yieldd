@@ -69,7 +69,7 @@ func localAgentInstallerPreflightsBeforeReplacingAndBuildsOnlyForLinux(result: S
 }
 
 @Test(arguments: [false, true])
-func agentPreflightBinaryHonorsCapacityAndInstallerProtocol(linux: Bool) throws {
+func agentPreflightBinaryRejectsMissingStorageBeforeReturningInstallerToken(linux: Bool) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let bin = fixture.rootURL.appendingPathComponent("bin")
@@ -82,7 +82,7 @@ func agentPreflightBinaryHonorsCapacityAndInstallerProtocol(linux: Bool) throws 
     let arguments = linux ? ["owner/repo"] : ["--macos", "owner/repo", "--macos-template", fixture.templateURL.path]
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-        arguments: ["PATH=\(bin.path)", repositoryRoot.appendingPathComponent(".build/debug/yieldd").path,
+        arguments: ["CFFIXED_USER_HOME=\(fixture.rootURL.path)", "PATH=\(bin.path)", repositoryRoot.appendingPathComponent(".build/debug/yieldd").path,
                     "agent", "install", "--preflight-only"] + arguments,
         timeout: 15
     )
@@ -98,9 +98,9 @@ func agentPreflightBinaryHonorsCapacityAndInstallerProtocol(linux: Bool) throws 
             requiredBytes: required, budgetBytes: budget
         ))))
     } else {
-        _ = try result.requireSuccess(for: request)
-        #expect(result.stdoutText == (linux ? "linux\n" : "macos\n"))
-        #expect(result.stderr.isEmpty)
+        #expect(result.terminationStatus == 1)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderrText.contains(describeError(RunnerStorageError.notConfigured)))
     }
 }
 

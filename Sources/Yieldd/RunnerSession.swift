@@ -56,6 +56,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         var activity: (any NSObjectProtocol)?
         defer { if let activity { ProcessInfo.processInfo.endActivity(activity) } }
         var lifecycle: RunnerCleanupLifecycle?
+        var leaseMayExist = false
         var operationFailure: (any Error)?
         do {
             let acquiredReservation = try memoryAdmission.acquire(
@@ -68,9 +69,11 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             startupDeadline?.begin()
             let registrationToken = try github.createRegistrationToken(for: repository)
             try checkCancellation()
-            lifecycle = .machineMayExist
-            try leaseStore?.save(RunnerLease(runnerID: id, repository: repository, platform: backend.platform))
-            try backend.create(id: id, memory: acquiredReservation.allocation)
+            try backend.create(id: id, memory: acquiredReservation.allocation) {
+                leaseMayExist = true
+                try leaseStore?.save(RunnerLease(runnerID: id, repository: repository, platform: backend.platform))
+                lifecycle = .machineMayExist
+            }
             try checkCancellation()
             lifecycle = .runnerRegistrationMayExist
             try backend.exec(
@@ -102,8 +105,8 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
         startupDeadline?.end()
 
         var cleanupFailures: [RunnerSessionCleanupFailure] = []
+        if leaseMayExist { stateChanged(.cleaningUp(id)) }
         if let lifecycle {
-            stateChanged(.cleaningUp(id))
             cleanupFailures = cleanup.run(
                 lifecycle: lifecycle,
                 backend: backend,
@@ -124,7 +127,7 @@ struct EphemeralRunnerSession: RunnerSessionRunning {
             )
         }
 
-        if lifecycle != nil, cleanupFailures.isEmpty {
+        if leaseMayExist, cleanupFailures.isEmpty {
             cleanup.clearLeaseAfterCleanup(id: id)
             if assignment != nil { stateChanged(.cleanupCompleted(id)) }
         }

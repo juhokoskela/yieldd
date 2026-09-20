@@ -16,11 +16,11 @@ The layout is:
   runner.lock
 ```
 
-yieldd checks the mounted volume's UUID, quota, and storage paths before creating a guest. A missing mount, a different volume at the same path, an unlimited volume, or a template outside that volume prevents creation. Recovery also requires the original volume to be mounted; an absent disk is not evidence that cleanup succeeded. The legacy clone location remains recoverable before storage is configured.
+yieldd checks the mounted volume's UUID, quota, and storage paths before creating a guest. A missing mount, a different volume at the same path, an unlimited volume, or a template outside that volume prevents creation. Disk cleanup requires the original volume and `storage.json`; missing storage never counts as successful cleanup. Recovery still attempts independent work, including removing abandoned macOS registrations from GitHub, and retains each lease until all of its cleanup succeeds. Recovery sweeps both runner and diagnostic clone directories.
 
 ## Set up a Mac
 
-Stop yieldd and finish any outstanding cleanup first. Use `recover` for standalone leases, or reconnect with the original coordinator and device ID for connected leases. Configuration refuses pending leases and legacy macOS clone directories that still contain files. Do not delete journals to bypass these checks.
+Stop yieldd and finish any outstanding cleanup first. Use `recover` for standalone leases, or reconnect with the original coordinator and device ID for connected leases. When upgrading from an unconfigured storage layout, finish that cleanup with the previous version before upgrading. This version does not search or migrate old Container roots or clone directories. Inspect those locations before retiring them, especially if other applications use Container. Configuration refuses pending leases. Do not delete journals to bypass these checks.
 
 Create an encrypted APFS volume in Disk Utility with an explicit quota, or use the commands below. They add a volume, not a partition, and do not move existing files. Run them as your normal user. `sudo` requests administrator authorization, and `-passprompt` requests the new volume's encryption passphrase without putting it in shell history. Check the container identifier before adding the volume. Do not repeat this step if the volume already exists.
 
@@ -52,7 +52,7 @@ container build -t local/yieldd-guest:dev Guest
 container builder stop
 ```
 
-Confirm that `appRoot` points to `/Volumes/YielddRunners/container`. yieldd's service-start calls use this configured root, and Linux creation checks the running service's reported root. Starting Container manually without `--app-root` can select its old data; yieldd refuses to create a runner there. Keep the old root until you have checked that unrelated Container data is no longer needed.
+Confirm that `appRoot` points to `/Volumes/YielddRunners/container`. yieldd's service-start calls use this configured root, and Linux creation and cleanup check the running service's reported root. Standalone `recover` does not start Container: after a reboot, start it with this root before recovering Linux leases. Starting Container manually without `--app-root` can select its old data; yieldd refuses to create or clean up runners there. Keep the old root until you have checked that unrelated Container data is no longer needed.
 
 The machine-bundle cleanup check follows Apple Container 1.3.1's storage layout. Recheck that boundary when upgrading Container, especially if its machine storage layout changes.
 
@@ -66,13 +66,24 @@ ditto /Users/YOUR_USER/VM.bundle /Volumes/YielddRunners/VM.bundle
   --template /Volumes/YielddRunners/VM.bundle
 ```
 
-Use the new template path in `connect`, `serve`, or the agent configuration. The template must be outside `macos-runners` and on the same volume as the clones. No guest scripts need changing for storage quotas.
+Use the new template path in `connect`, `serve`, or the agent configuration. The template must be outside both `macos-runners` and `macos-probes`, and on the same volume as the clones. No guest scripts need changing for storage quotas.
 
 ## If the volume fills
 
 APFS rejects further guest writes at the quota. Jobs can fail, and Apple Container's own metadata writes can fail too. yieldd's recovery records remain writable on the host volume. Cleanup can remove macOS clones without free guest space. Linux cleanup keeps its obligation if the API fails or a machine's on-disk bundle remains despite disappearing from the API list.
 
 If Container cannot start or delete a machine, stop yieldd and free space on the quota volume from data you have identified as disposable. Do not remove a live guest's disk or the host recovery records. Restart Container with the configured `--app-root`, then retry recovery. The quota protects host storage from guest-disk growth; it does not guarantee that every full-disk failure can be repaired automatically, or prevent unrelated host applications from filling the disk.
+
+### An unlisted machine bundle remains
+
+Container 1.3.1 reloads valid machine bundles on service restart. A local stopped-machine experiment confirmed that restarting restored an unlisted bundle and made normal deletion work. The same experiment with missing machine metadata stayed unlisted after restart. yieldd cannot safely infer that an unlisted machine is stopped, so it does not delete these bundles automatically.
+
+If restart does not help:
+
+1. Stop yieldd, including any agent or connected client. Stop all Container workloads and run `container system stop`. Verify that Container is stopped and no backing guest process remains. Do not proceed if stopping fails or guest ownership is uncertain.
+2. Inspect the exact bundle path printed by yieldd. It must belong to the retained runner ID under the configured volume's `container/plugin-state/machine-apiserver/machines/` directory. Do not remove the parent directory, templates, or other machines.
+3. Remove only that stopped, disposable runner bundle. This permanently deletes its guest disk; preserve it elsewhere first if you need it for diagnosis. Keep `storage.json` and all cleanup journals.
+4. Start Container with the configured `--app-root`, then rerun `yieldd recover` or reconnect with the original coordinator identity. yieldd can now verify disk removal, finish registration cleanup, and clear the journal.
 
 ## Verify the boundary without filling the real volume
 

@@ -7,14 +7,14 @@ func standaloneRecoveryWithoutLeasesNeedsNeitherGitHubNorContainer() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
     try withRunnerOwnership(in: directory) { store in
-        let clone = try MacOSRunnerCloneStore(stateDirectory: directory).rootURL
+        let clone = testCloneStores(in: directory)(.runners).rootURL
             .appendingPathComponent("yieldd-abandoned.bundle")
         try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
         try recoverAbandonedRunners(
             leaseStore: store,
             makeGitHub: { throw TestFailure.unexpectedProcessRequest },
             makeLinuxBackend: { throw TestFailure.unexpectedBackendCall },
-            checkCancellation: {}, wait: { _ in throw TestFailure.unexpectedBackendCall }
+            checkCancellation: {}, wait: { _ in throw TestFailure.unexpectedBackendCall }, makeCloneStore: testCloneStores(in: directory)
         )
         #expect(!FileManager.default.fileExists(atPath: clone.path))
     }
@@ -31,7 +31,7 @@ func standaloneMacOSRecoveryNeedsNoTemplateOrLinuxBackend() throws {
         try recoverAbandonedRunners(
             leaseStore: store, makeGitHub: { github },
             makeLinuxBackend: { throw TestFailure.unexpectedBackendCall },
-            checkCancellation: {}, wait: { _ in throw TestFailure.unexpectedBackendCall }
+            checkCancellation: {}, wait: { _ in throw TestFailure.unexpectedBackendCall }, makeCloneStore: testCloneStores(in: directory)
         )
         #expect(try store.load().isEmpty)
         #expect(github.removed == [id.value])

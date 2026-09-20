@@ -130,6 +130,8 @@ func agentInstallCommandRejectsTooManySlots() {
 
 @Test
 func agentInstallPreflightResolvesToolsWithoutAPackagedApplication() throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
     var command = try AgentInstallCommand.parse(["owner/repository"])
     command.preflightOnly = true
     var resolvedTools: [String] = []
@@ -137,7 +139,7 @@ func agentInstallPreflightResolvesToolsWithoutAPackagedApplication() throws {
     try command.run(locateExecutable: { name in
         resolvedTools.append(name)
         return URL(fileURLWithPath: "/usr/bin/\(name)")
-    }, memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024))
+    }, stateDirectory: fixture.directory, memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil })
 
     #expect(resolvedTools == ["container", "gh"])
 }
@@ -154,7 +156,7 @@ func agentInstallPreflightReportsMissingTool() throws {
     #expect(throws: expectedError) {
         try command.run(
             locateExecutable: { _ in throw expectedError },
-            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024)
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil }
         )
     }
 }
@@ -228,6 +230,7 @@ func agentConfigurationLoadsLegacyLinuxSlots() throws {
 @Test(arguments: [false, true])
 func agentConfigurationRoundTripsMacOSSlots(mixed: Bool) throws {
     let fixture = try ProbeBundleFixture()
+    try saveTestStorageBinding(in: fixture.rootURL)
     defer { fixture.remove() }
     let store = try AgentConfigurationStore(directory: fixture.rootURL)
     let repository = try GitHubRepository("owner/repo")
@@ -251,10 +254,11 @@ func agentConfigurationRoundTripsMacOSSlots(mixed: Bool) throws {
 func agentInstallRejectsManagedTemplateBeforeRegistration(symlink: Bool) throws {
     let directory = makeAgentTestDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
-    let template = try MacOSRunnerCloneStore(stateDirectory: directory).bundleURL(for: RunnerID(value: "yieldd-template"))
+    let template = try testCloneStores(in: directory)(.runners).bundleURL(for: RunnerID(value: "yieldd-template"))
     try FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
     let disk = template.appendingPathComponent("Disk.img")
     try Data("must survive".utf8).write(to: disk)
+    try saveTestStorageBinding(in: directory)
     let alias = directory.appendingPathComponent("template-link")
     if symlink { try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: template) }
     let command = try AgentInstallCommand.parse([
@@ -263,7 +267,7 @@ func agentInstallRejectsManagedTemplateBeforeRegistration(symlink: Bool) throws 
     let error = try #require(#expect(throws: MacOSVirtualizationBackendError.self) {
         try command.run(
             locateExecutable: { _ in URL(fileURLWithPath: "/usr/bin/true") }, stateDirectory: directory,
-            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024)
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil }
         )
     })
     guard case .templateInsideCloneRoot = error else {
@@ -277,6 +281,7 @@ func agentInstallRejectsManagedTemplateBeforeRegistration(symlink: Bool) throws 
 @Test(arguments: [(24, false), (24, true), (32, true)])
 func agentPreflightValidatesCombinedReservations(hostGiB: Int, mixed: Bool) throws {
     let fixture = try ProbeBundleFixture()
+    try saveTestStorageBinding(in: fixture.rootURL)
     defer { fixture.remove() }
     let command = try AgentInstallCommand.parse(
         (mixed ? ["owner/repo"] : ["--macos", "owner/repo"]) + [
@@ -289,7 +294,7 @@ func agentPreflightValidatesCombinedReservations(hostGiB: Int, mixed: Bool) thro
             resolvedTools.append(name)
             return URL(fileURLWithPath: "/usr/bin/true")
         }, stateDirectory: fixture.rootURL,
-        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: UInt64(hostGiB) * 1_024 * 1_024 * 1_024))
+        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: UInt64(hostGiB) * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil })
     }
     if mixed && hostGiB == 24 {
         #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(
@@ -317,6 +322,7 @@ private func macOSStoredConfiguration(
 @Test(arguments: [false, true])
 func agentConfigurationRecordsOptionalContainerOutsideLaunchdPath(available: Bool) throws {
     let fixture = try ProbeBundleFixture()
+    try saveTestStorageBinding(in: fixture.rootURL)
     defer { fixture.remove() }
     let tools = fixture.rootURL.appendingPathComponent("bin")
     try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
@@ -338,10 +344,9 @@ func agentConfigurationRecordsOptionalContainerOutsideLaunchdPath(available: Boo
     if available {
         let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
         let prepare = agentContainerPreparation(configuration: saved, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
-        #expect(try prepare() == saved.containerURL)
-        #expect(try prepare() == saved.containerURL)
-        #expect(executor.requests.count == 1)
-        #expect(executor.requests.first?.executableURL == saved.containerURL)
+        #expect(throws: RunnerStorageError.notConfigured) { try prepare() }
+        #expect(throws: RunnerStorageError.notConfigured) { try prepare() }
+        #expect(executor.requests.isEmpty)
     }
 }
 

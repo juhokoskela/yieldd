@@ -38,30 +38,47 @@ func storageQuotaStopsWritesButNotRecoveryJournal() throws {
     _ = try run("/usr/sbin/diskutil", ["apfs", "addVolume", info.APFSContainerReference,
                                      "APFS", quotaName, "-quota", "67108864"])
     let leases = try RunnerLeaseStore(directory: fixture.directory.appendingPathComponent("journal"))
+    let legacy = leases.directory.appendingPathComponent("macos-runners")
+    try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: false)
+    try Data().write(to: legacy.appendingPathComponent(".DS_Store"))
     let storage = try configureRunnerStorage(volume: volume, leaseStore: leases)
     #expect(try configureRunnerStorage(volume: volume, leaseStore: leases) == storage)
     #expect(try storage.validate(stateDirectory: leases.directory).quotaBytes == 64 * 1_024 * 1_024)
     let template = volume.appendingPathComponent("Template.bundle")
-    try FileManager.default.createDirectory(at: template, withIntermediateDirectories: false)
-    try storage.validateMacOS(template: template, clones: storage.clonesURL, stateDirectory: leases.directory)
-    #expect(throws: RunnerStorageError.outsideVolume(fixture.directory.path)) {
-        try storage.validateMacOS(template: fixture.directory, clones: storage.clonesURL, stateDirectory: leases.directory)
+    let templateFixture = try ProbeBundleFixture()
+    defer { templateFixture.remove() }
+    try FileManager.default.copyItem(at: templateFixture.templateURL, to: template)
+    try storage.validateMacOS(template: template, clones: storage.clonesURL)
+    let home = fixture.directory.appendingPathComponent("preflight-home")
+    let preflightState = try RunnerLeaseStore(directory: home.appendingPathComponent("Library/Application Support/yieldd"))
+    try storage.save(in: preflightState.directory)
+    let tools = fixture.directory.appendingPathComponent("bin")
+    try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: false)
+    for name in ["container", "gh"] {
+        try FileManager.default.createSymbolicLink(at: tools.appendingPathComponent(name), withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
+    }
+    let binary = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent(".build/debug/yieldd")
+    for linux in [false, true] {
+        let arguments = linux ? ["owner/repo"] : ["--macos", "owner/repo", "--macos-template", template.path]
+        let result = try run("/usr/bin/env", ["CFFIXED_USER_HOME=\(home.path)", "PATH=\(tools.path)",
+            binary.path, "agent", "install", "--preflight-only"] + arguments)
+        #expect(result.stdoutText == (linux ? "linux\n" : "macos\n"))
+    }
+    #expect(throws: RunnerStorageError.outsideVolume(path: fixture.directory.path)) {
+        try storage.validateMacOS(template: fixture.directory, clones: storage.clonesURL)
     }
     let containerStatus = RecordingProcessExecutor(outcomes: [
-        .success(try run("/usr/sbin/diskutil", ["info", "-plist", volume.path])),
-        .success(try run("/usr/sbin/diskutil", ["apfs", "list", "-plist"])),
         .success(processResult(stdout: "{\"status\":\"running\",\"appRoot\":\"\(storage.containerURL.path)\"}")),
     ])
     try storage.validateContainer(containerExecutable: URL(fileURLWithPath: "/test/container"),
-                                  stateDirectory: leases.directory, executor: containerStatus)
+                                  executor: containerStatus)
     let wrongRoot = RecordingProcessExecutor(outcomes: [
-        .success(try run("/usr/sbin/diskutil", ["info", "-plist", volume.path])),
-        .success(try run("/usr/sbin/diskutil", ["apfs", "list", "-plist"])),
         .success(processResult(stdout: "{\"status\":\"running\",\"appRoot\":\"\(fixture.directory.path)\"}")),
     ])
-    #expect(throws: RunnerStorageError.containerRootMismatch(storage.containerURL.path)) {
+    #expect(throws: RunnerStorageError.containerRootMismatch(path: storage.containerURL.path)) {
         try storage.validateContainer(containerExecutable: URL(fileURLWithPath: "/test/container"),
-                                      stateDirectory: leases.directory, executor: wrongRoot)
+                                      executor: wrongRoot)
     }
 
     let linuxID = RunnerID(value: "yieldd-linux-quota")
@@ -73,10 +90,10 @@ func storageQuotaStopsWritesButNotRecoveryJournal() throws {
     try AppleContainerSystem(containerURL: URL(fileURLWithPath: "/test/container"), executor: container,
                              stateDirectory: leases.directory).start()
     #expect(container.startArguments?.contains(storage.containerURL.path) == true)
-    #expect(throws: RunnerStorageError.machineStorageRemains(linuxID.value)) { try linux.destroy(linuxID) }
+    #expect(throws: RunnerStorageError.machineStorageRemains(runner: linuxID.value, path: linuxBundle.path)) { try linux.destroy(linuxID) }
     #expect(container.deleteCount == 1)
     container.listed = false
-    #expect(throws: RunnerStorageError.machineStorageRemains(linuxID.value)) { try linux.destroy(linuxID) }
+    #expect(throws: RunnerStorageError.machineStorageRemains(runner: linuxID.value, path: linuxBundle.path)) { try linux.destroy(linuxID) }
     container.listed = true
     container.removeBundle = true
     try linux.destroy(linuxID)

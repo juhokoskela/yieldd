@@ -245,7 +245,8 @@ func connectedRunnerCleansUpBeforePropagatingFailure(_ stage: String) throws {
         }
     }
     #expect(releases == 1)
-    #expect(backend.destroyed && acknowledged)
+    #expect(backend.destroyed == (stage != "accept" && stage != "cancel"))
+    #expect(acknowledged)
     #expect(try fixture.store.load() == nil)
 }
 
@@ -297,7 +298,7 @@ func expiredConnectedOfferReleasesItsJournalWithoutCreatingAGuest() throws {
     let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410) },
         complete: { _ in acknowledged = true })
     try runner.run(connectedOffer, memory: .full)
-    #expect(backend.creates == 0 && backend.destroyed && acknowledged)
+    #expect(backend.creates == 0 && !backend.destroyed && acknowledged)
     #expect(try fixture.store.load() == nil)
 }
 
@@ -306,14 +307,14 @@ func connectedRunnerPreservesCancellationWhenCleanupAlsoFails() throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     let runner = fixture.runner(backend: ConnectedBackend(failure: .destroy), accept: { _ in "" },
-        complete: { _ in Issue.record("Guest destruction did not succeed") }, check: { throw CancellationError() })
+        complete: { _ in throw TestFailure.githubCleanup }, check: { throw CancellationError() })
     do {
         try runner.run(connectedOffer, memory: .full)
         Issue.record("Expected operation and cleanup errors")
     } catch let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) {
         #expect(operation is CancellationError)
-        #expect(cleanup.map(\.step) == [.machine])
-        #expect(cleanup.first?.error as? TestFailure == .machineCleanup)
+        #expect(cleanup.map(\.step) == [.githubRunner])
+        #expect(cleanup.first?.error as? TestFailure == .githubCleanup)
     }
     #expect(try fixture.store.load() != nil)
 }
@@ -576,11 +577,11 @@ func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal() throws {
     let macStore = ConnectedRunnerStore(directory: fixture.directory, platform: .macOS)
     try macStore.save(ConnectedLease(server: "https://example.com", deviceID: mac.owner, offer: mac))
     try fixture.store.save(ConnectedLease(server: "https://example.com", deviceID: mac.owner, offer: connectedOffer))
-    let clones = try MacOSRunnerCloneStore(stateDirectory: fixture.directory)
+    let clones = testCloneStores(in: fixture.directory)(.runners)
     let bundle = try clones.bundleURL(for: RunnerID(value: mac.runner))
     try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
     try recoverConnectedPlatforms(directory: fixture.directory, server: URL(string: "https://example.com/")!,
-        deviceID: mac.owner, token: "", confirmation: mac.runner, stop: RunnerPoolStop())
+        deviceID: mac.owner, token: "", confirmation: mac.runner, stop: RunnerPoolStop(), makeCloneStore: testCloneStores(in: fixture.directory))
     #expect(!FileManager.default.fileExists(atPath: bundle.path))
     #expect(try macStore.load() == nil)
     #expect(try fixture.store.load()?.offer == connectedOffer)

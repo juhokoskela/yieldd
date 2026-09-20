@@ -80,13 +80,12 @@ func runRunnerService(
     }
 
     let preparedContainerURL = try configuration.requiresLinux ? resolveContainer() : nil
-    let storage = try RunnerStorage.required(in: leaseStore.directory)
-    try storage.validate(stateDirectory: leaseStore.directory)
+    let storage = try RunnerStorage.validated(in: leaseStore.directory)
     if let preparedContainerURL {
-        try storage.validateContainer(containerExecutable: preparedContainerURL, stateDirectory: leaseStore.directory)
+        try storage.validateContainer(containerExecutable: preparedContainerURL)
     }
     if let template = configuration.macOSTemplateURL {
-        try storage.validateMacOS(template: template, clones: storage.clonesURL, stateDirectory: leaseStore.directory)
+        try storage.validateMacOS(template: template, clones: storage.clonesURL)
     }
     let slots = try configuration.slots.map { slot in
         let backend: RunnerSlotBackend
@@ -180,9 +179,9 @@ func makeRunnerSession(
             )
         )
     case let .macOS(templateURL):
-        backend = try MacOSVirtualizationBackend(
+        backend = try MacOSVirtualizationBackend(stateDirectory: leaseStore.directory,
             templateURL: templateURL,
-            cloneRootURL: MacOSRunnerCloneStore(stateDirectory: leaseStore.directory).rootURL,
+            cloneRootURL: RunnerStorage.cloneRoot(in: leaseStore.directory),
             executor: executor, checkCancellation: stop.check, wait: stop.wait,
             maximumExecutionDeadline: stop.executionDeadline
         )
@@ -207,6 +206,7 @@ func makeRunnerRecovery(
     ghURL: URL,
     stop: RunnerPoolStop,
     executor: any ProcessExecuting,
+    makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil,
     stateChanged: @escaping (RunnerSessionState) -> Void
 ) -> RunnerRecovery {
     return RunnerRecovery(
@@ -215,6 +215,7 @@ func makeRunnerRecovery(
         },
         github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
         leaseStore: leaseStore,
+        makeCloneStore: makeCloneStore,
         recoveryWait: stop.wait,
         checkCancellation: stop.check,
         stateChanged: stateChanged
@@ -222,10 +223,7 @@ func makeRunnerRecovery(
 }
 
 func validateRunnerServiceTemplate(_ templateURL: URL, stateDirectory: URL) throws {
-    try MacOSVirtualizationBackend.validateTemplateLocation(
-        templateURL,
-        cloneRootURL: MacOSRunnerCloneStore(stateDirectory: stateDirectory).rootURL
-    )
+    try RunnerStorage.required(in: stateDirectory).validateTemplateLocation(templateURL)
     try MacOSVirtualizationBackend.validateTemplate(at: templateURL)
 }
 

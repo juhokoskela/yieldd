@@ -227,7 +227,7 @@ func recoversAbandonedRunnersAndClearsTheirLeases() throws {
     let recovery = RunnerRecovery(
         linuxBackend: { RunnerTestBackend(events: events) },
         github: RunnerTestGitHub(events: events),
-        leaseStore: leaseStore,
+        leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
     )
 
     let recoveredIDs = try recovery.run()
@@ -264,7 +264,7 @@ func recoveryCleansEveryLeaseBeforeRetryingBusyRegistration() throws {
     let recovery = RunnerRecovery(
         linuxBackend: { RunnerTestBackend(events: events) },
         github: github,
-        leaseStore: leaseStore,
+        leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
         recoveryWait: { _ in },
     )
 
@@ -302,7 +302,7 @@ func recoveryAttemptsLaterLeasesBeforeReportingCleanupFailures() throws {
                 .success(()),
             ]
         ),
-        leaseStore: leaseStore,
+        leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
     )
 
     do {
@@ -347,7 +347,7 @@ func recoveryWaitsUntilGitHubReleasesABusyRunner() throws {
     let recovery = RunnerRecovery(
         linuxBackend: { RunnerTestBackend(events: events) },
         github: github,
-        leaseStore: leaseStore,
+        leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
         recoveryWait: { retryDelays.append($0) },
         stateChanged: { states.append($0) },
     )
@@ -388,7 +388,7 @@ func interruptedRecoveryKeepsTheLease() throws {
     let recovery = RunnerRecovery(
         linuxBackend: { RunnerTestBackend(events: events) },
         github: github,
-        leaseStore: leaseStore,
+        leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
         recoveryWait: { _ in throw SignalInterruption(signal: SIGINT) },
     )
 
@@ -418,7 +418,7 @@ func failedRecoveryKeepsTheLease() throws {
             destroyError: TestFailure.machineCleanup
         ) },
         github: RunnerTestGitHub(events: events),
-        leaseStore: leaseStore,
+        leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
     )
 
     #expect(throws: RunnerSessionError.self) {
@@ -440,7 +440,7 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
     let macLease = RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS)
     try leaseStore.save(macLease)
     try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
-    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = testCloneStores(in: stateDirectory)(.runners)
     for url in try [clones.creatingURL(for: macID), clones.bundleURL(for: macID), clones.bundleURL(for: RunnerID(value: "yieldd-macos-orphan"))] {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
@@ -449,7 +449,7 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
         .failure(GitHubRunnerClientError.runnerBusy(name: macID.value)), .success(()), .success(()),
     ])
     let recovery = RunnerRecovery(
-        linuxBackend: { RunnerTestBackend(events: events) }, github: github, leaseStore: leaseStore,
+        linuxBackend: { RunnerTestBackend(events: events) }, github: github, leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
         recoveryWait: { _ in
             let contents = try FileManager.default.contentsOfDirectory(atPath: clones.rootURL.path)
             #expect(contents.isEmpty)
@@ -475,7 +475,7 @@ func recoveryRetainsFailedMacOSLeaseAndStillRecoversLinux() throws {
     let macLease = RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS)
     try leaseStore.save(macLease)
     try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
-    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = testCloneStores(in: stateDirectory)(.runners)
     let bundle = try clones.bundleURL(for: macID)
     try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
     try Data("state".utf8).write(to: bundle.appendingPathComponent("state"))
@@ -483,7 +483,7 @@ func recoveryRetainsFailedMacOSLeaseAndStillRecoversLinux() throws {
     defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: bundle.path) }
     let events = RunnerTestEventRecorder()
     let recovery = RunnerRecovery(
-        linuxBackend: { RunnerTestBackend(events: events) }, github: RunnerTestGitHub(events: events), leaseStore: leaseStore
+        linuxBackend: { RunnerTestBackend(events: events) }, github: RunnerTestGitHub(events: events), leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory)
     )
     #expect(throws: RunnerSessionError.self) { try recovery.run() }
     #expect(try leaseStore.load() == [macLease])
@@ -500,15 +500,18 @@ func recoveryRetainsFailedMacOSLeaseAndStillRecoversLinux() throws {
 func recoverySweepsOrphansWhenNoLeasesExist() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
-    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = testCloneStores(in: stateDirectory)(.runners)
     let orphan = try clones.creatingURL(for: RunnerID(value: "yieldd-macos-orphan"))
     try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+    let probe = try testCloneStores(in: stateDirectory)(.probes).bundleURL(for: RunnerID(value: "yieldd-probe-orphan"))
+    try FileManager.default.createDirectory(at: probe, withIntermediateDirectories: true)
     let events = RunnerTestEventRecorder()
     let recovery = RunnerRecovery(
-        linuxBackend: { RunnerTestBackend(events: events) }, github: RunnerTestGitHub(events: events), leaseStore: leaseStore
+        linuxBackend: { RunnerTestBackend(events: events) }, github: RunnerTestGitHub(events: events), leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory)
     )
     #expect(try recovery.run().isEmpty)
     #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    #expect(!FileManager.default.fileExists(atPath: probe.path))
     #expect(events.values.isEmpty)
 }
 
@@ -520,7 +523,7 @@ func macOSRecoveryDoesNotDependOnLinuxTools(hasLinuxLease: Bool) throws {
     try leaseStore.save(RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS))
     let linuxLease = RunnerLease(runnerID: RunnerID(value: "yieldd-linux-test"), repository: runnerTestRepository)
     if hasLinuxLease { try leaseStore.save(linuxLease) }
-    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = testCloneStores(in: stateDirectory)(.runners)
     let clone = try clones.bundleURL(for: macID)
     try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
     let events = RunnerTestEventRecorder()
@@ -530,7 +533,7 @@ func macOSRecoveryDoesNotDependOnLinuxTools(hasLinuxLease: Bool) throws {
             linuxBackendRequests += 1
             throw TestFailure.create
         },
-        github: RunnerTestGitHub(events: events), leaseStore: leaseStore
+        github: RunnerTestGitHub(events: events), leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory)
     )
     if hasLinuxLease {
         let error = try #require(#expect(throws: RunnerSessionError.self) { try recovery.run() })
@@ -558,12 +561,12 @@ func recoveryRejectsInvalidLeaseBeforeSweepingClones() throws {
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
     try Data(#"[{"runnerID":"yieldd-macos-runner","repository":"owner/repository","platform":"unknown"}]"#.utf8)
         .write(to: leaseStore.fileURL)
-    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = testCloneStores(in: stateDirectory)(.runners)
     let orphan = try clones.bundleURL(for: RunnerID(value: "yieldd-macos-orphan"))
     try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
     let events = RunnerTestEventRecorder()
     let recovery = RunnerRecovery(
-        linuxBackend: { RunnerTestBackend(events: events) }, github: RunnerTestGitHub(events: events), leaseStore: leaseStore
+        linuxBackend: { RunnerTestBackend(events: events) }, github: RunnerTestGitHub(events: events), leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory)
     )
     #expect(throws: RunnerLeaseError.self) { try recovery.run() }
     #expect(FileManager.default.fileExists(atPath: orphan.path))
@@ -592,7 +595,7 @@ func sharedReporterEmitsRecoveryRetriesAndLeaseClearFailures() throws {
         github: RunnerTestGitHub(events: events, removeOutcomes: [
             .failure(GitHubRunnerClientError.runnerBusy(name: runnerTestID.value)), .success(()),
         ]),
-        leaseStore: leaseStore,
+        leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
         recoveryWait: { delay in
             #expect(delay == 1)
             try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: stateDirectory.path)
@@ -629,7 +632,7 @@ func recoveryFactoryPreservesCancellationIdentity(signal: Bool) throws {
             if signal { throw SignalInterruption(signal: SIGHUP) }
             throw CancellationError()
         },
-        github: RunnerTestGitHub(events: events), leaseStore: leaseStore
+        github: RunnerTestGitHub(events: events), leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory)
     )
     let error = try #require(#expect(throws: (any Error).self) { try recovery.run() })
     if signal {
@@ -664,7 +667,7 @@ private final class RecoveryMessages: @unchecked Sendable {
 func templateInsideCloneRootIsRejectedBeforeRecovery(symlink: Bool) throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
-    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = testCloneStores(in: stateDirectory)(.runners)
     let template = try clones.bundleURL(for: RunnerID(value: "yieldd-template"))
     try FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
     let contents = Data("template must survive".utf8)
@@ -675,7 +678,7 @@ func templateInsideCloneRootIsRejectedBeforeRecovery(symlink: Bool) throws {
     let events = RunnerTestEventRecorder()
     let executor = RecordingProcessExecutor(outcomes: [])
     let error = try #require(#expect(throws: MacOSVirtualizationBackendError.self) {
-        _ = try MacOSVirtualizationBackend(
+        _ = try MacOSVirtualizationBackend(stateDirectory: unconfiguredContainerStateDirectory,
             templateURL: symlink ? alias : template, cloneRootURL: clones.rootURL, executor: executor
         )
         try recoverAbandonedRunners(
@@ -1183,7 +1186,6 @@ func leaseSynchronizationFailureClearsPublishedLeaseBeforeReturning(platform: Ru
     ])
     #expect(events.values == [
         .createRegistrationToken(runnerTestRepository),
-        .destroy(runnerTestID),
     ])
     #expect(try readStore.load().isEmpty)
     var blocked = false
@@ -1321,6 +1323,51 @@ func registrationTokenFailureReleasesReservedMachineCapacity() throws {
 
 private final class RunnerTestEventRecorder: @unchecked Sendable {
     var values: [RunnerTestEvent] = []
+}
+
+@Test(arguments: [false, true])
+func missingStoragePreservesLeasesWhileIndependentRecoveryContinues(configured: Bool) throws {
+    let (leases, directory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    if configured {
+        try RunnerStorage(volumePath: directory.appendingPathComponent("unmounted").path, volumeUUID: UUID().uuidString).save(in: directory)
+    }
+    let macID = RunnerID(value: "yieldd-macos-retained")
+    let mac = RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS)
+    try leases.save(mac)
+    let linux = RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository)
+    try leases.save(linux)
+    let events = RunnerTestEventRecorder()
+    let recovery = RunnerRecovery(linuxBackend: { RunnerTestBackend(events: events, destroyError: RunnerStorageError.notConfigured) },
+                                  github: RunnerTestGitHub(events: events), leaseStore: leases)
+    #expect(throws: RunnerSessionError.self) { try recovery.run() }
+    #expect(Set(try leases.load().map(\.runnerID)) == [macID, runnerTestID])
+    #expect(events.values.contains(.removeGitHubRunner(macID.value, runnerTestRepository)))
+    #expect(events.values.contains(.destroy(runnerTestID)))
+}
+
+@Test
+func storageDisappearingBeforeCreationDoesNotPublishALeaseOrRetainMemory() throws {
+    let (leases, directory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executor = RecordingProcessExecutor(outcomes: [])
+    var checks = 0
+    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor,
+        stateDirectory: directory, loadStorage: {
+            checks += 1
+            throw RunnerStorageError.notConfigured
+        })
+    let events = RunnerTestEventRecorder()
+    let memory = singleRunnerMemoryAdmission()
+    #expect(throws: RunnerStorageError.notConfigured) {
+        try EphemeralRunnerSession(backend: backend, github: RunnerTestGitHub(events: events), memoryAdmission: memory,
+                                    leaseStore: leases).run(id: runnerTestID, repository: runnerTestRepository)
+    }
+    #expect(checks == 1)
+    #expect(try leases.load().isEmpty)
+    #expect(executor.requests.isEmpty)
+    let reservation = try memory.acquireWithoutWaiting(reserving: RunnerPlatform.linux.memoryReservationBytes)
+    memory.release(reservation)
 }
 
 private final class RunnerTestBackend: RunnerBackend {
