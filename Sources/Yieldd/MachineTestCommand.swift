@@ -74,8 +74,9 @@ struct MachineTestRunner {
         var machineMayExist = false
         let operation = Result<Void, any Error> {
             try checkCancellation()
-            machineMayExist = true
-            try backend.create(id: id, memory: reservation.allocation)
+            try backend.create(id: id, memory: reservation.allocation) {
+                machineMayExist = true
+            }
             try checkCancellation()
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             switch backend.platform {

@@ -71,6 +71,38 @@ func macOSMachineValidationAlwaysDestroysClone(validationFails: Bool) throws {
     ])
 }
 
+@Test(arguments: [
+    RunnerStorageError.notConfigured,
+    .volumeUnavailable(path: "/Volumes/YielddRunners"),
+    .containerRootMismatch(path: "/Volumes/YielddRunners/container"),
+])
+func machineTestPreflightFailurePreservesErrorAndReleasesMemory(
+    failure: RunnerStorageError
+) throws {
+    let executor = RecordingProcessExecutor(outcomes: [])
+    var storageChecks = 0
+    let backend = AppleContainerBackend(
+        containerURL: URL(fileURLWithPath: "/test/container"), executor: executor,
+        stateDirectory: unconfiguredContainerStateDirectory,
+        loadStorage: {
+            storageChecks += 1
+            throw failure
+        }
+    )
+    let reservationBytes = backend.platform.memoryReservationBytes
+    let admission = RunnerMemoryAdmission(
+        physicalMemoryBytes: reservationBytes * 4 / 3,
+        readMemoryPressure: { .normal }
+    )
+    let runner = MachineTestRunner(backend: backend, memoryAdmission: admission)
+
+    #expect(throws: failure) { try runner.run(id: machineTestID) }
+    #expect(storageChecks == 1)
+    #expect(executor.requests.isEmpty)
+    let reservation = try #require(try admission.tryAcquire(reserving: reservationBytes))
+    admission.release(reservation)
+}
+
 @Test
 func failedCreateStillAttemptsCleanup() {
     let backend = RecordingRunnerBackend(createError: TestFailure.create)
