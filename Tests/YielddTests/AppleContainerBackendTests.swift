@@ -210,6 +210,41 @@ func cancellationDuringDockerReadinessStopsRetries() {
 }
 
 @Test
+func stopRunnerRejectsAChangedContainerRoot() throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let storage = RunnerStorage(volumePath: fixture.directory.resolvingSymlinksInPath().path,
+                                volumeUUID: UUID().uuidString)
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: "{\"status\":\"running\",\"appRoot\":\"\(fixture.directory.path)\"}")),
+    ])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
+        stateDirectory: fixture.directory, loadStorage: {
+            try storage.validateContainer(containerExecutable: containerURL, executor: executor)
+            return storage
+        })
+
+    #expect(throws: RunnerStorageError.containerRootMismatch(path: storage.containerURL.path)) {
+        try backend.stopRunner(on: runnerID)
+    }
+    #expect(executor.requests.map(\.arguments) == [["system", "status", "--format", "json"]])
+}
+
+@Test
+func stopRunnerRejectsMissingStorageConfiguration() throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
+                                         stateDirectory: fixture.directory)
+
+    #expect(throws: RunnerStorageError.notConfigured) {
+        try backend.stopRunner(on: runnerID)
+    }
+    #expect(executor.requests.isEmpty)
+}
+
+@Test
 func stopRunnerUsesBoundedNoncancellableRootCommand() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })

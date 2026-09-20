@@ -120,6 +120,7 @@ struct AppleContainerBackend: RunnerBackend {
     }
 
     func stopRunner(on id: RunnerID) throws {
+        _ = try loadStorage()
         _ = try run(
             [
                 "machine", "run",
