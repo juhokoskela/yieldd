@@ -17,10 +17,10 @@ func guestScriptsReportProtocolWithoutGuestSetup(_ script: String) throws {
 func guestProtocolRejectsOutdatedScriptsWithoutSendingCredentials(_ response: String) throws {
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/container"), arguments: [])
     let outcome: Result<ProcessResult, any Error> = response == "old-script"
-        ? .failure(ProcessExecutionError.nonZeroExit(request: request, result: processResult(status: 2)))
+        ? .failure(ProcessExecutionError.nonZeroExit(request: request, result: processResult(stderr: "usage: yieldd-configure-runner OWNER/REPO NAME", status: 2)))
         : .success(processResult(stdout: response))
     let executor = RecordingProcessExecutor(outcomes: [outcome, outcome])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor)
+    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
     if response == "1\n" {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
         #expect(executor.requests.count == 2)
@@ -43,7 +43,7 @@ func guestProtocolTimeoutIdentifiesTheHelperAndPreservesDiagnostics(completedChe
             .failure(ProcessExecutionError.timedOut(request: request,
                 result: processResult(stderr: "SSH diagnostic tail"))),
         ])
-    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor)
+    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
 
     do {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
@@ -68,7 +68,7 @@ func guestProtocolPreservesProcessCancellation() throws {
         .failure(ProcessExecutionError.cancelled(request: request, result: processResult(),
             underlying: CancellationError())),
     ])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor)
+    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
 
     do {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
@@ -83,4 +83,18 @@ func guestProtocolPreservesProcessCancellation() throws {
         #expect(isCancellation(error))
     }
     #expect(executor.requests.count == 1)
+}
+
+@Test(arguments: [Int32(1), 2, 255])
+func guestProtocolPreservesTransportAndDaemonDiagnostics(status: Int32) throws {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/container"), arguments: [])
+    let result = processResult(stderr: "transport connection unavailable", status: status)
+    let executor = RecordingProcessExecutor(outcomes: [.success(result)])
+    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor,
+                                         stateDirectory: unconfiguredContainerStateDirectory)
+    let error = try #require(#expect(throws: ProcessExecutionError.self) {
+        try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
+    })
+    #expect(describeError(error).contains(result.stderrText))
+    #expect(!describeError(error).contains("outdated"))
 }

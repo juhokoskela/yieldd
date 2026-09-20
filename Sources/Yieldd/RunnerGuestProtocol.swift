@@ -8,7 +8,11 @@ enum RunnerGuestProtocol {
                     outputCapture: .tail(maxBytes: 1024), as: .runner, on: id)
                 guard result.stdoutText == "1\n" else { throw RunnerGuestProtocolError.incompatible(helper) }
             } catch let error as ProcessExecutionError {
-                if case .nonZeroExit = error { throw RunnerGuestProtocolError.incompatible(helper) }
+                if case let .nonZeroExit(_, result) = error,
+                   [2, 126, 127].contains(result.terminationStatus),
+                   result.stderrText.contains(helper) {
+                    throw RunnerGuestProtocolError.incompatible(helper)
+                }
                 if case .timedOut = error {
                     throw RunnerGuestProtocolError.timedOut(helper: helper, detail: describeError(error))
                 }
