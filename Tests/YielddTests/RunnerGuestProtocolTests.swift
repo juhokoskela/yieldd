@@ -32,3 +32,55 @@ func guestProtocolRejectsOutdatedScriptsWithoutSendingCredentials(_ response: St
     }
     #expect(executor.requests.allSatisfy { $0.standardInput == nil && $0.timeout == 5 && $0.outputCapture == .tail(maxBytes: 1024) })
 }
+
+@Test(arguments: [0, 1])
+func guestProtocolTimeoutIdentifiesTheHelperAndPreservesDiagnostics(completedChecks: Int) throws {
+    let helper = ["yieldd-configure-runner", "yieldd-runner-control"][completedChecks]
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),
+        arguments: [], timeout: 5)
+    let executor = RecordingProcessExecutor(outcomes:
+        Array(repeating: .success(processResult(stdout: "1\n")), count: completedChecks) + [
+            .failure(ProcessExecutionError.timedOut(request: request,
+                result: processResult(stderr: "SSH diagnostic tail"))),
+        ])
+    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor)
+
+    do {
+        try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
+        Issue.record("Expected the protocol probe to time out")
+    } catch let error as RunnerGuestProtocolError {
+        guard case let .timedOut(actualHelper, _) = error else {
+            Issue.record("Unexpected protocol error: \(error)")
+            return
+        }
+        #expect(actualHelper == helper)
+        #expect(error.localizedDescription.contains("\(helper) --protocol-version"))
+        #expect(error.localizedDescription.contains("timed out after 5.0 seconds"))
+        #expect(error.localizedDescription.contains("SSH diagnostic tail"))
+    }
+    #expect(executor.requests.count == completedChecks + 1)
+}
+
+@Test
+func guestProtocolPreservesProcessCancellation() throws {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/container"), arguments: [])
+    let executor = RecordingProcessExecutor(outcomes: [
+        .failure(ProcessExecutionError.cancelled(request: request, result: processResult(),
+            underlying: CancellationError())),
+    ])
+    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor)
+
+    do {
+        try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
+        Issue.record("Expected the protocol probe to be cancelled")
+    } catch let error as ProcessExecutionError {
+        guard case let .cancelled(actualRequest, _, underlying) = error else {
+            Issue.record("Unexpected process error: \(error)")
+            return
+        }
+        #expect(actualRequest == request)
+        #expect(underlying is CancellationError)
+        #expect(isCancellation(error))
+    }
+    #expect(executor.requests.count == 1)
+}
