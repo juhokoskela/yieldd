@@ -3,13 +3,23 @@ import Foundation
 
 struct MacOSRunnerCloneStore {
     let rootURL: URL
+    private let stateDirectory: URL?
 
     init(rootURL: URL) {
         self.rootURL = rootURL
+        stateDirectory = nil
     }
 
-    init(stateDirectory: URL) {
-        rootURL = stateDirectory.appendingPathComponent("macos-runners", isDirectory: true)
+    init(stateDirectory: URL) throws {
+        self.stateDirectory = stateDirectory
+        if let storage = try RunnerStorage.load(in: stateDirectory) {
+            try storage.validate(stateDirectory: stateDirectory)
+            try storage.validatePath(storage.clonesURL)
+            rootURL = storage.clonesURL
+        } else {
+            // Old obligations remain recoverable before storage is configured.
+            rootURL = stateDirectory.appendingPathComponent("macos-runners", isDirectory: true)
+        }
     }
 
     func removeUnleased(
@@ -39,6 +49,10 @@ struct MacOSRunnerCloneStore {
     }
 
     private func rootExists() throws -> Bool {
+        if let stateDirectory, let storage = try RunnerStorage.load(in: stateDirectory) {
+            try storage.validate(stateDirectory: stateDirectory)
+            try storage.validatePath(rootURL)
+        }
         var status = stat()
         guard Darwin.lstat(rootURL.path, &status) == 0 else {
             if errno == ENOENT { return false }

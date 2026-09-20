@@ -576,7 +576,7 @@ func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal() throws {
     let macStore = ConnectedRunnerStore(directory: fixture.directory, platform: .macOS)
     try macStore.save(ConnectedLease(server: "https://example.com", deviceID: mac.owner, offer: mac))
     try fixture.store.save(ConnectedLease(server: "https://example.com", deviceID: mac.owner, offer: connectedOffer))
-    let clones = MacOSRunnerCloneStore(stateDirectory: fixture.directory)
+    let clones = try MacOSRunnerCloneStore(stateDirectory: fixture.directory)
     let bundle = try clones.bundleURL(for: RunnerID(value: mac.runner))
     try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
     try recoverConnectedPlatforms(directory: fixture.directory, server: URL(string: "https://example.com/")!,

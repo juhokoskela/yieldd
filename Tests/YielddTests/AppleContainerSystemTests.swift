@@ -7,7 +7,7 @@ func containerSystemStartUsesNoninteractiveKernelPolicyAndTimeouts() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
     let containerURL = URL(fileURLWithPath: "/usr/local/bin/container")
 
-    try AppleContainerSystem(containerURL: containerURL, executor: executor).start()
+    try AppleContainerSystem(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory).start()
 
     #expect(executor.requests == [
         ProcessRequest(
@@ -32,7 +32,7 @@ func containerSystemStartRequiresSuccessfulExit() {
     #expect(throws: ProcessExecutionError.self) {
         try AppleContainerSystem(
             containerURL: URL(fileURLWithPath: "/usr/local/bin/container"),
-            executor: executor
+            executor: executor, stateDirectory: unconfiguredContainerStateDirectory
         ).start()
     }
 }

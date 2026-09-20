@@ -1,6 +1,6 @@
 # Prepare a macOS runner template
 
-Template creation is manual. Use an Apple Virtualization.framework macOS VM bundle containing `Disk.img`, `AuxiliaryStorage`, `HardwareModel`, and `MachineIdentifier`. Keep it outside yieldd's `macos-runners` directory and on the same APFS volume. yieldd uses copy-on-write clones and does not fall back to copying the full disk across volumes.
+Template creation is manual. Use an Apple Virtualization.framework macOS VM bundle containing `Disk.img`, `AuxiliaryStorage`, `HardwareModel`, and `MachineIdentifier`. Keep it on the configured [quota-limited guest volume](runner-storage.md), outside yieldd's `macos-runners` and `macos-probes` directories. yieldd uses copy-on-write clones and does not fall back to copying the full disk across volumes.
 
 ## Configure the guest
 

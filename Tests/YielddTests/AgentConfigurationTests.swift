@@ -337,7 +337,7 @@ func agentConfigurationRecordsOptionalContainerOutsideLaunchdPath(available: Boo
     #expect(saved == configuration)
     if available {
         let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-        let prepare = agentContainerPreparation(configuration: saved, executor: executor)
+        let prepare = agentContainerPreparation(configuration: saved, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
         #expect(try prepare() == saved.containerURL)
         #expect(try prepare() == saved.containerURL)
         #expect(executor.requests.count == 1)

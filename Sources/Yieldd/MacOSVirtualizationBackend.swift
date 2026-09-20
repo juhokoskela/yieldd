@@ -13,6 +13,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     private let ssh: MacOSGuestSSH
     private let connection: MacOSGuestConnection
     private let requireEntitlement: () throws -> Void
+    private let validateStorageQuota: (URL?) throws -> Void
     private let makeMachine: (URL, UInt64) throws -> any MacOSVirtualMachineControlling
     private let checkCancellation: () throws -> Void
     private let wait: (TimeInterval) throws -> Void
@@ -35,6 +36,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         bootTimeout: TimeInterval = MacOSVirtualMachineLifecycle.bootTimeout,
         stopTimeout: TimeInterval = MacOSVirtualMachineLifecycle.stopTimeout,
         requireEntitlement: @escaping () throws -> Void = VirtualizationEntitlement.requireCurrentProcess,
+        validateStorageQuota: ((URL?, URL) throws -> Void)? = nil,
         makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
             MacOSVirtualMachineLifecycle.makeMachine
     ) throws {
@@ -50,6 +52,21 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         self.bootTimeout = bootTimeout
         self.stopTimeout = stopTimeout
         self.requireEntitlement = requireEntitlement
+        let pinnedClones = clones.rootURL
+        self.validateStorageQuota = { template in
+            if let validateStorageQuota {
+                try validateStorageQuota(template, pinnedClones)
+            } else {
+                let directory = try yielddApplicationSupportDirectory()
+                if let template {
+                    try RunnerStorage.required(in: directory).validateMacOS(
+                        template: template, clones: pinnedClones, stateDirectory: directory)
+                } else if let storage = try RunnerStorage.load(in: directory) {
+                    try storage.validate(stateDirectory: directory)
+                    try storage.validatePath(pinnedClones)
+                }
+            }
+        }
         self.makeMachine = makeMachine
     }
 
@@ -70,6 +87,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         try lock.withLock {
             try requireEntitlement()
             try checkCancellation()
+            try validateStorageQuota(templateURL)
             try validateStorage(id)
             if let guest = guests[id], guest.address != nil,
                case .running = guest.machine.state {
@@ -184,6 +202,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
             )
             guests.removeValue(forKey: id)
         }
+        try validateStorageQuota(nil)
         try clones.remove(id)
     }
 

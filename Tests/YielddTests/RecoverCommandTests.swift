@@ -7,7 +7,7 @@ func standaloneRecoveryWithoutLeasesNeedsNeitherGitHubNorContainer() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
     try withRunnerOwnership(in: directory) { store in
-        let clone = MacOSRunnerCloneStore(stateDirectory: directory).rootURL
+        let clone = try MacOSRunnerCloneStore(stateDirectory: directory).rootURL
             .appendingPathComponent("yieldd-abandoned.bundle")
         try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
         try recoverAbandonedRunners(

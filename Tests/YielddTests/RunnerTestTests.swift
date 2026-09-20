@@ -440,7 +440,7 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
     let macLease = RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS)
     try leaseStore.save(macLease)
     try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
-    let clones = MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
     for url in try [clones.creatingURL(for: macID), clones.bundleURL(for: macID), clones.bundleURL(for: RunnerID(value: "yieldd-macos-orphan"))] {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
@@ -475,7 +475,7 @@ func recoveryRetainsFailedMacOSLeaseAndStillRecoversLinux() throws {
     let macLease = RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS)
     try leaseStore.save(macLease)
     try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
-    let clones = MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
     let bundle = try clones.bundleURL(for: macID)
     try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
     try Data("state".utf8).write(to: bundle.appendingPathComponent("state"))
@@ -500,7 +500,7 @@ func recoveryRetainsFailedMacOSLeaseAndStillRecoversLinux() throws {
 func recoverySweepsOrphansWhenNoLeasesExist() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
-    let clones = MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
     let orphan = try clones.creatingURL(for: RunnerID(value: "yieldd-macos-orphan"))
     try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
     let events = RunnerTestEventRecorder()
@@ -520,7 +520,7 @@ func macOSRecoveryDoesNotDependOnLinuxTools(hasLinuxLease: Bool) throws {
     try leaseStore.save(RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS))
     let linuxLease = RunnerLease(runnerID: RunnerID(value: "yieldd-linux-test"), repository: runnerTestRepository)
     if hasLinuxLease { try leaseStore.save(linuxLease) }
-    let clones = MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
     let clone = try clones.bundleURL(for: macID)
     try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
     let events = RunnerTestEventRecorder()
@@ -558,7 +558,7 @@ func recoveryRejectsInvalidLeaseBeforeSweepingClones() throws {
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
     try Data(#"[{"runnerID":"yieldd-macos-runner","repository":"owner/repository","platform":"unknown"}]"#.utf8)
         .write(to: leaseStore.fileURL)
-    let clones = MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
     let orphan = try clones.bundleURL(for: RunnerID(value: "yieldd-macos-orphan"))
     try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
     let events = RunnerTestEventRecorder()
@@ -664,7 +664,7 @@ private final class RecoveryMessages: @unchecked Sendable {
 func templateInsideCloneRootIsRejectedBeforeRecovery(symlink: Bool) throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
-    let clones = MacOSRunnerCloneStore(stateDirectory: stateDirectory)
+    let clones = try MacOSRunnerCloneStore(stateDirectory: stateDirectory)
     let template = try clones.bundleURL(for: RunnerID(value: "yieldd-template"))
     try FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
     let contents = Data("template must survive".utf8)

@@ -67,9 +67,12 @@ struct ConnectCommand: ParsableCommand {
                     print("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
                     return
                 }
+                let storage = try RunnerStorage.required(in: directory)
+                try storage.validate(stateDirectory: directory)
                 let memory = RunnerMemoryAdmission()
                 for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
                 if let template {
+                    try storage.validateMacOS(template: template, clones: storage.clonesURL, stateDirectory: directory)
                     try MacOSVirtualizationBackend.validateTemplate(at: template)
                     try VirtualizationEntitlement.requireCurrentProcess()
                 }
@@ -77,7 +80,8 @@ struct ConnectCommand: ParsableCommand {
                     switch platform {
                     case .linux:
                         let container = try ExecutableLocator().locate("container")
-                        try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check)).start()
+                        try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check), stateDirectory: directory).start()
+                        try storage.validateContainer(containerExecutable: container, stateDirectory: directory)
                         return .linux(containerURL: container)
                     case .macOS:
                         guard let template else { throw RunnerServiceConfigurationError.templatePairRequired }
@@ -94,6 +98,7 @@ struct ConnectCommand: ParsableCommand {
                     switch slot {
                     case let .linux(containerURL):
                         backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
+                            stateDirectory: directory,
                             dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
                     case let .macOS(templateURL):
                         backend = try MacOSVirtualizationBackend(templateURL: templateURL,

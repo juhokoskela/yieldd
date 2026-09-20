@@ -22,8 +22,8 @@ func recoverConnectedPlatforms(
                         case .linux:
                             let container = try ExecutableLocator().locate("container")
                             let executor = ProcessExecutor(checkCancellation: stop.check)
-                            try AppleContainerSystem(containerURL: container, executor: executor).start()
-                            try AppleContainerBackend(containerURL: container, executor: executor).destroy(id)
+                            try AppleContainerSystem(containerURL: container, executor: executor, stateDirectory: directory).start()
+                            try AppleContainerBackend(containerURL: container, executor: executor, stateDirectory: directory).destroy(id)
                         }
                     }, complete: client.complete)
                 confirmed = true

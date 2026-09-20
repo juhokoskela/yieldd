@@ -192,7 +192,7 @@ func virtualizationProbeStartsAndForceStopsMachine() throws {
     var reportedMACAddress: String?
     var waitedFor: TimeInterval?
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { cloneURL, memoryBytes in
             #expect(cloneURL != fixture.templateURL)
             #expect(memoryBytes == MacOSVirtualMachineLifecycle.memoryBytes)
@@ -224,7 +224,7 @@ func virtualizationProbeUsesConstrainedBootMemory() throws {
     let machine = ProbeVirtualMachine()
     var configuredMemory: UInt64?
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, memoryBytes in
             configuredMemory = memoryBytes
             return machine
@@ -292,7 +292,7 @@ func virtualizationProbeGuestReadinessFailureStillStopsAndDeletesTheClone() thro
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -314,7 +314,7 @@ func heldVirtualizationProbeChecksMachineStateBetweenReadinessAttempts() throws 
     let machine = ProbeVirtualMachine()
     var attempts = 0
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -345,7 +345,7 @@ func heldVirtualizationProbeChecksMachineStateAfterReadiness() throws {
     let machine = ProbeVirtualMachine()
     var waits = 0
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -371,7 +371,7 @@ func virtualizationProbeDeletesCloneAfterMachineCreationFailure() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in throw TestFailure.create }
     )
 
@@ -390,7 +390,7 @@ func virtualizationProbeDeletesCloneAfterStartFailure() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(startError: TestFailure.create)
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -410,7 +410,7 @@ func virtualizationProbeTimesOutBootAndDeletesClone() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(completesStart: false)
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -440,7 +440,7 @@ func virtualizationProbeDeletesCloneWhenBootAndStopTimeOut() throws {
         leavesTransitioningState: false
     )
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -480,7 +480,7 @@ func virtualizationProbeReportsVirtualMachineError() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(stateAfterStart: .failed(TestFailure.runnerJob))
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -505,7 +505,7 @@ func virtualizationProbeRetriesStopAfterTransitioningState() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(stateAfterStart: .transitioning)
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -527,7 +527,7 @@ func virtualizationProbeStopsAStoppableMachine() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(stateAfterStart: .stoppable)
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -549,7 +549,7 @@ func virtualizationProbeForceStopsMachineAfterCancellation() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -575,7 +575,7 @@ func virtualizationProbeFinishesForcedStopBeforeReportingCancellation() throws {
         completesStopAsynchronously: true
     )
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -597,7 +597,7 @@ func virtualizationProbeAcceptsAnAlreadyStoppedMachineDuringCleanup() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(stateAfterStart: .stopped)
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 
@@ -623,7 +623,7 @@ func virtualizationProbePreservesOperationAndCleanupFailures() throws {
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine(stopError: TestFailure.cleanup)
     let probe = MacOSVirtualizationProbe(
-        requireEntitlement: {},
+        requireEntitlement: {}, validateStorageQuota: { _, _ in },
         makeMachine: { _, _ in machine }
     )
 

@@ -80,6 +80,14 @@ func runRunnerService(
     }
 
     let preparedContainerURL = try configuration.requiresLinux ? resolveContainer() : nil
+    let storage = try RunnerStorage.required(in: leaseStore.directory)
+    try storage.validate(stateDirectory: leaseStore.directory)
+    if let preparedContainerURL {
+        try storage.validateContainer(containerExecutable: preparedContainerURL, stateDirectory: leaseStore.directory)
+    }
+    if let template = configuration.macOSTemplateURL {
+        try storage.validateMacOS(template: template, clones: storage.clonesURL, stateDirectory: leaseStore.directory)
+    }
     let slots = try configuration.slots.map { slot in
         let backend: RunnerSlotBackend
         switch slot.platform {
@@ -165,6 +173,7 @@ func makeRunnerSession(
         backend = AppleContainerBackend(
             containerURL: containerURL,
             executor: executor,
+            stateDirectory: leaseStore.directory,
             dockerReadiness: DockerReadiness(
                 wait: stop.wait,
                 checkCancellation: stop.check
@@ -202,7 +211,7 @@ func makeRunnerRecovery(
 ) -> RunnerRecovery {
     return RunnerRecovery(
         linuxBackend: {
-            AppleContainerBackend(containerURL: try resolveContainer(), executor: executor)
+            AppleContainerBackend(containerURL: try resolveContainer(), executor: executor, stateDirectory: leaseStore.directory)
         },
         github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
         leaseStore: leaseStore,

@@ -30,6 +30,7 @@ struct RunnerMachineOptions: ParsableArguments {
         return AppleContainerBackend(
             containerURL: try ExecutableLocator().locate("container"),
             executor: executor,
+            stateDirectory: leaseStore.directory,
             dockerReadiness: DockerReadiness(
                 wait: wait,
                 checkCancellation: checkCancellation

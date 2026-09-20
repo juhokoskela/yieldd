@@ -61,8 +61,7 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
             try MacOSVirtualizationProbe().run(
                 templateURL: templateURL,
-                cloneRootURL: leaseStore.directory
-                    .appendingPathComponent("macos-probes", isDirectory: true),
+                cloneRootURL: RunnerStorage.required(in: leaseStore.directory).probesURL,
                 memory: reservation.allocation,
                 hold: hold,
                 checkCancellation: signalMonitor.check,
@@ -207,7 +206,7 @@ struct AgentRunCommand: ParsableCommand {
                     ghURL: configuration.ghURL,
                     stop: stop,
                     output: .agentLog,
-                    prepareContainer: agentContainerPreparation(configuration: configuration, executor: executor)
+                    prepareContainer: agentContainerPreparation(configuration: configuration, executor: executor, stateDirectory: store.directory)
                 )
             }
         } catch where isCancellation(error) {
@@ -229,7 +228,7 @@ func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, e
         let configuration = try store.load()
         let recovery = makeRunnerRecovery(
             leaseStore: leaseStore,
-            resolveContainer: agentContainerPreparation(configuration: configuration, executor: executor),
+            resolveContainer: agentContainerPreparation(configuration: configuration, executor: executor, stateDirectory: store.directory),
             ghURL: configuration.ghURL,
             stop: stop,
             executor: executor,
@@ -242,7 +241,7 @@ func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, e
 }
 
 func agentContainerPreparation(
-    configuration: AgentConfiguration, executor: any ProcessExecuting
+    configuration: AgentConfiguration, executor: any ProcessExecuting, stateDirectory: URL? = nil
 ) -> () throws -> URL {
     // Startup and recovery call this synchronously, before concurrent runner slots begin.
     var prepared: Result<URL, any Error>?
@@ -253,7 +252,7 @@ func agentContainerPreparation(
             guard FileManager.default.isExecutableFile(atPath: url.path) else {
                 throw AgentConfigurationError.executableUnavailable(path: url.path)
             }
-            try AppleContainerSystem(containerURL: url, executor: executor).start()
+            try AppleContainerSystem(containerURL: url, executor: executor, stateDirectory: stateDirectory).start()
             return url
         }
         prepared = result

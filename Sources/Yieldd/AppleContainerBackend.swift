@@ -15,18 +15,29 @@ struct AppleContainerBackend: RunnerBackend {
     let containerURL: URL
     let executor: any ProcessExecuting
     let dockerReadiness: DockerReadiness
+    private let stateDirectory: URL?
+    private let validateStorage: () throws -> Void
 
     init(
         containerURL: URL,
         executor: any ProcessExecuting,
+        stateDirectory: URL? = nil,
+        validateStorage: (() throws -> Void)? = nil,
         dockerReadiness: DockerReadiness = DockerReadiness()
     ) {
         self.containerURL = containerURL
         self.executor = executor
         self.dockerReadiness = dockerReadiness
+        self.stateDirectory = stateDirectory
+        self.validateStorage = validateStorage ?? {
+            let directory = try stateDirectory ?? yielddApplicationSupportDirectory()
+            try RunnerStorage.required(in: directory).validateContainer(
+                containerExecutable: containerURL, stateDirectory: directory, executor: executor)
+        }
     }
 
     func create(id: RunnerID, memory allocation: RunnerMemoryAllocation) throws {
+        try validateStorage()
         _ = try run([
             "machine", "create",
             "--name", id.value,
@@ -82,7 +93,13 @@ struct AppleContainerBackend: RunnerBackend {
     }
 
     func destroy(_ id: RunnerID) throws {
+        let directory = try stateDirectory ?? yielddApplicationSupportDirectory()
+        let storage = try RunnerStorage.load(in: directory)
+        if let storage {
+            try storage.validateContainer(containerExecutable: containerURL, stateDirectory: directory, executor: executor)
+        }
         guard try machineIDs().contains(id.value) else {
+            try storage?.requireMachineRemoved(id)
             return
         }
         do {
@@ -98,6 +115,7 @@ struct AppleContainerBackend: RunnerBackend {
                 throw deletionError
             }
         }
+        try storage?.requireMachineRemoved(id)
     }
 
     func stopRunner(on id: RunnerID) throws {

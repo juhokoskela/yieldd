@@ -4,7 +4,6 @@ import Foundation
 struct RunnerRecovery {
     private let linuxBackend: () throws -> any RunnerBackend
     private let leaseStore: RunnerLeaseStore
-    private let clones: MacOSRunnerCloneStore
     private let cleanup: RunnerCleanup
     private let checkCancellation: () throws -> Void
 
@@ -18,7 +17,6 @@ struct RunnerRecovery {
     ) {
         self.linuxBackend = linuxBackend
         self.leaseStore = leaseStore
-        clones = MacOSRunnerCloneStore(stateDirectory: leaseStore.directory)
         self.checkCancellation = checkCancellation
         cleanup = RunnerCleanup(github: github, recoveryWait: recoveryWait, stateChanged: stateChanged, leaseStore: leaseStore)
     }
@@ -26,6 +24,7 @@ struct RunnerRecovery {
     func run() throws -> [RunnerID] {
         try checkCancellation()
         let leases = try leaseStore.load()
+        let clones = try MacOSRunnerCloneStore(stateDirectory: leaseStore.directory)
         var deferredCleanup: [(
             lease: RunnerLease,
             failures: [RunnerSessionCleanupFailure]

@@ -1,6 +1,10 @@
 import Foundation
 @testable import Yieldd
 
+// Mock Container invocations must not consult the developer's real storage binding.
+let unconfiguredContainerStateDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("yieldd-unconfigured-\(UUID().uuidString)")
+
 extension AgentConfiguration {
     init(
         repositories: [GitHubRepository], macOSRepositories: [GitHubRepository] = [],

@@ -356,7 +356,7 @@ func mixedAgentRecoversMacOSAfterContainerBecomesUnavailable(nonExecutable: Bool
         .success(processResult()),
     ])
     let recovery = makeRunnerRecovery(
-        leaseStore: leases, resolveContainer: agentContainerPreparation(configuration: loaded, executor: executor),
+        leaseStore: leases, resolveContainer: agentContainerPreparation(configuration: loaded, executor: executor, stateDirectory: unconfiguredContainerStateDirectory),
         ghURL: loaded.ghURL, stop: RunnerPoolStop(), executor: executor, stateChanged: { _ in }
     )
     let error = try #require(#expect(throws: RunnerSessionError.self) { try recovery.run() })
