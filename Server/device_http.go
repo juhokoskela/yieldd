@@ -14,6 +14,8 @@ import (
 	"github.com/actions/scaleset"
 )
 
+const cleanupRetryDelay = 5 * time.Second
+
 type coordinatorCall struct {
 	ctx    context.Context
 	run    func(context.Context) error
@@ -22,26 +24,39 @@ type coordinatorCall struct {
 
 // One event loop owns all coordinator state, including writes that span remote API calls.
 type coordinatorLoop struct {
-	worker         *coordinator
-	ctx            context.Context
-	calls          chan coordinatorCall
-	changed        chan struct{}
-	demandObserved bool
+	worker          *coordinator
+	ctx             context.Context
+	calls           chan coordinatorCall
+	capacityChanged chan struct{}
+	demandObserved  bool
+	desiredCount    int
 }
 
 func newCoordinatorLoop(ctx context.Context, worker *coordinator) *coordinatorLoop {
-	return &coordinatorLoop{worker: worker, ctx: ctx, calls: make(chan coordinatorCall), changed: make(chan struct{}, 1)}
+	return &coordinatorLoop{worker: worker, ctx: ctx, calls: make(chan coordinatorCall), capacityChanged: make(chan struct{}, 1)}
 }
 
 func (s *coordinatorLoop) run() error {
 	timer := time.NewTimer(0)
 	timer.Stop()
 	defer timer.Stop()
+	var retryAt time.Time
 	for {
 		var expired <-chan time.Time
 		l := s.worker.state.Lease
-		// On restart, let GitHub retract obsolete demand before starting paid fallback.
-		if s.demandObserved && l != nil && !l.CleanupIntent && l.Local != nil && l.Local.Phase == localOffered {
+		if l != nil && l.Local != nil && l.CleanupIntent {
+			if retryAt.IsZero() {
+				retryAt = time.Now().Add(cleanupRetryDelay)
+			}
+			timer.Reset(time.Until(retryAt))
+			expired = timer.C
+		} else {
+			retryAt = time.Time{}
+		}
+		// Accepted leases cannot have delivered credentials. Offered leases need
+		// fresh demand on restart before their expiry may start paid fallback.
+		if l != nil && !l.CleanupIntent && l.Local != nil &&
+			(l.Local.Phase == localAccepted || (s.demandObserved && l.Local.Phase == localOffered)) {
 			delay := time.Until(l.Local.Expires)
 			if l.Local.expired() {
 				delay = 0
@@ -52,15 +67,16 @@ func (s *coordinatorLoop) run() error {
 		select {
 		case <-s.ctx.Done():
 			return nil
-		case <-expired:
-			if s.ctx.Err() != nil {
-				return nil
+		case <-s.capacityChanged:
+			if s.demandObserved {
+				if err := s.redrive(); err != nil {
+					return err
+				}
 			}
-			ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
-			_, err := s.worker.reconcileLocal(ctx, false)
-			cancel()
-			if err != nil {
-				return &provisioningError{err}
+		case <-expired:
+			retryAt = time.Time{}
+			if err := s.redrive(); err != nil {
+				return err
 			}
 		case call := <-s.calls:
 			ctx, cancel := context.WithTimeout(call.ctx, 60*time.Second)
@@ -81,6 +97,16 @@ func (s *coordinatorLoop) run() error {
 	}
 }
 
+func (s *coordinatorLoop) redrive() error {
+	if s.ctx.Err() != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
+	defer cancel()
+	_, err := s.worker.HandleDesiredRunnerCount(ctx, s.desiredCount)
+	return err
+}
+
 func (s *coordinatorLoop) invoke(ctx context.Context, run func(context.Context) error) error {
 	call := coordinatorCall{ctx: ctx, run: run, result: make(chan error, 1)}
 	select {
@@ -98,13 +124,10 @@ func (s *coordinatorLoop) HandleDesiredRunnerCount(ctx context.Context, count in
 	var actual int
 	err := s.invoke(ctx, func(ctx context.Context) (err error) {
 		s.demandObserved = true
+		s.desiredCount = count
 		actual, err = s.worker.HandleDesiredRunnerCount(ctx, count)
 		return err
 	})
-	select {
-	case s.changed <- struct{}{}:
-	default:
-	}
 	return actual, err
 }
 func (s *coordinatorLoop) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error {
@@ -134,7 +157,7 @@ func listenForDevice(address, token string, allowNonLoopback bool) (net.Listener
 	return net.Listen("tcp", address)
 }
 
-func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
+func (d *deviceRouter) deviceHandler(token string) http.Handler {
 	expected := sha256.Sum256([]byte("Bearer " + token))
 	pollSlot := make(chan struct{}, 1)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +200,7 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 				http.Error(w, "one poll per device", http.StatusConflict)
 				return
 			}
-			offer, pollErr := s.poll(r.Context(), request)
+			offer, pollErr := d.poll(r.Context(), request)
 			if pollErr != nil {
 				err = pollErr
 			} else if offer == nil {
@@ -187,18 +210,18 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 				response = offer
 			}
 		case "/v1/accept":
-			err = s.invoke(r.Context(), func(ctx context.Context) error {
-				credential, acceptErr := s.worker.acceptDevice(ctx, request)
+			err = d.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error {
+				credential, acceptErr := worker.acceptDevice(ctx, request)
 				response = credential
 				return acceptErr
 			})
 		case "/v1/complete":
-			err = s.invoke(r.Context(), func(ctx context.Context) error { return s.worker.completeDevice(ctx, request) })
+			err = d.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error { return worker.completeDevice(ctx, request) })
 			response = struct{}{}
 		case "/v1/renew":
-			err = s.invoke(r.Context(), func(ctx context.Context) error {
+			err = d.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error {
 				var renewalErr error
-				response, renewalErr = s.worker.renewDevice(ctx, request)
+				response, renewalErr = worker.renewDevice(ctx, request)
 				return renewalErr
 			})
 		default:
@@ -214,7 +237,6 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 			if errors.As(err, &rejection) {
 				http.Error(w, rejection.message, rejection.status)
 			} else {
-				s.worker.logger.Error("Device request failed", "error", err)
 				http.Error(w, "coordinator operation failed; retain local recovery state", http.StatusServiceUnavailable)
 			}
 			return
@@ -222,25 +244,4 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(response)
 	})
-}
-
-func (s *coordinatorLoop) poll(ctx context.Context, request deviceRequest) (*deviceOffer, error) {
-	timer := time.NewTimer(20 * time.Second)
-	defer timer.Stop()
-	for {
-		var offer *deviceOffer
-		err := s.invoke(ctx, func(context.Context) (err error) { offer, err = s.worker.pollDevice(request); return err })
-		if err != nil || offer != nil {
-			return offer, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-s.ctx.Done():
-			return nil, s.ctx.Err()
-		case <-timer.C:
-			return nil, nil
-		case <-s.changed:
-		}
-	}
 }

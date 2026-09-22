@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +21,7 @@ func TestDeviceHTTPValidationAndShutdownDiagnostics(t *testing.T) {
 	c.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	handler := newCoordinatorLoop(ctx, c).deviceHandler(strings.Repeat("x", 32))
+	handler := deviceHandlerFor(t, newCoordinatorLoop(ctx, c), strings.Repeat("x", 32))
 	body, _ := json.Marshal(request)
 	for _, test := range []struct {
 		method, path, body string
@@ -30,6 +31,7 @@ func TestDeviceHTTPValidationAndShutdownDiagnostics(t *testing.T) {
 		{"POST", "/v1/bogus", string(body), 404}, {"POST", "/v1/poll", string(body), 503},
 	} {
 		req := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+		req = req.WithContext(ctx)
 		req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 32))
 		out := httptest.NewRecorder()
 		handler.ServeHTTP(out, req)
@@ -54,12 +56,14 @@ func TestDeviceHTTPDrainDeliversAlreadyIssuedCredential(t *testing.T) {
 	defer func() { cancel(); <-loopDone }()
 	issued := make(chan struct{})
 	release := make(chan struct{})
-	handler := loop.deviceHandler(strings.Repeat("x", 32))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := deviceHandlerFor(t, loop, strings.Repeat("x", 32))
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handler.ServeHTTP(w, r)
 		close(issued)
 		<-release
 	}))
+	server.Config.BaseContext = func(net.Listener) context.Context { return ctx }
+	server.Start()
 	defer server.Close()
 	stopping := make(chan struct{})
 	server.Config.RegisterOnShutdown(func() { close(stopping) })
@@ -105,6 +109,49 @@ func TestDeviceHTTPDrainDeliversAlreadyIssuedCredential(t *testing.T) {
 	}
 }
 
+func TestDeviceLongPollStopsWithServerBaseContext(t *testing.T) {
+	c, _, _ := newFixture(t)
+	c.state.Config.DeviceID = testDevice
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	entered := make(chan struct{})
+	token := strings.Repeat("x", 32)
+	handler := deviceHandlerFor(t, newCoordinatorLoop(ctx, c), token)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		handler.ServeHTTP(w, r)
+	}))
+	server.Config.BaseContext = func(net.Listener) context.Context { return ctx }
+	server.Start()
+	defer server.Close()
+	request, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/v1/poll", strings.NewReader(`{"device_id":"`+testDevice+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := make(chan int, 1)
+	go func() {
+		client := &http.Client{Timeout: 2 * time.Second}
+		res, err := client.Do(request)
+		if err != nil {
+			response <- 0
+			return
+		}
+		res.Body.Close()
+		response <- res.StatusCode
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("poll did not reach server")
+	}
+	cancel()
+	if status := <-response; status != http.StatusServiceUnavailable {
+		t.Fatal("poll did not exit on server cancellation", status)
+	}
+}
+
 func TestLongPollTimeoutAndWakeup(t *testing.T) {
 	for _, wake := range []bool{false, true} {
 		t.Run(map[bool]string{false: "timeout", true: "wakeup"}[wake], func(t *testing.T) {
@@ -116,7 +163,7 @@ func TestLongPollTimeoutAndWakeup(t *testing.T) {
 				done := make(chan struct{})
 				go func() { defer close(done); loop.run() }()
 				defer func() { cancel(); <-done }()
-				handler := loop.deviceHandler(strings.Repeat("x", 32))
+				handler := deviceHandlerFor(t, loop, strings.Repeat("x", 32))
 				request := func(device string) *httptest.ResponseRecorder {
 					r := httptest.NewRequest("POST", "/v1/poll", strings.NewReader(`{"device_id":"`+device+`"}`))
 					r.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 32))
@@ -150,46 +197,4 @@ func TestLongPollTimeoutAndWakeup(t *testing.T) {
 			})
 		})
 	}
-}
-
-func TestQueuedPollRefreshesAvailabilityAfterSlowHostedPreparation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c, w, _ := newFixture(t)
-		c.state.Config.DeviceID = testDevice
-		ctx, cancel := context.WithCancel(t.Context())
-		loop := newCoordinatorLoop(ctx, c)
-		done := make(chan struct{})
-		go func() { defer close(done); loop.run() }()
-		defer func() { cancel(); <-done }()
-		entered := make(chan struct{})
-		release := make(chan struct{})
-		w.afterSecret = func() { close(entered); <-release }
-		provision := make(chan error, 1)
-		go func() { _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); provision <- err }()
-		<-entered
-		polled := make(chan error, 1)
-		go func() {
-			polled <- loop.invoke(t.Context(), func(context.Context) error { _, err := c.pollDevice(deviceRequest{DeviceID: testDevice}); return err })
-		}()
-		synctest.Wait()
-		time.Sleep(35 * time.Second)
-		close(release)
-		if err := <-provision; err != nil {
-			t.Fatal(err)
-		}
-		if err := <-polled; err != nil {
-			t.Fatal(err)
-		}
-		w.run.Status = "completed"
-		w.run.Conclusion = "success"
-		if _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-			t.Fatal(err)
-		}
-		if c.state.Lease.Local == nil {
-			t.Fatal("fresh pending poll lost preference")
-		}
-	})
 }

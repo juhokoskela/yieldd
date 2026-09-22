@@ -168,6 +168,7 @@ enum InvalidStoredConfiguration: CaseIterable, CustomTestStringConvertible {
     case relativeContainerPath
     case relativeGitHubCLIPath
     case missingContainer
+    case missingMacOSRepositories
     case relativeTemplate
     case templateWithoutSlots
     case macOSSlotsWithoutTemplate
@@ -197,7 +198,9 @@ enum InvalidStoredConfiguration: CaseIterable, CustomTestStringConvertible {
         case .relativeGitHubCLIPath:
             storedConfiguration(githubCLI: "relative/gh")
         case .missingContainer:
-            Data(#"{"repositories":["owner/repo"],"githubCLIExecutable":"/usr/bin/gh"}"#.utf8)
+            Data(#"{"repositories":["owner/repo"],"macOSRepositories":[],"githubCLIExecutable":"/usr/bin/gh"}"#.utf8)
+        case .missingMacOSRepositories:
+            Data(#"{"repositories":["owner/repo"],"containerExecutable":"/usr/local/bin/container","githubCLIExecutable":"/usr/bin/gh"}"#.utf8)
         case .relativeTemplate:
             macOSStoredConfiguration(template: "relative/template")
         case .templateWithoutSlots:
@@ -212,19 +215,6 @@ enum InvalidStoredConfiguration: CaseIterable, CustomTestStringConvertible {
             Data(repeating: 0, count: AgentConfigurationStore.maximumBytes + 1)
         }
     }
-}
-
-@Test
-func agentConfigurationLoadsLegacyLinuxSlots() throws {
-    let directory = makeAgentTestDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try AgentConfigurationStore(directory: directory)
-    try validStoredConfiguration.write(to: store.fileURL)
-    let configuration = try store.load()
-    #expect(configuration.runners.slots.map(\.platform) == [.linux])
-    #expect(configuration.runners.repositories(for: .macOS).isEmpty)
-    #expect(configuration.runners.macOSTemplateURL == nil)
-    #expect(configuration.containerURL?.path == "/usr/local/bin/container")
 }
 
 @Test(arguments: [false, true])
@@ -369,6 +359,7 @@ private func storedConfiguration(
 ) -> Data {
     try! JSONSerialization.data(withJSONObject: [
         "repositories": repositories,
+        "macOSRepositories": [String](),
         "containerExecutable": container,
         "githubCLIExecutable": githubCLI,
     ])

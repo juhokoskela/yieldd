@@ -76,8 +76,8 @@ func TestOfferTimerFallsBackWithoutAnotherDemandMessage(t *testing.T) {
 		}
 		// Polling refreshes availability, not the outstanding offer deadline.
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			_, err := c.pollDevice(request)
-			return err
+			c.device.pollNow()
+			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -270,6 +270,46 @@ func TestRestoredOfferWaitsForDemandBeforeFallback(t *testing.T) {
 	})
 }
 
+func TestRestoredLocalCleanupDoesNotWaitForDemand(t *testing.T) {
+	for _, phase := range []string{"accepted", "cleanup"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c, world, store, request := localFixture(t)
+				delay := cleanupRetryDelay
+				if phase == "accepted" {
+					world.generateErr = context.DeadlineExceeded
+					if _, err := c.acceptDevice(t.Context(), request); err == nil {
+						t.Fatal("registration did not fail")
+					}
+					delay = registrationLifetime
+				} else {
+					if _, err := c.acceptDevice(t.Context(), request); err != nil {
+						t.Fatal(err)
+					}
+					c.bootstrap = cleanupTimeout{world}
+					if err := c.completeDevice(t.Context(), request); err == nil {
+						t.Fatal("cleanup did not fail")
+					}
+				}
+				saved, err := store.load(c.state.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.state, c.bootstrap = saved, world
+				ctx, cancel := context.WithCancel(t.Context())
+				loop := newCoordinatorLoop(ctx, c)
+				startLoops(t, cancel, []*coordinatorLoop{loop})
+				synctest.Wait()
+				time.Sleep(delay)
+				synctest.Wait()
+				if c.state.Lease != nil || c.device.owner != "" || world.runner != nil || world.dispatched != 0 {
+					t.Fatal("restored cleanup waited for demand or provisioned a replacement")
+				}
+			})
+		})
+	}
+}
+
 func TestOfferTimerUsesReplacementOfferDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c, w, _, _ := localFixture(t)
@@ -280,8 +320,8 @@ func TestOfferTimerUsesReplacementOfferDeadline(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			_, err := c.pollDevice(deviceRequest{DeviceID: testDevice})
-			return err
+			c.device.pollNow()
+			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -309,9 +349,7 @@ func TestOfferAndAvailabilityHaveSeparateLifetimes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c, w, _ := newFixture(t)
 		c.state.Config.DeviceID = testDevice
-		if _, err := c.pollDevice(deviceRequest{DeviceID: testDevice}); err != nil {
-			t.Fatal(err)
-		}
+		c.device.pollNow()
 		time.Sleep(21 * time.Second)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)

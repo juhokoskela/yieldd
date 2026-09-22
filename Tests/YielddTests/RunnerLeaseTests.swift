@@ -24,22 +24,13 @@ func leaseStorePersistsPlatform(platform: RunnerPlatform) throws {
     #expect(stored.first?["platform"] == platform.rawValue)
 }
 
-@Test
-func leaseStoreDefaultsLegacyPlatformToLinux() throws {
+@Test(arguments: [nil, "null", "\"unknown\"", "42"] as [String?])
+func leaseStoreRejectsMissingOrInvalidPlatforms(value: String?) throws {
     let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
-    try Data(#"[{"runnerID":"yieldd-test-123","repository":"owner/repository"}]"#.utf8)
-        .write(to: store.fileURL)
-    #expect(try store.load() == [lease])
-}
-
-@Test(arguments: ["null", "\"unknown\"", "42"])
-func leaseStoreRejectsInvalidPlatforms(value: String) throws {
-    let directory = makeStateDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try RunnerLeaseStore(directory: directory)
-    try Data("[{\"runnerID\":\"yieldd-test-123\",\"repository\":\"owner/repository\",\"platform\":\(value)}]".utf8)
+    let platformField = value.map { ",\"platform\":\($0)" } ?? ""
+    try Data("[{\"runnerID\":\"yieldd-test-123\",\"repository\":\"owner/repository\"\(platformField)}]".utf8)
         .write(to: store.fileURL)
     #expect(throws: RunnerLeaseError.invalidContents(path: store.fileURL.path)) { try store.load() }
 }
@@ -150,7 +141,7 @@ func leaseStoreReportsPathForInvalidContents() throws {
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
     try Data(
-        #"{"runnerID":"yieldd-test-123","repository":"owner/repository"}"#.utf8
+        #"{"runnerID":"yieldd-test-123","repository":"owner/repository","platform":"linux"}"#.utf8
     ).write(to: store.fileURL)
 
     #expect(throws: RunnerLeaseError.invalidContents(path: store.fileURL.path)) {
@@ -164,7 +155,7 @@ func leaseStoreRejectsInvalidRunnerID(value: String) throws {
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
 
-    try Data("[{\"runnerID\":\"\(value)\",\"repository\":\"owner/repository\"}]".utf8)
+    try Data("[{\"runnerID\":\"\(value)\",\"repository\":\"owner/repository\",\"platform\":\"linux\"}]".utf8)
         .write(to: store.fileURL)
     #expect(throws: RunnerLeaseError.invalidRunnerID(path: store.fileURL.path)) {
         try store.load()

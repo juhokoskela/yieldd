@@ -34,6 +34,14 @@ type fakeWorld struct {
 	beforeCancel                                   func()
 	findCalls, getCalls                            int
 	getErr                                         error
+	assignedJobs                                   int
+	demandErr, lookupErr                           error
+	demandCalls                                    int
+}
+
+func (f *fakeWorld) GetRunnerScaleSetByID(_ context.Context, id int) (*scaleset.RunnerScaleSet, error) {
+	f.demandCalls++
+	return &scaleset.RunnerScaleSet{ID: id, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: f.assignedJobs}}, f.demandErr
 }
 
 func (f *fakeWorld) GenerateJitRunnerConfig(_ context.Context, s *scaleset.RunnerScaleSetJitRunnerSetting, id int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
@@ -48,7 +56,7 @@ func (f *fakeWorld) GenerateJitRunnerConfig(_ context.Context, s *scaleset.Runne
 	return &scaleset.RunnerScaleSetJitRunnerConfig{Runner: f.runner, EncodedJITConfig: "private-jit"}, nil
 }
 func (f *fakeWorld) GetRunnerByName(context.Context, string) (*scaleset.RunnerReference, error) {
-	return f.runner, nil
+	return f.runner, f.lookupErr
 }
 func (f *fakeWorld) RemoveRunner(context.Context, int64) error {
 	f.events = append(f.events, "remove-runner")
@@ -131,8 +139,8 @@ func newFixture(t *testing.T) (*coordinator, *fakeWorld, *stateStore) {
 	if err := store.save(saved); err != nil {
 		t.Fatal(err)
 	}
-	world := new(fakeWorld)
-	return &coordinator{state: saved, save: store.save, runners: world, bootstrap: world, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, world, store
+	world := &fakeWorld{assignedJobs: 1}
+	return &coordinator{state: saved, save: store.save, runners: world, bootstrap: world, device: newDeviceQueue(nil), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, world, store
 }
 
 func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {

@@ -231,23 +231,4 @@ private struct StoredRunnerLease: Codable {
     let runnerID: String
     let repository: String
     let platform: RunnerPlatform
-
-    init(runnerID: String, repository: String, platform: RunnerPlatform) {
-        self.runnerID = runnerID
-        self.repository = repository
-        self.platform = platform
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case runnerID, repository, platform
-    }
-
-    init(from decoder: any Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        runnerID = try values.decode(String.self, forKey: .runnerID)
-        repository = try values.decode(String.self, forKey: .repository)
-        platform = try values.contains(.platform)
-            ? values.decode(RunnerPlatform.self, forKey: .platform)
-            : .linux
-    }
 }

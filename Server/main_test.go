@@ -3,13 +3,102 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/actions/scaleset"
 )
 
 type interruptedCleanup struct {
 	*fakeWorld
 	started chan struct{}
+}
+
+func TestFailedQueueAndItsRestartLeaveSiblingServing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		failed, broken, store := newFixture(t)
+		healthy, world, _ := newFixture(t)
+		healthy.state.Config.Repository = "example/healthy"
+		broken.generateErr = context.DeadlineExceeded
+		bad := testPlatform(t, ctx, failed, &controlledMessages{initial: 1})
+		good := testPlatform(t, ctx, healthy, &controlledMessages{})
+		if _, err := newDeviceRouter("", []*coordinatorLoop{bad.loop, good.loop}); err != nil {
+			t.Fatal(err)
+		}
+		results := make(chan error, 2)
+		failedResult := make(chan error, 1)
+		go func() {
+			err := bad.run(ctx, false)
+			failedResult <- err
+			results <- err
+		}()
+		go func() { results <- good.run(ctx, false) }()
+		allDone := make(chan error, 1)
+		go func() { allDone <- waitForCoordinators(results, 2, false) }()
+		if err := <-failedResult; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("registration failure lost", err)
+		}
+		synctest.Wait()
+		select {
+		case err := <-allDone:
+			t.Fatal("healthy sibling stopped", err)
+		default:
+		}
+		saved, err := store.load(failed.state.Config)
+		if err != nil || saved.Lease == nil || saved.Lease.RunnerID != 0 {
+			t.Fatal("uncertain registration journal lost", saved, err)
+		}
+		failed.state = saved
+		broken.generateErr = nil
+		restarted := testPlatform(t, ctx, failed, &controlledMessages{initial: 1})
+		if err := restarted.run(ctx, false); err == nil || !strings.Contains(err.Error(), "run with --recover") {
+			t.Fatal("uncertain registration was replayed", err)
+		}
+		if n, err := good.loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || world.dispatched != 1 {
+			t.Fatal("sibling cannot provision after failure and restart", n, err)
+		}
+		if err := good.loop.invoke(t.Context(), func(context.Context) error {
+			world.run.Status, world.run.Conclusion = "completed", "success"
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := good.loop.HandleDesiredRunnerCount(t.Context(), 0); err != nil || n != 0 {
+			t.Fatal("sibling cannot clean up", n, err)
+		}
+		cancel()
+		if err := <-allDone; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("original queue failure not reported at shutdown", err)
+		}
+	})
+}
+
+func TestFailedQueueLeavesFIFOButRetainsIssuedReservation(t *testing.T) {
+	c, _, _, request := localFixture(t)
+	if _, err := c.acceptDevice(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	c.device.wait(c.state.Owner)
+	failure := errors.New("journal unavailable")
+	c.save = func(*state) error { return failure }
+	stream := &controlledMessages{initial: 1, messages: make(chan *scaleset.RunnerScaleSetMessage, 1)}
+	stream.messages <- &scaleset.RunnerScaleSetMessage{
+		MessageID: 1, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: request.Runner, RunnerID: c.state.Lease.RunnerID}},
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	p := testPlatform(t, ctx, c, stream)
+	if err := p.run(ctx, false); !errors.Is(err, failure) {
+		t.Fatal("journal failure not surfaced", err)
+	}
+	if len(c.device.waiting) != 0 || c.device.owner != c.state.Owner || c.state.Lease == nil {
+		t.Fatal("failed worker lost its reservation or retained a waiting entry")
+	}
 }
 
 func (f *interruptedCleanup) deleteSecret(ctx context.Context, _ string) error {
@@ -37,7 +126,7 @@ func TestInterruptedRecoveryReturnsFailureWithLeaseRetained(t *testing.T) {
 		t.Fatal("recovery did not reach cleanup", ctx.Err())
 	}
 	cancel()
-	if err := waitForCoordinators(results, 1, true, cancel); !errors.Is(err, context.Canceled) {
+	if err := waitForCoordinators(results, 1, true); !errors.Is(err, context.Canceled) {
 		t.Fatal("interrupted recovery reported success", err)
 	}
 	saved, err := store.load(testConfig)
@@ -53,13 +142,9 @@ func TestCoordinatorShutdownIgnoresOnlyCancellationOutsideRecovery(t *testing.T)
 		results <- context.Canceled
 		results <- context.DeadlineExceeded
 		results <- failure
-		stops := 0
-		err := waitForCoordinators(results, 3, recoverOnly, func() { stops++ })
+		err := waitForCoordinators(results, 3, recoverOnly)
 		if !errors.Is(err, failure) || errors.Is(err, context.Canceled) != recoverOnly || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal("incorrect shutdown result", recoverOnly, err)
-		}
-		if (recoverOnly && stops != 0) || (!recoverOnly && stops != 3) {
-			t.Fatal("incorrect sibling shutdown policy", recoverOnly, stops)
 		}
 	}
 }

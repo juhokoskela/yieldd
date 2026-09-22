@@ -221,8 +221,8 @@ func TestPlatformDeviceRoutingAndRecoveryStayIndependent(t *testing.T) {
 	defer func() { cancel(); <-done; <-done }()
 	token := strings.Repeat("x", 32)
 	mux := http.NewServeMux()
-	mux.Handle("/v1/macos/", platformDeviceHandler(macLoop.deviceHandler(token)))
-	mux.Handle("/", linuxLoop.deviceHandler(token))
+	mux.Handle("/v1/macos/", platformDeviceHandler(deviceHandlerFor(t, macLoop, token)))
+	mux.Handle("/", deviceHandlerFor(t, linuxLoop, token))
 	call := func(path string, request deviceRequest) *httptest.ResponseRecorder {
 		t.Helper()
 		data, _ := json.Marshal(request)

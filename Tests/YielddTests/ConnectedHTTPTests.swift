@@ -81,6 +81,34 @@ func connectedHTTPStopsLongPollOnCancellation() throws {
 }
 
 @Test(arguments: [RunnerPlatform.linux, .macOS])
+func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatform) throws {
+    let body = #"{"jit":"fixture","continue":true}"#
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    let original = server.client
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID,
+        token: original.token, platform: platform, checkCancellation: {})
+    for repository in ["owner/first", "owner/second"] {
+        let offer = try ConnectedOffer(owner: UUID().uuidString.lowercased(),
+            runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: repository,
+            platform: platform == .linux ? "linux" : "macos", architecture: "arm64")
+        for action in ["accept", "renew", "complete"] {
+            switch action {
+            case "accept": #expect(try client.accept(offer) == "fixture")
+            case "renew": #expect(try client.renew(offer, checkDeadline: {}))
+            default: try client.complete(offer)
+            }
+            let request = server.request
+            let separator = try #require(request.range(of: "\r\n\r\n"))
+            let identity = try JSONDecoder().decode([String: String].self, from: Data(request[separator.upperBound...].utf8))
+            #expect(identity == ["device_id": client.deviceID, "owner": offer.owner, "runner": offer.runner])
+            let prefix = platform == .linux ? "/v1/" : "/v1/macos/"
+            #expect(request.contains("POST \(prefix)\(action) HTTP/1.1"))
+        }
+    }
+}
+
+@Test(arguments: [RunnerPlatform.linux, .macOS])
 func connectedHTTPAuthorizationUsesIdentityAndDeadline(_ platform: RunnerPlatform) throws {
     let body = #"{"continue":true}"#
     let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")

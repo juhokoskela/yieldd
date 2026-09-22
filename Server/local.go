@@ -68,18 +68,6 @@ type deviceError struct {
 
 func (e *deviceError) Error() string { return e.message }
 
-func (c *coordinator) pollDevice(request deviceRequest) (*deviceOffer, error) {
-	if request.DeviceID != c.state.Config.DeviceID || request.DeviceID == "" {
-		return nil, &deviceError{status: http.StatusForbidden, message: "device identity does not match"}
-	}
-	c.availableUntil = time.Now().Add(availabilityLifetime)
-	l := c.state.Lease
-	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
-		return nil, nil
-	}
-	return &deviceOffer{Owner: c.state.Owner, Runner: l.Name, Repository: c.state.Config.Repository, Platform: c.state.Config.platform(), Architecture: "arm64"}, nil
-}
-
 func (c *coordinator) checkDevice(request deviceRequest) error {
 	if request.DeviceID == "" || request.DeviceID != c.state.Config.DeviceID || request.Owner != c.state.Owner || !runnerNamePattern.MatchString(request.Runner) {
 		return &deviceError{status: http.StatusConflict, message: "device or coordinator identity does not match"}
@@ -210,6 +198,13 @@ func (c *coordinator) reconcileLocal(ctx context.Context, recoverOnly bool) (boo
 	if !l.Local.expired() {
 		return false, nil
 	}
+	if c.state.Config.LocalOnly {
+		if err := c.beginCleanup(""); err != nil {
+			return false, err
+		}
+		c.logger.Info("Local offer expired; waiting for local capacity", "runner", l.Name)
+		return c.finishCleanup(ctx, true)
+	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
 	if err := c.saveLocal(nil, l.JIT); err != nil {
 		return false, err
@@ -230,6 +225,7 @@ func (c *coordinator) saveLocal(local *localLease, jit string) error {
 		return err
 	}
 	*c.state.Lease = nextLease
+	c.device.update(c.state)
 	return nil
 }
 
