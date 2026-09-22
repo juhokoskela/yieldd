@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -14,21 +15,22 @@ func repositoryConfigs(base config, repositories, localOnly, macOSFallback strin
 	if err != nil {
 		return nil, err
 	}
-	local := map[string]bool{}
+	var local []string
 	if localOnly != "" {
-		values, err := repositoryList(localOnly)
+		local, err = repositoryList(localOnly)
 		if err != nil {
 			return nil, err
 		}
-		for _, name := range values {
-			local[name] = true
+	}
+	for _, name := range local {
+		if !slices.Contains(names, name) {
+			return nil, errors.New("local-only repositories must also appear in --repositories")
 		}
 	}
 	var configs []config
 	for _, name := range names {
 		c := base
-		c.Repository, c.LocalOnly = name, local[name]
-		delete(local, name)
+		c.Repository, c.LocalOnly = name, slices.Contains(local, name)
 		platforms := []config{c}
 		if macOSFallback != "" {
 			mac := c
@@ -44,9 +46,6 @@ func repositoryConfigs(base config, repositories, localOnly, macOSFallback strin
 			}
 			configs = append(configs, queue)
 		}
-	}
-	if len(local) != 0 {
-		return nil, errors.New("local-only repositories must also appear in --repositories")
 	}
 	return configs, nil
 }
@@ -72,7 +71,7 @@ func repositoryList(value string) ([]string, error) {
 }
 
 func queueDirectory(c config) string {
-	return filepath.Join("queues", strings.ToLower(c.Repository), c.platform())
+	return filepath.Join("queues", c.Repository, c.platform())
 }
 
 // Lock the whole deployment, including queues without an existing state file.
@@ -98,7 +97,9 @@ func openRepositoryStore(directory string, configs []config) (_ *stateStore, err
 		if !info.IsDir() {
 			return nil, errors.New("queues must be a directory, not a symlink or file")
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	} else if errors.Is(err, os.ErrNotExist) {
+		return store, nil
+	} else {
 		return nil, err
 	}
 	allowed := map[string]bool{}
@@ -106,16 +107,13 @@ func openRepositoryStore(directory string, configs []config) (_ *stateStore, err
 		allowed[filepath.ToSlash(filepath.Join(queueDirectory(c), "state.json"))] = true
 	}
 	err = fs.WalkDir(store.root.FS(), "queues", func(path string, entry fs.DirEntry, err error) error {
-		if errors.Is(err, os.ErrNotExist) && path == "queues" {
-			return nil
-		}
 		if err != nil {
 			return err
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("queue state cannot contain a symlink: %s", path)
 		}
-		if entry.Name() == "state.json" && !allowed[path] {
+		if !entry.IsDir() && entry.Name() == "state.json" && !allowed[path] {
 			return fmt.Errorf("saved queue %s is not configured; restore its repository and platform, finish recovery, then archive its queue directory before removing it", path)
 		}
 		return nil

@@ -72,19 +72,7 @@ func TestRepositoryStateIsIndependentOfConfigurationOrder(t *testing.T) {
 		other.Close()
 		t.Fatal("deployment lock not exclusive")
 	}
-	owners := map[string]string{}
-	for _, cfg := range configs {
-		store, err := openStore(filepath.Join(directory, queueDirectory(cfg)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		saved, err := store.load(cfg)
-		store.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		owners[queueDirectory(cfg)] = saved.Owner
-	}
+	owners := loadQueueOwners(t, directory, configs)
 	root.Close()
 	reordered, err := repositoryConfigs(testConfig, "EXAMPLE/B, example/A", "", `"macos-26"`)
 	if err != nil {
@@ -95,9 +83,16 @@ func TestRepositoryStateIsIndependentOfConfigurationOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	reloaded := map[string]string{}
+	if reloaded := loadQueueOwners(t, directory, reordered); !reflect.DeepEqual(owners, reloaded) {
+		t.Fatal(owners, reloaded)
+	}
+}
+
+func loadQueueOwners(t *testing.T, directory string, configs []config) map[string]string {
+	t.Helper()
+	owners := map[string]string{}
 	seen := map[string]bool{}
-	for _, cfg := range reordered {
+	for _, cfg := range configs {
 		store, err := openStore(filepath.Join(directory, queueDirectory(cfg)))
 		if err != nil {
 			t.Fatal(err)
@@ -111,40 +106,60 @@ func TestRepositoryStateIsIndependentOfConfigurationOrder(t *testing.T) {
 			t.Fatal("queue owner reused", saved.Owner)
 		}
 		seen[saved.Owner] = true
-		reloaded[queueDirectory(cfg)] = saved.Owner
+		owners[queueDirectory(cfg)] = saved.Owner
 	}
-	if !reflect.DeepEqual(owners, reloaded) {
-		t.Fatal(owners, reloaded)
+	return owners
+}
+
+func TestRepositoryNamedStateJSONRestarts(t *testing.T) {
+	configs, err := repositoryConfigs(testConfig, "example/state.json", "", `"macos-26"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(t.TempDir(), "state")
+	var previous map[string]string
+	for range 2 {
+		root, err := openRepositoryStore(directory, configs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owners := loadQueueOwners(t, directory, configs)
+		root.Close()
+		if previous != nil && !reflect.DeepEqual(previous, owners) {
+			t.Fatal("restart changed identities", previous, owners)
+		}
+		previous = owners
 	}
 }
 
 func TestRepositoryStateRejectsLegacyRemovedAndSymlinkedQueues(t *testing.T) {
-	for _, kind := range []string{"legacy", "legacy macos", "removed repository", "removed platform", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
+	for _, test := range []struct {
+		name, path string
+		symlink    bool
+	}{
+		{"legacy", "state.json", false},
+		{"legacy macos", "macos/state.json", false},
+		{"removed repository", "queues/example/removed/linux/state.json", false},
+		{"removed platform", "queues/example/application/macos/state.json", false},
+		{"symlinked root", "queues", true},
+		{"symlinked repository", "queues/example/application", true},
+		{"symlinked journal", "queues/example/application/linux/state.json", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			directory := filepath.Join(t.TempDir(), "state")
 			if err := os.Mkdir(directory, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			configs := []config{testConfig}
-			var file string
-			switch kind {
-			case "legacy":
-				file = filepath.Join(directory, "state.json")
-			case "legacy macos":
-				file = filepath.Join(directory, "macos/state.json")
-			case "removed repository":
-				file = filepath.Join(directory, "queues/example/removed/linux/state.json")
-			case "removed platform":
-				file = filepath.Join(directory, "queues/example/application/macos/state.json")
-			case "symlink":
-				if err := os.Symlink(t.TempDir(), filepath.Join(directory, "queues")); err != nil {
-					t.Fatal(err)
-				}
+			file := filepath.Join(directory, test.path)
+			if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+				t.Fatal(err)
 			}
-			if file != "" {
-				if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			if test.symlink {
+				if err := os.Symlink(t.TempDir(), file); err != nil {
 					t.Fatal(err)
 				}
+			} else {
 				if err := os.WriteFile(file, []byte("retained cleanup state"), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -153,7 +168,7 @@ func TestRepositoryStateRejectsLegacyRemovedAndSymlinkedQueues(t *testing.T) {
 				store.Close()
 				t.Fatal("unsafe layout accepted")
 			}
-			if file != "" {
+			if !test.symlink {
 				data, err := os.ReadFile(file)
 				if err != nil || string(data) != "retained cleanup state" {
 					t.Fatal("state modified", err)
