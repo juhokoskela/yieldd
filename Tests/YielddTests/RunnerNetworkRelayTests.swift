@@ -7,7 +7,7 @@ import Testing
     @Test func readinessAndIdempotentShutdown() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat >/dev/null")
+        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat")
         let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
         let directory = relay.socketURL.deletingLastPathComponent()
         #expect(relay.sshPort == 12345)
@@ -30,7 +30,7 @@ import Testing
     func rejectsReadinessAndReapsChild(payload: String) throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("printf '%s\\n' '\(payload)'\nexec /bin/cat >/dev/null")
+        let executable = try fixture.script("printf '%s\\n' '\(payload)'\nexec /bin/cat")
         do {
             _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
             Issue.record("Accepted invalid relay readiness")
@@ -42,7 +42,7 @@ import Testing
     @Test func startupTimeoutReapsChild() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("exec /bin/cat >/dev/null")
+        let executable = try fixture.script("exec /bin/cat")
         do {
             _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root, startupTimeout: 0.1)
             Issue.record("Accepted a relay without readiness")
@@ -51,10 +51,22 @@ import Testing
         #expect(try fixture.relayDirectories().isEmpty)
     }
 
-    @Test func cancellationDuringStartupReapsChild() throws {
+    @Test func closedReadinessPipeReapsChild() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
         let executable = try fixture.script("exec /bin/cat >/dev/null")
+        do {
+            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
+            Issue.record("Accepted a relay that closed readiness without a response")
+        } catch RunnerNetworkRelayError.invalidReadiness {}
+        try fixture.requireExited()
+        #expect(try fixture.relayDirectories().isEmpty)
+    }
+
+    @Test func cancellationDuringStartupReapsChild() throws {
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let executable = try fixture.script("exec /bin/cat")
         struct Cancelled: Error {}
         do {
             _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root, checkCancellation: {
@@ -88,7 +100,7 @@ import Testing
     @Test func droppingTheOwnerStopsItsChild() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat >/dev/null")
+        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat")
         do {
             let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
             try relay.check()
@@ -101,7 +113,7 @@ import Testing
     @Test func reportsUnexpectedExitAndStillCleansUp() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat >/dev/null")
+        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat")
         let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
         defer { try? relay.stop() }
         #expect(kill(try fixture.processID(), SIGKILL) == 0)
