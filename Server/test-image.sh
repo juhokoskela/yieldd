@@ -26,7 +26,7 @@ for attempt in 1 2; do
     containers+=("$instance")
     docker start --attach "$instance"
     [[ "$(docker inspect --format '{{.State.ExitCode}}' "$instance")" == 0 ]]
-    index=0
+    current_owners=()
     for repository in glasseq yieldd infrastructure glasseqserver; do
         for platform in linux macos; do
             state="$(docker cp "$instance:/var/lib/yieldd/queues/example/$repository/$platform/state.json" - | tar -xOf -)"
@@ -35,17 +35,16 @@ for attempt in 1 2; do
                 '.lease == null and .config.repository == $repository and
                 (.config.platform // "linux") == $platform and
                 (.config.local_only // false) == ($repository == "example/infrastructure")' <<< "$state" >/dev/null
-            if [[ "$attempt" == 1 ]]; then
-                if (( ${#owners[@]} )); then
-                    for owner in "${owners[@]}"; do [[ "$owner" != "$current_owner" ]]; done
-                fi
-                owners+=("$current_owner")
-            else
-                [[ "$current_owner" == "${owners[$index]}" ]]
-            fi
-            index=$((index + 1))
+            current_owners+=("$current_owner")
         done
     done
+    [[ "$(printf '%s\n' "${current_owners[@]}" | sort -u | wc -l)" -eq 8 ]]
+    if [[ "$attempt" == 1 ]]; then
+        owners=("${current_owners[@]}")
+    else
+        # Both arrays follow the same repository/platform order.
+        [[ "${current_owners[*]}" == "${owners[*]}" ]]
+    fi
 done
 
 echo 'Image runs without root or network access and preserves eight independent queue identities across containers.'
