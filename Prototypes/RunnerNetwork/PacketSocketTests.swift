@@ -10,6 +10,7 @@ struct PacketSocketTests {
         try fixture.bindRelay()
         do {
             let socket = try PacketSocket(path: fixture.path)
+            #expect(fcntl(socket.handle.fileDescriptor, F_GETFD) & FD_CLOEXEC != 0)
             let attributes = try FileManager.default.attributesOfItem(atPath: fixture.path + ".vm")
             #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
             let device = try socket.device()

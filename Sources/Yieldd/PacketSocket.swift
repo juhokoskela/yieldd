@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Virtualization
 
-// One host-owned endpoint per guest. No TCP listener and no vmnet attachment.
+// One host-owned endpoint per guest, without a vmnet attachment.
 final class PacketSocket: Sendable {
     let handle: FileHandle
     private let localPath: String
@@ -22,6 +22,9 @@ final class PacketSocket: Sendable {
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         var bound = false
         do {
+            guard fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
             var sendBuffer: Int32 = 1 << 20
             var receiveBuffer: Int32 = 4 << 20
             guard setsockopt(descriptor, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size)) == 0,

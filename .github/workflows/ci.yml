@@ -42,8 +42,19 @@ jobs:
         # Parallel execution currently hits timing failures in lifecycle tests.
         run: swift test --no-parallel
 
+      - name: Set up Go for the network relay
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: Prototypes/RunnerNetwork/go.mod
+          cache-dependency-path: Prototypes/RunnerNetwork/go.sum
+
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
+
+      - name: Check the bundled relay lifecycle without a VM
+        env:
+          YIELDD_TEST_RELAY: ${{ github.workspace }}/.build/yieldd.app/Contents/Helpers/yieldd-network-relay
+        run: swift test --skip-build --no-parallel --filter RunnerNetworkRelayTests
 
   bootstrap:
     name: Bootstrap contract

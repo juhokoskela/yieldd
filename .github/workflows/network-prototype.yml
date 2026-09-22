@@ -5,6 +5,9 @@ on:
     paths:
       - 'Prototypes/RunnerNetwork/**'
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
+      - 'Sources/Yieldd/PacketSocket.swift'
+      - 'Scripts/build-network-relay.sh'
+      - 'Scripts/prepare-patched-source.sh'
       - 'Tests/YielddTests/RunnerNetworkRelayTests.swift'
       - 'Packaging/yieldd.entitlements'
       - '.github/workflows/network-prototype.yml'
@@ -13,6 +16,9 @@ on:
     paths:
       - 'Prototypes/RunnerNetwork/**'
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
+      - 'Sources/Yieldd/PacketSocket.swift'
+      - 'Scripts/build-network-relay.sh'
+      - 'Scripts/prepare-patched-source.sh'
       - 'Tests/YielddTests/RunnerNetworkRelayTests.swift'
       - 'Packaging/yieldd.entitlements'
       - '.github/workflows/network-prototype.yml'
