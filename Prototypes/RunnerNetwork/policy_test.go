@@ -17,16 +17,13 @@ func TestDestinationPolicy(t *testing.T) {
 		"::", "::1", "::ffff:8.8.8.8", "fe80::1", "fd00::1", "64:ff9b::a00:1", "2001:4860:4860::8888",
 	} {
 		t.Run(address, func(t *testing.T) {
-			if publicDestination(netip.MustParseAddr(address), nil) {
+			if publicDestination(netip.MustParseAddr(address)) {
 				t.Fatal("permitted restricted destination")
 			}
 		})
 	}
-	if !publicDestination(netip.MustParseAddr("8.8.8.8"), nil) {
+	if !publicDestination(netip.MustParseAddr("8.8.8.8")) {
 		t.Fatal("rejected public address")
-	}
-	if publicDestination(netip.MustParseAddr("8.8.8.8"), []netip.Addr{netip.MustParseAddr("8.8.8.8")}) {
-		t.Fatal("permitted a public host interface address")
 	}
 }
 
@@ -57,6 +54,27 @@ func TestDialBoundary(t *testing.T) {
 	}
 	if _, err := permittedDial(t.Context(), "tcp", "8.8.8.8:443", local, dial); err != nil || !called {
 		t.Fatal(err)
+	}
+}
+
+func TestForbiddenDestinationsSkipHostInterfaceLookup(t *testing.T) {
+	for _, address := range []string{
+		"10.0.0.1:443", "127.0.0.1:443", "169.254.169.254:80", "192.168.3.1:53",
+		"224.0.0.1:53", "198.51.100.1:443", "[::1]:443", "[::ffff:8.8.8.8]:443",
+	} {
+		t.Run(address, func(t *testing.T) {
+			local := func() ([]netip.Addr, error) {
+				t.Error("enumerated host interfaces for a statically forbidden destination")
+				return nil, nil
+			}
+			dial := func(context.Context, string, string) (net.Conn, error) {
+				t.Error("dialed a forbidden destination")
+				return nil, errDenied
+			}
+			if _, err := permittedDial(t.Context(), "tcp", address, local, dial); !errors.Is(err, errDenied) {
+				t.Fatal("did not reject forbidden destination", err)
+			}
+		})
 	}
 }
 

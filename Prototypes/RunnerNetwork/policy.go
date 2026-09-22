@@ -29,17 +29,12 @@ var deniedNetworks = []netip.Prefix{
 	netip.MustParsePrefix("224.0.0.0/3"),
 }
 
-func publicDestination(ip netip.Addr, local []netip.Addr) bool {
+func publicDestination(ip netip.Addr) bool {
 	if !ip.Is4() {
 		return false
 	}
 	for _, prefix := range deniedNetworks {
 		if prefix.Contains(ip) {
-			return false
-		}
-	}
-	for _, address := range local {
-		if address.Unmap() == ip {
 			return false
 		}
 	}
@@ -67,7 +62,7 @@ func permittedDial(ctx context.Context, network, address string, local func() ([
 		return nil, errDenied
 	}
 	endpoint, err := netip.ParseAddrPort(address)
-	if err != nil || endpoint.Port() == 0 {
+	if err != nil || endpoint.Port() == 0 || !publicDestination(endpoint.Addr()) {
 		return nil, errDenied
 	}
 	// Refresh at each new host connection, including after Wi-Fi/VPN changes.
@@ -75,8 +70,10 @@ func permittedDial(ctx context.Context, network, address string, local func() ([
 	if err != nil {
 		return nil, errors.Join(errDenied, fmt.Errorf("cannot validate host addresses: %w", err))
 	}
-	if !publicDestination(endpoint.Addr(), addresses) {
-		return nil, errDenied
+	for _, address := range addresses {
+		if address.Unmap() == endpoint.Addr() {
+			return nil, errDenied
+		}
 	}
 	// No name resolution or proxy environment is involved at this boundary.
 	return dial(ctx, network+"4", endpoint.String())
