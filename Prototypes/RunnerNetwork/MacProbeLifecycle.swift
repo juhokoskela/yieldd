@@ -45,6 +45,7 @@ struct MacProbeLifecycle {
             throw error
         }
         if let operationError { throw operationError }
+        if state() == .error { throw MacProbeLifecycleError.virtualMachineFailed }
     }
 
     private var isStopped: Bool { state() == .stopped || state() == .error }
@@ -91,12 +92,14 @@ struct MacProbeLifecycle {
 }
 
 enum MacProbeLifecycleError: Error, LocalizedError {
+    case virtualMachineFailed
     case startupTimedOut
     case stopTimedOut
     case operationAndCleanupFailed(operation: any Error, cleanup: any Error)
 
     var errorDescription: String? {
         switch self {
+        case .virtualMachineFailed: "The prototype VM entered an error state."
         case .startupTimedOut: "The prototype VM did not start within its two-minute budget."
         case .stopTimedOut: "The prototype VM did not stop within 15 seconds. Its clone was retained."
         case let .operationAndCleanupFailed(operation, cleanup):

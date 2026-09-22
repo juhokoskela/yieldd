@@ -110,6 +110,53 @@ struct MacProbeLifecycleTests {
         #expect(machine.state == .stopping)
     }
 
+    @Test(arguments: [0, 1, 120])
+    func runtimeErrorStateFailsTheProbe(failureSecond: Int) async throws {
+        let machine = ProbeMachine()
+        machine.onStart = {
+            $0.finishStart(.success(()))
+            if failureSecond == 0 { $0.state = .error }
+        }
+        machine.onWait = {
+            if $0.elapsed == .seconds(failureSecond) { $0.state = .error }
+        }
+        do {
+            try await machine.run()
+            Issue.record("Reported a crashed VM as a successful probe")
+        } catch MacProbeLifecycleError.virtualMachineFailed {}
+        #expect(machine.elapsed == .seconds(failureSecond))
+        #expect(machine.reportedStarted)
+        #expect(machine.stopCount == 0)
+        #expect(machine.state == .error)
+    }
+
+    @Test(arguments: [false, true])
+    func errorStateDuringShutdownFailsTheProbe(stopReportsError: Bool) async throws {
+        let machine = ProbeMachine()
+        machine.onStart = { $0.finishStart(.success(())) }
+        machine.onStop = { machine, completion in
+            machine.state = .error
+            completion(stopReportsError ? ProbeFailure.stop : nil)
+        }
+        do {
+            try await machine.run()
+            Issue.record("Reported an error-state VM as a successful shutdown")
+        } catch MacProbeLifecycleError.virtualMachineFailed {}
+        #expect(machine.elapsed == .seconds(120))
+        #expect(machine.stopCount == 1)
+        #expect(machine.state == .error)
+    }
+
+    @Test func normalGuestShutdownStillSucceeds() async throws {
+        let machine = ProbeMachine()
+        machine.onStart = { $0.finishStart(.success(())) }
+        machine.onWait = { $0.state = .stopped }
+        try await machine.run()
+        #expect(machine.elapsed == .seconds(1))
+        #expect(machine.stopCount == 0)
+        #expect(machine.state == .stopped)
+    }
+
     @Test func startupAndStopFailuresArePreserved() async throws {
         let machine = ProbeMachine()
         machine.onStart = {
