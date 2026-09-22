@@ -83,8 +83,12 @@ func run() error {
 		workers = append(workers, worker)
 		platforms[c.platform()] = append(platforms[c.platform()], worker.loop)
 	}
-	for platform, loops := range platforms {
-		router, err := newDeviceRouter(cfg.DeviceID, ctx.Done(), loops)
+	for _, platform := range []string{"linux", "macos"} {
+		loops := platforms[platform]
+		if len(loops) == 0 {
+			continue
+		}
+		router, err := newDeviceRouter(cfg.DeviceID, loops)
 		if err != nil {
 			return err
 		}
@@ -119,24 +123,29 @@ func run() error {
 	}
 	results := make(chan error, len(workers))
 	for _, worker := range workers {
-		go func() { results <- worker.run(ctx, recoverOnly) }()
+		go func() {
+			err := worker.run(ctx, recoverOnly)
+			if err != nil && !onlyCancellation(err) {
+				worker.loop.worker.logger.Error("Queue stopped; recovery state retained", "error", err)
+			}
+			results <- err
+		}()
 	}
-	if err := waitForCoordinators(results, len(workers), recoverOnly, stop); err != nil {
+	err = waitForCoordinators(results, len(workers), recoverOnly)
+	stop()
+	if err != nil {
 		return err
 	}
 	slog.Info("Stopped; any active assignment is recorded for reconciliation on restart")
 	return nil
 }
 
-func waitForCoordinators(results <-chan error, count int, recoverOnly bool, stop context.CancelFunc) error {
+func waitForCoordinators(results <-chan error, count int, recoverOnly bool) error {
 	var failures []error
 	for range count {
 		err := <-results
 		if err != nil && (recoverOnly || !onlyCancellation(err)) {
 			failures = append(failures, err)
-		}
-		if !recoverOnly {
-			stop()
 		}
 	}
 	return errors.Join(failures...)

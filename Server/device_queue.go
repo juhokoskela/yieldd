@@ -16,26 +16,34 @@ type deviceQueue struct {
 	availableUntil time.Time
 	owner          string
 	offer          *deviceOffer
-	expires        time.Time
+	lease          localLease
 	waiting        []string
 	wake           map[string]chan struct{}
 	changed        chan struct{}
 }
 
-func newDeviceQueue() *deviceQueue {
-	return &deviceQueue{wake: make(map[string]chan struct{}), changed: make(chan struct{}, 1)}
+func newDeviceQueue(wake map[string]chan struct{}) *deviceQueue {
+	return &deviceQueue{wake: wake, changed: make(chan struct{}, 1)}
 }
 
-func (q *deviceQueue) claim(owner string) bool {
+func (q *deviceQueue) wait(owner string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if !slices.Contains(q.waiting, owner) {
 		q.waiting = append(q.waiting, owner)
 	}
-	if q.owner != "" || !time.Now().Before(q.availableUntil) || q.waiting[0] != owner {
+	q.wakeNext()
+}
+
+func (q *deviceQueue) claim(owner string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.owner != "" || !time.Now().Before(q.availableUntil) || (len(q.waiting) != 0 && q.waiting[0] != owner) {
 		return false
 	}
-	q.waiting = q.waiting[1:]
+	if len(q.waiting) != 0 {
+		q.waiting = q.waiting[1:]
+	}
 	q.owner = owner
 	q.availableUntil = time.Time{}
 	return true
@@ -89,7 +97,7 @@ func (q *deviceQueue) publish(s *state) {
 		q.availableUntil = time.Time{}
 	} else if !l.CleanupIntent && l.Local.Phase == localOffered {
 		q.offer = &deviceOffer{Owner: s.Owner, Runner: l.Name, Repository: s.Config.Repository, Platform: s.Config.platform(), Architecture: "arm64"}
-		q.expires = l.Local.Expires
+		q.lease = *l.Local
 	}
 	select {
 	case q.changed <- struct{}{}:
@@ -104,72 +112,72 @@ func (q *deviceQueue) pollNow() *deviceOffer {
 		q.availableUntil = time.Now().Add(availabilityLifetime)
 		q.wakeNext()
 	}
-	remaining := time.Until(q.expires)
-	if q.offer == nil || remaining <= 0 || remaining > offerLifetime {
+	if q.offer == nil || q.lease.expired() {
 		return nil
 	}
-	copy := *q.offer
-	return &copy
+	offer := *q.offer
+	return &offer
 }
 
 type deviceRouter struct {
 	device string
 	queue  *deviceQueue
 	loops  map[string]*coordinatorLoop
-	done   <-chan struct{}
 }
 
-func newDeviceRouter(device string, done <-chan struct{}, loops []*coordinatorLoop) (*deviceRouter, error) {
-	r := &deviceRouter{device: device, queue: newDeviceQueue(), loops: make(map[string]*coordinatorLoop), done: done}
+func newDeviceRouter(device string, loops []*coordinatorLoop) (*deviceRouter, error) {
+	d := &deviceRouter{device: device, loops: make(map[string]*coordinatorLoop)}
+	wake := make(map[string]chan struct{}, len(loops))
 	for _, loop := range loops {
 		owner := loop.worker.state.Owner
-		if _, exists := r.loops[owner]; exists {
+		if _, exists := d.loops[owner]; exists {
 			return nil, errors.New("duplicate coordinator queue identity")
 		}
-		r.loops[owner] = loop
-		r.queue.wake[owner] = loop.capacityChanged
-		if err := r.queue.restore(loop.worker.state); err != nil {
+		d.loops[owner] = loop
+		wake[owner] = loop.capacityChanged
+	}
+	d.queue = newDeviceQueue(wake)
+	for _, loop := range loops {
+		if err := d.queue.restore(loop.worker.state); err != nil {
 			return nil, err
 		}
-		loop.worker.device = r.queue
+		loop.worker.device = d.queue
 	}
-	return r, nil
+	return d, nil
 }
 
-func (r *deviceRouter) poll(ctx context.Context, request deviceRequest) (*deviceOffer, error) {
-	if request.DeviceID == "" || request.DeviceID != r.device {
+func (d *deviceRouter) poll(ctx context.Context, request deviceRequest) (*deviceOffer, error) {
+	if request.DeviceID == "" || request.DeviceID != d.device {
 		return nil, &deviceError{status: http.StatusForbidden, message: "device identity does not match"}
 	}
 	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
 	for {
-		select {
-		case <-r.done:
-			return nil, context.Canceled
-		default:
-		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if offer := r.queue.pollNow(); offer != nil {
+		if offer := d.queue.pollNow(); offer != nil {
 			return offer, nil
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-r.done:
-			return nil, context.Canceled
 		case <-timer.C:
 			return nil, nil
-		case <-r.queue.changed:
+		case <-d.queue.changed:
 		}
 	}
 }
 
-func (r *deviceRouter) invoke(ctx context.Context, request deviceRequest, run func(context.Context, *coordinator) error) error {
-	loop := r.loops[request.Owner]
+func (d *deviceRouter) invoke(ctx context.Context, request deviceRequest, run func(context.Context, *coordinator) error) error {
+	loop := d.loops[request.Owner]
 	if loop == nil {
 		return &deviceError{status: http.StatusConflict, message: "coordinator queue identity does not match; retain local recovery state"}
 	}
-	return loop.invoke(ctx, func(ctx context.Context) error { return run(ctx, loop.worker) })
+	err := loop.invoke(ctx, func(ctx context.Context) error { return run(ctx, loop.worker) })
+	var rejection *deviceError
+	if err != nil && !onlyCancellation(err) && !errors.As(err, &rejection) {
+		loop.worker.logger.Error("Device request failed", "error", err)
+	}
+	return err
 }

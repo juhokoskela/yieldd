@@ -16,7 +16,7 @@ import (
 
 func deviceHandlerFor(t *testing.T, loop *coordinatorLoop, token string) http.Handler {
 	t.Helper()
-	router, err := newDeviceRouter(loop.worker.state.Config.DeviceID, loop.ctx.Done(), []*coordinatorLoop{loop})
+	router, err := newDeviceRouter(loop.worker.state.Config.DeviceID, []*coordinatorLoop{loop})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,11 +39,17 @@ func routerFixture(t *testing.T, localOnly bool) (*deviceRouter, []*coordinatorL
 		loops = append(loops, newCoordinatorLoop(ctx, worker))
 		worlds = append(worlds, world)
 	}
-	router, err := newDeviceRouter(testDevice, ctx.Done(), loops)
+	router, err := newDeviceRouter(testDevice, loops)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
 	}
+	startLoops(t, cancel, loops)
+	return router, loops, worlds
+}
+
+func startLoops(t *testing.T, cancel context.CancelFunc, loops []*coordinatorLoop) {
+	t.Helper()
 	done := make(chan error, len(loops))
 	for _, loop := range loops {
 		go func() { done <- loop.run() }()
@@ -56,7 +62,6 @@ func routerFixture(t *testing.T, localOnly bool) (*deviceRouter, []*coordinatorL
 			}
 		}
 	})
-	return router, loops, worlds
 }
 
 func requestDevice(handler http.Handler, action string, request deviceRequest) *httptest.ResponseRecorder {
@@ -66,6 +71,76 @@ func requestDevice(handler http.Handler, action string, request deviceRequest) *
 	out := httptest.NewRecorder()
 	handler.ServeHTTP(out, r)
 	return out
+}
+
+func TestLocalOnlyCleanupRetriesWithoutDemandAndRetainsSlotUntilSuccess(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		router, loops, worlds := routerFixture(t, false)
+		local := loops[0]
+		if err := local.invoke(t.Context(), func(context.Context) error {
+			local.worker.state.Config.LocalOnly = true
+			local.worker.state.Config.Fallback = ""
+			worlds[0].lookupErr = context.DeadlineExceeded
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		router.queue.pollNow()
+		if _, err := local.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(offerLifetime)
+		synctest.Wait()
+		if local.worker.state.Lease == nil || !local.worker.state.Lease.CleanupIntent || router.queue.owner != local.worker.state.Owner {
+			t.Fatal("failed cleanup did not retain the slot")
+		}
+		if n, err := loops[1].HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || worlds[1].dispatched != 1 {
+			t.Fatal("app fallback was blocked by local-only cleanup", n, err)
+		}
+		time.Sleep(cleanupRetryDelay - time.Second)
+		if err := local.invoke(t.Context(), func(context.Context) error {
+			worlds[0].lookupErr = nil
+			if local.worker.state.Lease == nil {
+				return fmt.Errorf("cleanup ran before its retry deadline")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// This unrelated call must not postpone the pending retry.
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if local.worker.state.Lease != nil || router.queue.owner != "" {
+			t.Fatal("cleanup did not retry autonomously")
+		}
+		router.queue.pollNow()
+		synctest.Wait()
+		if offer := router.queue.pollNow(); offer == nil || offer.Owner != local.worker.state.Owner {
+			t.Fatal("local-only demand was not requeued", offer)
+		}
+	})
+}
+
+func TestFallbackQueueCannotPassWaitingLocalOnlyQueue(t *testing.T) {
+	local, _, _ := newFixture(t)
+	app, world, _ := newFixture(t)
+	queue := newDeviceQueue(nil)
+	local.device, app.device = queue, queue
+	local.state.Config.DeviceID, app.state.Config.DeviceID = testDevice, testDevice
+	local.state.Config.LocalOnly, local.state.Config.Fallback = true, ""
+	if n, err := local.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+	queue.pollNow()
+	if n, err := app.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || world.dispatched != 1 {
+		t.Fatal("fallback queue took the waiting queue's capacity", n, err)
+	}
+	if !slices.Equal(queue.waiting, []string{local.state.Owner}) {
+		t.Fatal("fallback queue joined the local FIFO", queue.waiting)
+	}
+	if n, err := local.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || local.state.Lease.Local == nil {
+		t.Fatal("waiting queue did not receive capacity", n, err)
+	}
 }
 
 func TestRepositoriesShareOneLocalSlotAndKeepHostedFallback(t *testing.T) {
@@ -232,19 +307,12 @@ func TestRestoredExpiredLocalOnlyOfferRequeuesOutstandingDemand(t *testing.T) {
 					c.state = saved
 					ctx, cancel := context.WithCancel(t.Context())
 					loop := newCoordinatorLoop(ctx, c)
-					router, err := newDeviceRouter(testDevice, ctx.Done(), []*coordinatorLoop{loop})
+					router, err := newDeviceRouter(testDevice, []*coordinatorLoop{loop})
 					if err != nil {
 						cancel()
 						t.Fatal(err)
 					}
-					done := make(chan error, 1)
-					go func() { done <- loop.run() }()
-					defer func() {
-						cancel()
-						if err := <-done; err != nil {
-							t.Error(err)
-						}
-					}()
+					startLoops(t, cancel, []*coordinatorLoop{loop})
 					if _, err := loop.HandleDesiredRunnerCount(t.Context(), demand); err != nil {
 						t.Fatal(err)
 					}
@@ -317,7 +385,7 @@ func TestRestoredLocalAssignmentHoldsSharedCapacityUntilAcknowledged(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	queue := newDeviceQueue()
+	queue := newDeviceQueue(nil)
 	if err := queue.restore(saved); err != nil {
 		t.Fatal(err)
 	}
@@ -367,22 +435,11 @@ func TestConcurrentRepositoryDemandCannotDuplicateLocalCapacity(t *testing.T) {
 		loops = append(loops, newCoordinatorLoop(ctx, worker))
 		worlds = append(worlds, world)
 	}
-	router, err := newDeviceRouter(testDevice, ctx.Done(), loops)
+	router, err := newDeviceRouter(testDevice, loops)
 	if err != nil {
 		t.Fatal(err)
 	}
-	finished := make(chan error, len(loops))
-	for _, loop := range loops {
-		go func() { finished <- loop.run() }()
-	}
-	defer func() {
-		cancel()
-		for range loops {
-			if err := <-finished; err != nil {
-				t.Error(err)
-			}
-		}
-	}()
+	startLoops(t, cancel, loops)
 	router.queue.pollNow()
 	start := make(chan struct{})
 	results := make(chan error, len(loops))

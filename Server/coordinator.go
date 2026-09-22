@@ -12,6 +12,7 @@ import (
 )
 
 type runnerAPI interface {
+	GetRunnerScaleSetByID(context.Context, int) (*scaleset.RunnerScaleSet, error)
 	GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
 	GetRunnerByName(context.Context, string) (*scaleset.RunnerReference, error)
 	RemoveRunner(context.Context, int64) error
@@ -36,6 +37,7 @@ type coordinator struct {
 	logger            *slog.Logger
 	device            *deviceQueue
 	reportedLocalHold string
+	refreshDemand     bool
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
@@ -63,12 +65,22 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, err
 	}
 	if c.state.Lease != nil {
+		local := c.state.Lease.Local
+		if count <= 0 && local != nil && local.Phase == localIssued && !local.JobStarted && !local.expired() {
+			// Retract idle startup authorization, not the obligation to confirm
+			// guest destruction. A busy runner can still renew an actual job.
+			next := *local
+			next.Expires = time.Now().UTC()
+			if err := c.saveLocal(&next, ""); err != nil {
+				return 1, err
+			}
+		}
 		// Without issued credentials, an offer cannot have consumed the reported demand.
 		reoffer := c.state.Config.LocalOnly && c.state.Lease.Local != nil && c.state.Lease.Local.Phase != localIssued
 		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent && (c.state.Lease.Local == nil || c.state.Lease.Local.Phase != localIssued)
 		done, err := c.reconcile(ctx, recoverOnly)
 		if err != nil && c.state.Lease != nil && c.state.Lease.Local != nil && c.state.Lease.CleanupIntent && transientFailure(err) {
-			c.logger.Warn("Local cleanup will retry on the next reconciliation", "runner", c.state.Lease.Name, "error", err)
+			c.logger.Warn("Local cleanup retained for retry", "runner", c.state.Lease.Name, "retry_delay", cleanupRetryDelay, "error", err)
 			return 1, nil
 		}
 		if err != nil || !done {
@@ -78,18 +90,31 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 			return 0, nil
 		}
 	}
+	if count > 0 && c.refreshDemand {
+		// Listener long-poll timeouts replay cached counts, including the job
+		// just cleaned up. Read current statistics before reserving another slot.
+		set, err := c.runners.GetRunnerScaleSetByID(ctx, c.state.ScaleSetID)
+		if err != nil {
+			return 0, &sdkError{"refresh demand after cleanup", err}
+		}
+		if set == nil || set.ID != c.state.ScaleSetID || set.Statistics == nil || set.Statistics.TotalAssignedJobs < 0 {
+			return 0, errors.New("invalid scale set statistics after cleanup")
+		}
+		count = set.Statistics.TotalAssignedJobs
+	}
 	if count <= 0 {
 		c.device.forget(c.state.Owner)
 		return 0, nil
+	}
+	if c.state.Config.LocalOnly {
+		c.device.wait(c.state.Owner)
 	}
 	local := c.state.Config.DeviceID != "" && c.device.claim(c.state.Owner)
 	if !local && c.state.Config.LocalOnly {
 		return 0, nil
 	}
-	if !local {
-		c.device.forget(c.state.Owner)
-	}
 	c.state.Lease = &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
+	c.refreshDemand = false
 	if local {
 		c.state.Lease.Local = &localLease{DeviceID: c.state.Config.DeviceID, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
 	}
@@ -329,6 +354,9 @@ func (c *coordinator) cleanup(ctx context.Context) error {
 		return err
 	}
 	*c.state = next
+	if l.RunnerID != 0 || l.DispatchIntent || (l.Local != nil && l.Local.Phase == localIssued) {
+		c.refreshDemand = true
+	}
 	c.device.update(c.state)
 	return nil
 }
