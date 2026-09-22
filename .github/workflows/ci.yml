@@ -36,10 +36,15 @@ jobs:
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
 
+      - name: Build coordinator protocol fixture
+        working-directory: Server
+        run: go test -c -o ../.build/coordinator-protocol-test
+
       - name: Test with the bundled relay (no VM)
         # Parallel execution currently hits timing failures in lifecycle tests.
         env:
           YIELDD_TEST_RELAY: ${{ github.workspace }}/.build/yieldd.app/Contents/Helpers/yieldd-network-relay
+          YIELDD_TEST_COORDINATOR: ${{ github.workspace }}/.build/coordinator-protocol-test
         run: swift test --no-parallel
 
   bootstrap:
