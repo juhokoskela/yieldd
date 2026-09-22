@@ -5,6 +5,7 @@ prototype_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$prototype_dir/../.." && pwd)"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
+bash "$repo_root/Scripts/test-prepare-patched-source.sh"
 bash "$prototype_dir/prepare.sh"
 cd "$prototype_dir"
 go test -race -timeout 90s ./...

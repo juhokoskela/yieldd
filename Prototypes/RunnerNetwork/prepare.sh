@@ -8,7 +8,13 @@ source "$repo_root/Scripts/prepare-patched-source.sh"
 bash "$repo_root/Scripts/build-network-relay.sh"
 prepare_checkout https://github.com/apple/container.git \
     a9a62e28f6beb88940122a3d7b286f2d5ae8053a \
-    "$repo_root/.build/network-container" "$prototype_dir/container.patch"
+    "$repo_root/.build/network-container" "$prototype_dir/container.patch" \
+    .build \
+    Sources/Services/RuntimeLinux/Server/PacketSocket.swift \
+    Sources/YielddNetworkProbe/LinuxProbe.swift \
+    Sources/YielddNetworkProbe/RunnerNetworkRelay.swift \
+    Tests/YielddNetworkPrototypeTests/MacProbeLifecycle.swift \
+    Tests/YielddNetworkPrototypeTests/MacProbeLifecycleTests.swift
 
 copy_source() {
     local source="$1" destination="$2"
