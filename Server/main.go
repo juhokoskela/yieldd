@@ -100,6 +100,7 @@ func run() error {
 			slog.Warn("Device HTTP is unencrypted; restrict the container's published port to host loopback and use an HTTPS proxy")
 		}
 		server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+		server.BaseContext = func(net.Listener) context.Context { return ctx }
 		done := make(chan struct{})
 		go func() {
 			defer close(done)

@@ -70,7 +70,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if err != nil {
 		return nil, &sdkError{"open message session", err}
 	}
-	p.messages, err = listener.New(p.session, listener.Config{ScaleSetID: id, MaxRunners: 1})
+	p.messages, err = listener.New(shutdownAwareListenerClient{Client: p.session, lifetime: loopContext}, listener.Config{ScaleSetID: id, MaxRunners: 1})
 	if err != nil {
 		return nil, err
 	}
