@@ -11,16 +11,19 @@ struct MacOSGuestSSH {
     private let privateKeyURL: URL
     private let knownHostsURL: URL
     private let executor: any ProcessExecuting
+    private let port: UInt16
 
     init(
         templateURL: URL,
         executableURL: URL = URL(fileURLWithPath: "/usr/bin/ssh"),
+        port: UInt16 = 22,
         executor: any ProcessExecuting
     ) {
         self.executableURL = executableURL
         privateKeyURL = templateURL.appendingPathComponent(Self.privateKeyFilename)
         knownHostsURL = templateURL.appendingPathComponent(Self.knownHostsFilename)
         self.executor = executor
+        self.port = port
     }
 
     static func validateTemplate(at templateURL: URL) throws {
@@ -93,6 +96,7 @@ struct MacOSGuestSSH {
             executableURL: executableURL,
             arguments: [
                 "-F", "/dev/null",
+                "-p", String(port),
                 "-i", privateKeyURL.path,
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=\(max(1, Int(min(timeout ?? 10, 10).rounded(.up))))",
@@ -208,6 +212,26 @@ struct MacOSGuestConnection {
             checkCancellation: checkCancellation,
             wait: wait
         )
+        try waitUntilReady(address: address, deadline: deadline, checkCancellation: checkCancellation, wait: wait)
+        return address
+    }
+
+    func waitUntilReady(
+        address: String,
+        timeout: TimeInterval = Self.readinessTimeout,
+        checkCancellation: () throws -> Void = {},
+        wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:)
+    ) throws {
+        precondition(timeout.isFinite && timeout > 0)
+        try waitUntilReady(address: address, deadline: currentTime() + timeout, checkCancellation: checkCancellation, wait: wait)
+    }
+
+    private func waitUntilReady(
+        address: String,
+        deadline: TimeInterval,
+        checkCancellation: () throws -> Void,
+        wait: (TimeInterval) throws -> Void
+    ) throws {
         try waitForSSH(
             address: address,
             deadline: deadline,
@@ -232,7 +256,6 @@ struct MacOSGuestConnection {
             checkCancellation: checkCancellation,
             wait: wait
         )
-        return address
     }
 
     private func waitForAddress(

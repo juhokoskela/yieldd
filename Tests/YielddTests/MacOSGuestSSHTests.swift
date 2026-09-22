@@ -28,6 +28,7 @@ func guestSSHBuildsCompleteTransportAndValidationCommands() throws {
 
     let arguments = [
         "-F", "/dev/null",
+        "-p", "22",
         "-i", template.privateKeyURL.path,
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=5",
@@ -195,6 +196,25 @@ func guestConnectionWaitsForDHCPAndRetriesSSHTransport() throws {
     #expect(transportAttempts == 2)
     #expect(validationAttempts == 1)
     #expect(clock.waits == [0.5, 0.5])
+}
+
+@Test
+func guestConnectionUsesRelayEndpointWithoutDHCP() throws {
+    let resolver = StubGuestAddressResolver(addresses: [])
+    let clock = GuestConnectionClock()
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(status: 255)), .success(processResult()), .success(processResult()),
+    ])
+    let connection = MacOSGuestConnection(
+        resolver: resolver,
+        ssh: MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), port: 49231, executor: executor),
+        currentTime: clock.read
+    )
+    try connection.waitUntilReady(address: "127.0.0.1", wait: clock.wait)
+    #expect(resolver.calls == 0)
+    #expect(clock.waits == [0.5])
+    #expect(executor.requests.count == 3)
+    #expect(executor.requests.allSatisfy { $0.arguments.contains("runner@127.0.0.1") && $0.arguments.contains("49231") })
 }
 
 @Test
