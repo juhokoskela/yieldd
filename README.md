@@ -102,7 +102,9 @@ macOS runners have the `yieldd-macos` label and no default labels. Their names s
 
 `machine-test`, `runner-test`, `serve`, and the local agent cannot run at the same time. They share one runner lock. GitHub runner sessions record active runners in `~/Library/Application Support/yieldd/active-runner.json` without storing credentials. After a crash, forced termination, or reboot, `runner-test`, `serve`, the local agent, and macOS `machine-test` recover those exact runners before creating another machine. Linux `machine-test` does not perform recovery. If GitHub still considers an interrupted runner busy, recovery keeps its lease and waits with exponential backoff until GitHub releases it.
 
-Recovery records the platform of each runner; older leases without a platform are treated as Linux. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased clones from the configured volume's `macos-runners/` and `macos-probes/`, leaving unrelated files and symbolic links untouched.
+Recovery requires an explicit platform in every runner lease. For macOS leases, recovery removes the GitHub registration and disposable clone without loading a template or attempting SSH. Before new runner slots start, it also removes unleased clones from the configured volume's `macos-runners/` and `macos-probes/`, leaving unrelated files and symbolic links untouched.
+
+Leases without `platform` and agent configurations without `macOSRepositories` are no longer accepted. Before upgrading from those formats, use the previous version to recover outstanding runners and uninstall the old agent, then reinstall the agent after upgrading. Never delete unresolved leases to bypass recovery.
 
 Before upgrading from an unconfigured storage layout, finish outstanding cleanup with the previous version. This version requires `storage.json` for disk cleanup and does not search or migrate legacy Container roots or clone directories. See the [storage setup instructions](Docs/runner-storage.md#set-up-a-mac).
 

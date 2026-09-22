@@ -95,7 +95,7 @@ struct AgentConfigurationStore {
             return try AgentConfiguration(
                 runners: RunnerServiceConfiguration(
                     repositories: stored.repositories.map(GitHubRepository.init),
-                    macOSRepositories: (stored.macOSRepositories ?? []).map(GitHubRepository.init),
+                    macOSRepositories: stored.macOSRepositories.map(GitHubRepository.init),
                     macOSTemplateURL: stored.macOSTemplate.map { URL(fileURLWithPath: $0) }
                 ),
                 containerURL: stored.containerExecutable.map { URL(fileURLWithPath: $0) },
@@ -161,7 +161,7 @@ enum AgentConfigurationError: Error, Equatable, LocalizedError {
 
 private struct StoredAgentConfiguration: Codable {
     let repositories: [String]
-    let macOSRepositories: [String]?
+    let macOSRepositories: [String]
     let macOSTemplate: String?
     let containerExecutable: String?
     let githubCLIExecutable: String
