@@ -28,7 +28,6 @@ func guestSSHBuildsCompleteTransportAndValidationCommands() throws {
 
     let arguments = [
         "-F", "/dev/null",
-        "-p", "22",
         "-i", template.privateKeyURL.path,
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=5",
@@ -207,14 +206,38 @@ func guestConnectionUsesRelayEndpointWithoutDHCP() throws {
     ])
     let connection = MacOSGuestConnection(
         resolver: resolver,
-        ssh: MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), port: 49231, executor: executor),
+        ssh: MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), socketURL: URL(fileURLWithPath: "/private/relay/n.ssh"), executor: executor),
         currentTime: clock.read
     )
-    try connection.waitUntilReady(address: "127.0.0.1", wait: clock.wait)
+    try connection.waitUntilReady(wait: clock.wait)
     #expect(resolver.calls == 0)
     #expect(clock.waits == [0.5])
     #expect(executor.requests.count == 3)
-    #expect(executor.requests.allSatisfy { $0.arguments.contains("runner@127.0.0.1") && $0.arguments.contains("49231") })
+    #expect(executor.requests.allSatisfy {
+        $0.arguments.contains("runner@yieldd-macos-template") &&
+        $0.arguments.contains("ProxyCommand=/usr/bin/nc -U '/private/relay/n.ssh'")
+    })
+}
+
+@Test
+func guestSSHQuotesUnixSocketForOpenSSHAndTheProxyShell() throws {
+    let path = "/private/socket ' \" %h $(printf injected) `printf injected` \\ end"
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let ssh = MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), socketURL: URL(fileURLWithPath: path), executor: executor)
+    try ssh.execute(["true"], timeout: 5, outputCapture: .tail(maxBytes: 1024))
+    let request = try #require(executor.requests.first)
+    let proxy = try #require(request.arguments.first { $0.hasPrefix("ProxyCommand=") })
+    #expect(proxy.contains("%%h"))
+    // OpenSSH expands %% to % before passing ProxyCommand to the shell.
+    let argument = String(proxy.dropFirst("ProxyCommand=/usr/bin/nc -U ".count))
+        .replacingOccurrences(of: "%%", with: "%")
+    let result = try ProcessExecutor().execute(ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf '%s' " + argument], timeout: 5
+    ))
+    #expect(result.terminationStatus == 0)
+    #expect(result.stdoutText == path)
+    #expect(request.arguments.contains("StrictHostKeyChecking=yes"))
+    #expect(request.arguments.contains("HostKeyAlias=yieldd-macos-template"))
 }
 
 @Test

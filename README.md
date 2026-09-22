@@ -24,7 +24,7 @@ container system start --app-root /Volumes/YielddRunners/container
 
 For macOS-only checks, use the signed application with `doctor --template /absolute/path/VM.bundle`. This checks virtualization support, signing entitlement, the bundled network relay, template files and location, memory capacity, and GitHub authentication without requiring Apple Container. It does not boot a guest; use `machine-test` for SSH, GUI, and simulator validation.
 
-macOS runner commands use a separate network relay per VM, with pinned SSH through a loopback port and no NAT fallback. Build the signed app with `Scripts/build-local-app.sh`; a bare `swift build` does not package the helper. The relay permits public IPv4 TCP/UDP, filters host and private destinations, and uses a fixed public DNS resolver. IPv6, LAN/VPN DNS, and local service access are unavailable. This integration still needs live runner validation. Linux runner networking and the manual `agent vm-probe` remain unchanged. See [runner boundaries](Docs/runner-boundaries.md) for limitations.
+macOS runner commands use a separate network relay per VM, with pinned SSH through a user-private Unix socket and no NAT fallback. Build the signed app with `Scripts/build-local-app.sh`; a bare `swift build` does not package the helper. The relay permits public IPv4 TCP/UDP, filters host and private destinations, and uses a fixed public DNS resolver. IPv6, LAN/VPN DNS, and local service access are unavailable. This integration still needs live runner validation. Linux runner networking and the manual `agent vm-probe` remain unchanged. See [runner boundaries](Docs/runner-boundaries.md) for limitations.
 
 Authenticate the GitHub CLI if needed:
 

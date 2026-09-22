@@ -7,10 +7,10 @@ import Testing
     @Test func readinessAndIdempotentShutdown() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat")
-        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
+        let executable = try fixture.script("printf '%s\\n' '\(fixture.ready)'\nexec /bin/cat")
+        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
         let directory = relay.socketURL.deletingLastPathComponent()
-        #expect(relay.sshPort == 12345)
+        #expect(relay.sshSocketURL == fixture.directory.appendingPathComponent("n.ssh"))
         try relay.check()
         let permissions = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
         #expect(permissions?.intValue == 0o700)
@@ -32,7 +32,7 @@ import Testing
         defer { fixture.remove() }
         let executable = try fixture.script("printf '%s\\n' '\(payload)'\nexec /bin/cat")
         do {
-            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
+            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
             Issue.record("Accepted invalid relay readiness")
         } catch RunnerNetworkRelayError.invalidReadiness {}
         try fixture.requireExited()
@@ -44,7 +44,7 @@ import Testing
         defer { fixture.remove() }
         let executable = try fixture.script("exec /bin/cat")
         do {
-            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root, startupTimeout: 0.1)
+            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory, startupTimeout: 0.1)
             Issue.record("Accepted a relay without readiness")
         } catch RunnerNetworkRelayError.startupTimedOut {}
         try fixture.requireExited()
@@ -56,7 +56,7 @@ import Testing
         defer { fixture.remove() }
         let executable = try fixture.script("exec /bin/cat >/dev/null")
         do {
-            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
+            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
             Issue.record("Accepted a relay that closed readiness without a response")
         } catch RunnerNetworkRelayError.invalidReadiness {}
         try fixture.requireExited()
@@ -69,7 +69,7 @@ import Testing
         let executable = try fixture.script("exec /bin/cat")
         struct Cancelled: Error {}
         do {
-            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root, checkCancellation: {
+            _ = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory, checkCancellation: {
                 if FileManager.default.fileExists(atPath: fixture.pid.path) { throw Cancelled() }
             })
             Issue.record("Startup ignored cancellation")
@@ -82,7 +82,7 @@ import Testing
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
         #expect(throws: (any Error).self) {
-            try RunnerNetworkRelay.start(executableURL: fixture.root.appendingPathComponent("absent"), directory: fixture.root)
+            try RunnerNetworkRelay.start(executableURL: fixture.root.appendingPathComponent("absent"), directory: fixture.directory)
         }
         #expect(try fixture.relayDirectories().isEmpty)
     }
@@ -90,8 +90,8 @@ import Testing
     @Test func forceStopsAChildIgnoringEOFAndTERM() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("trap '' TERM\nprintf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /usr/bin/tail -f /dev/null")
-        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
+        let executable = try fixture.script("trap '' TERM\nprintf '%s\\n' '\(fixture.ready)'\nexec /usr/bin/tail -f /dev/null")
+        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
         try relay.stop()
         try fixture.requireExited()
         #expect(try fixture.relayDirectories().isEmpty)
@@ -100,9 +100,9 @@ import Testing
     @Test func droppingTheOwnerStopsItsChild() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat")
+        let executable = try fixture.script("printf '%s\\n' '\(fixture.ready)'\nexec /bin/cat")
         do {
-            let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
+            let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
             try relay.check()
             withExtendedLifetime(relay) {}
         }
@@ -110,11 +110,43 @@ import Testing
         #expect(try fixture.relayDirectories().isEmpty)
     }
 
+    @Test(arguments: [0.0, 0.1])
+    func shutdownRespectsTheRemainingBudget(seconds: TimeInterval) throws {
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let executable = try fixture.script("trap '' TERM\nprintf '%s\\n' '\(fixture.ready)'\nexec /usr/bin/tail -f /dev/null")
+        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
+        defer { try? relay.stop() }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            try relay.stop(deadline: .now() + seconds)
+            #expect(try fixture.relayDirectories().isEmpty)
+        } catch RunnerNetworkRelayError.stopTimedOut {
+            #expect(FileManager.default.fileExists(atPath: fixture.directory.path))
+        }
+        #expect(ProcessInfo.processInfo.systemUptime - started < seconds + 0.25)
+        // A later cleanup attempt gets a fresh budget and confirms termination.
+        try relay.stop()
+        try fixture.requireExited()
+        #expect(try fixture.relayDirectories().isEmpty)
+    }
+
+    @Test func doesNotAdoptOrRemoveNonemptyDirectory() throws {
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let retained = fixture.directory.appendingPathComponent("retained")
+        try Data("existing".utf8).write(to: retained)
+        #expect(throws: POSIXError(.ENOTEMPTY)) {
+            try RunnerNetworkRelay.start(executableURL: URL(fileURLWithPath: "/usr/bin/true"), directory: fixture.directory)
+        }
+        #expect(try String(contentsOf: retained, encoding: .utf8) == "existing")
+    }
+
     @Test func reportsUnexpectedExitAndStillCleansUp() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let executable = try fixture.script("printf '%s\\n' '\(RelayProcessFixture.ready)'\nexec /bin/cat")
-        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.root)
+        let executable = try fixture.script("printf '%s\\n' '\(fixture.ready)'\nexec /bin/cat")
+        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
         defer { try? relay.stop() }
         #expect(kill(try fixture.processID(), SIGKILL) == 0)
         let deadline = ProcessInfo.processInfo.systemUptime + 2
@@ -140,7 +172,7 @@ import Testing
         let relay = try RunnerNetworkRelay.start(executableURL: URL(fileURLWithPath: executable))
         defer { try? relay.stop() }
         try relay.check()
-        #expect(relay.sshPort > 0)
+        #expect(FileManager.default.fileExists(atPath: relay.sshSocketURL.path))
         var info = stat()
         #expect(lstat(relay.socketURL.path, &info) == 0)
         #expect(info.st_mode & S_IFMT == S_IFSOCK)
@@ -150,8 +182,9 @@ import Testing
 }
 
 private struct RelayProcessFixture {
-    static let ready = "{\"version\":1,\"ssh\":\"127.0.0.1:12345\"}"
+    var ready: String { "{\"version\":2,\"ssh\":\"\(directory.path)/n.ssh\"}" }
     let root: URL
+    var directory: URL { root.appendingPathComponent("net") }
     var pid: URL { root.appendingPathComponent("pid") }
 
     init() throws {
@@ -159,6 +192,7 @@ private struct RelayProcessFixture {
         if parent.path.utf8.count + 48 >= 104 { parent = URL(fileURLWithPath: "/tmp") }
         root = parent.appendingPathComponent("yrt-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     }
 
     func script(_ body: String) throws -> URL {
@@ -170,7 +204,7 @@ private struct RelayProcessFixture {
     }
 
     func relayDirectories() throws -> [String] {
-        try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix("yieldd-net-") }
+        try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0 == "net" }
     }
 
     func processID() throws -> Int32 {

@@ -5,16 +5,15 @@ import Foundation
 // is a lifetime pipe: only this owner holds its write end, marked close-on-exec.
 final class RunnerNetworkRelay: @unchecked Sendable {
     let socketURL: URL
+    let sshSocketURL: URL
     private let directoryURL: URL
     private let process = Process()
     private let lifetime = Pipe()
     private let readiness = Pipe()
     private let lock = NSLock()
-    private var port: UInt16 = 0
+    private var shutdownDeadline: DispatchTime?
     private var launched = false
     private var removed = false
-
-    var sshPort: UInt16 { lock.withLock { port } }
 
     static func start(
         executableURL: URL,
@@ -39,18 +38,23 @@ final class RunnerNetworkRelay: @unchecked Sendable {
     }
 
     private init(executableURL: URL, directory: URL?) throws {
-        var parent = directory ?? FileManager.default.temporaryDirectory
-        if directory == nil, parent.path.utf8.count + 33 >= 104 {
-            parent = URL(fileURLWithPath: "/tmp", isDirectory: true)
-        }
-        let path = parent.appendingPathComponent("yieldd-net-XXXXXX").path
-        guard path.utf8.count + "/network.sock.vm".utf8.count < 104 else {
+        let path = try directory?.path ?? Self.userTemporaryDirectory().appendingPathComponent("yn-XXXXXX").path
+        guard path.utf8.count + "/n.ssh".utf8.count < 104 else {
             throw RunnerNetworkRelayError.socketPathTooLong
         }
-        var template = Array(path.utf8CString)
-        guard mkdtemp(&template) != nil else { throw Self.posixError() }
-        directoryURL = URL(fileURLWithPath: String(decoding: template.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self))
-        socketURL = directoryURL.appendingPathComponent("network.sock")
+        if let directory {
+            try Self.requirePrivateDirectory(directory)
+            guard try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty else {
+                throw POSIXError(.ENOTEMPTY)
+            }
+            directoryURL = directory
+        } else {
+            var template = Array(path.utf8CString)
+            guard mkdtemp(&template) != nil else { throw Self.posixError() }
+            directoryURL = URL(fileURLWithPath: String(decoding: template.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        }
+        socketURL = directoryURL.appendingPathComponent("n")
+        sshSocketURL = socketURL.appendingPathExtension("ssh")
         process.executableURL = executableURL
         process.arguments = ["--socket", socketURL.path]
         process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
@@ -85,12 +89,10 @@ final class RunnerNetworkRelay: @unchecked Sendable {
                 guard payload.count <= 1_024 else { throw RunnerNetworkRelayError.invalidReadiness }
                 if payload.contains(10) {
                     struct Ready: Decodable { let version: Int; let ssh: String }
-                    guard let ready = try? JSONDecoder().decode(Ready.self, from: payload), ready.version == 1,
-                          ready.ssh.hasPrefix("127.0.0.1:"),
-                          let port = UInt16(ready.ssh.dropFirst("127.0.0.1:".count)), port > 0
+                    guard let ready = try? JSONDecoder().decode(Ready.self, from: payload), ready.version == 2,
+                          ready.ssh == sshSocketURL.path
                     else { throw RunnerNetworkRelayError.invalidReadiness }
                     try requireRunningLocked()
-                    self.port = port
                     return
                 }
             } else if count == 0 {
@@ -112,19 +114,20 @@ final class RunnerNetworkRelay: @unchecked Sendable {
         }
     }
 
-    func stop() throws {
+    func stop(deadline: DispatchTime? = nil) throws {
         try lock.withLock {
             guard !removed else { return }
+            shutdownDeadline = deadline
             try? lifetime.fileHandleForWriting.close()
             if launched, process.isRunning {
-                waitForExit(seconds: 1)
+                waitForExit(seconds: 1, deadline: deadline)
                 if process.isRunning {
                     process.terminate()
-                    waitForExit(seconds: 1)
+                    waitForExit(seconds: 1, deadline: deadline)
                 }
                 if process.isRunning {
                     guard kill(process.processIdentifier, SIGKILL) == 0 || errno == ESRCH else { throw Self.posixError() }
-                    waitForExit(seconds: 2)
+                    waitForExit(seconds: 2, deadline: deadline)
                 }
                 guard !process.isRunning else { throw RunnerNetworkRelayError.stopTimedOut }
             }
@@ -136,14 +139,35 @@ final class RunnerNetworkRelay: @unchecked Sendable {
         }
     }
 
-    private func waitForExit(seconds: TimeInterval) {
-        let deadline = ProcessInfo.processInfo.systemUptime + seconds
-        while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
+    private func waitForExit(seconds: TimeInterval, deadline: DispatchTime?) {
+        let end = min(DispatchTime.now() + seconds, deadline ?? .distantFuture)
+        while process.isRunning {
+            let now = DispatchTime.now()
+            guard now < end else { return }
+            Thread.sleep(forTimeInterval: min(0.01, Double(end.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000_000))
         }
     }
 
-    deinit { try? stop() }
+    deinit { try? stop(deadline: shutdownDeadline) }
+
+    // Ignore TMPDIR: this OS-provided parent is private to the current user and
+    // short enough for Unix sockets. Shared /tmp permits cross-user squatting.
+    static func userTemporaryDirectory() throws -> URL {
+        let size = confstr(_CS_DARWIN_USER_TEMP_DIR, nil, 0)
+        guard size > 0 else { throw posixError() }
+        var path = [CChar](repeating: 0, count: size)
+        guard confstr(_CS_DARWIN_USER_TEMP_DIR, &path, size) == size else { throw posixError() }
+        let url = URL(fileURLWithPath: String(decoding: path.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        try requirePrivateDirectory(url)
+        return url
+    }
+
+    static func requirePrivateDirectory(_ url: URL) throws {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { throw posixError() }
+        guard info.st_mode & S_IFMT == S_IFDIR, info.st_mode & 0o777 == 0o700,
+              info.st_uid == getuid() else { throw POSIXError(.EACCES) }
+    }
 
     private static func posixError() -> POSIXError {
         POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)

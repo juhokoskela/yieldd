@@ -437,7 +437,7 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
     let macID = RunnerID(value: "yieldd-aaa-macos")
-    let network = RunnerNetworkDirectories(stateDirectory: stateDirectory)
+    let network = try RunnerNetworkDirectories(stateDirectory: stateDirectory)
     defer { try? FileManager.default.removeItem(at: network.rootURL) }
     let leasedSocketDirectory = try network.create(for: macID)
     let orphanSocketDirectory = try network.create(for: RunnerID(value: "yieldd-network-orphan"))

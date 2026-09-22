@@ -4,13 +4,13 @@ import Testing
 import Virtualization
 @testable import Yieldd
 
-extension RunnerNetworkRelayTests {
+@Suite struct MacOSRunnerNetworkTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"] != nil))
-    func actualMacOSBackendRelayAttachmentAndCleanup() throws {
+    func realRelayAttachmentAndCleanupWithFakeVM() throws {
         let executable = try #require(ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"])
         let fixture = try ProbeBundleFixture()
         defer { fixture.remove() }
-        let directories = RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
+        let directories = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
         defer { try? FileManager.default.removeItem(at: directories.rootURL) }
         let machine = ProbeVirtualMachine()
         let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2))
@@ -19,7 +19,8 @@ extension RunnerNetworkRelayTests {
             stateDirectory: fixture.rootURL, templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
             executor: executor,
             network: MacOSRunnerNetwork(stateDirectory: fixture.rootURL, executableURL: URL(fileURLWithPath: executable)),
-            requireEntitlement: {}, loadStorage: { nil }, makeMachine: { _, _, path in
+            requireEntitlement: {}, requireRelay: { try MacOSRunnerNetwork.requireRelay(at: URL(fileURLWithPath: executable)) },
+            loadStorage: { nil }, makeMachine: { _, _, path in
                 socket = try PacketSocket(path: path.path)
                 return machine
             }
@@ -31,9 +32,8 @@ extension RunnerNetworkRelayTests {
         #expect(device.attachment is VZFileHandleNetworkDeviceAttachment)
         #expect(device.macAddress.string == "02:00:00:00:00:02")
         let request = try #require(executor.requests.first)
-        let portIndex = try #require(request.arguments.firstIndex(of: "-p"))
-        #expect(UInt16(request.arguments[portIndex + 1]) != 0)
-        #expect(request.arguments.contains("runner@127.0.0.1"))
+        #expect(request.arguments.contains { $0.hasPrefix("ProxyCommand=/usr/bin/nc -U '") })
+        #expect(request.arguments.contains("runner@yieldd-macos-template"))
         try backend.destroy(id)
         socket = nil
         #expect(machine.isStopped)
@@ -46,8 +46,10 @@ extension RunnerNetworkRelayTests {
 func runnerNetworkDirectoriesArePrivateShortAndRecoverable() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
-    let store = RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
+    let store = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
+    #expect(try store.rootURL.deletingLastPathComponent() == RunnerNetworkRelay.userTemporaryDirectory())
+    try RunnerNetworkRelay.requirePrivateDirectory(store.rootURL.deletingLastPathComponent())
     let first = RunnerID(value: "yieldd-network-first")
     let second = RunnerID(value: "yieldd-network-second")
     let kept = try store.create(for: first)
@@ -58,8 +60,8 @@ func runnerNetworkDirectoriesArePrivateShortAndRecoverable() throws {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
         #expect((attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid())
     }
-    #expect(kept.appendingPathComponent("yieldd-net-XXXXXX/network.sock.vm").path.utf8.count < 104)
-    let recovered = RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
+    #expect(kept.appendingPathComponent("n.ssh").path.utf8.count < 104)
+    let recovered = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
     #expect(recovered.rootURL == store.rootURL)
     try recovered.removeUnleased(keeping: [first])
     #expect(FileManager.default.fileExists(atPath: kept.path))
@@ -67,14 +69,14 @@ func runnerNetworkDirectoriesArePrivateShortAndRecoverable() throws {
     try recovered.remove(first)
     try recovered.remove(first)
     #expect(try FileManager.default.contentsOfDirectory(atPath: store.rootURL.path).isEmpty)
-    #expect(RunnerNetworkDirectories(stateDirectory: fixture.rootURL.appendingPathComponent("other")).rootURL != store.rootURL)
+    #expect(try RunnerNetworkDirectories(stateDirectory: fixture.rootURL.appendingPathComponent("other")).rootURL != store.rootURL)
 }
 
 @Test
 func runnerNetworkDirectoriesRejectReplacedPaths() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
-    let store = RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
+    let store = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
     let id = RunnerID(value: "yieldd-network-first")
     let directory = try store.create(for: id)
@@ -91,16 +93,15 @@ func runnerNetworkPreflightRejectsMissingHelperWithoutCreatingDirectories() thro
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let missing = fixture.rootURL.appendingPathComponent("missing-relay")
-    let network = MacOSRunnerNetwork(stateDirectory: fixture.rootURL, executableURL: missing)
-    #expect(throws: MacOSRunnerNetworkError.self) { try network.prepare() }
-    #expect(!FileManager.default.fileExists(atPath: RunnerNetworkDirectories(stateDirectory: fixture.rootURL).rootURL.path))
+    #expect(throws: MacOSRunnerNetworkError.self) { try MacOSRunnerNetwork.requireRelay(at: missing) }
+    #expect(!FileManager.default.fileExists(atPath: try RunnerNetworkDirectories(stateDirectory: fixture.rootURL).rootURL.path))
 }
 
 @Test
 func runnerNetworkOrphansAreRemovedEvenWhenCloneStorageIsMissing() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
-    let store = RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
+    let store = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
     let orphan = try store.create(for: RunnerID(value: "yieldd-network-orphan"))
     #expect(throws: RunnerSessionError.self) {

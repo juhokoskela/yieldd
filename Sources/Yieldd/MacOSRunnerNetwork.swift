@@ -4,15 +4,14 @@ import Foundation
 
 protocol RunnerNetworkRelaying: AnyObject {
     var socketURL: URL { get }
-    var sshPort: UInt16 { get }
+    var sshSocketURL: URL { get }
     func check() throws
-    func stop() throws
+    func stop(deadline: DispatchTime?) throws
 }
 
 extension RunnerNetworkRelay: RunnerNetworkRelaying {}
 
 protocol MacOSRunnerNetworking {
-    func prepare() throws
     func start(for id: RunnerID, checkCancellation: () throws -> Void) throws -> any RunnerNetworkRelaying
     func remove(_ id: RunnerID) throws
 }
@@ -21,20 +20,22 @@ struct MacOSRunnerNetwork: MacOSRunnerNetworking {
     private let executableURL: URL
     private let directories: RunnerNetworkDirectories
 
-    init(stateDirectory: URL, executableURL: URL? = nil) {
-        self.executableURL = executableURL ?? Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/yieldd-network-relay")
-        directories = RunnerNetworkDirectories(stateDirectory: stateDirectory)
+    static var bundledRelayURL: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/yieldd-network-relay")
     }
 
-    func prepare() throws {
+    init(stateDirectory: URL, executableURL: URL = bundledRelayURL) throws {
+        self.executableURL = executableURL
+        directories = try RunnerNetworkDirectories(stateDirectory: stateDirectory)
+    }
+
+    static func requireRelay(at executableURL: URL = bundledRelayURL) throws {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw MacOSRunnerNetworkError.missingRelay(executableURL.path)
         }
     }
 
     func start(for id: RunnerID, checkCancellation: () throws -> Void) throws -> any RunnerNetworkRelaying {
-        try prepare()
         return try RunnerNetworkRelay.start(
             executableURL: executableURL, directory: directories.create(for: id),
             checkCancellation: checkCancellation
@@ -50,9 +51,9 @@ struct MacOSRunnerNetwork: MacOSRunnerNetworking {
 struct RunnerNetworkDirectories {
     let rootURL: URL
 
-    init(stateDirectory: URL) {
-        rootURL = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
-            .appendingPathComponent("ydn-\(getuid())-\(Self.key(stateDirectory.resolvingSymlinksInPath().path).prefix(16))", isDirectory: true)
+    init(stateDirectory: URL) throws {
+        rootURL = try RunnerNetworkRelay.userTemporaryDirectory()
+            .appendingPathComponent("yn-\(Self.key(stateDirectory.resolvingSymlinksInPath().path).prefix(16))", isDirectory: true)
     }
 
     func create(for id: RunnerID) throws -> URL {

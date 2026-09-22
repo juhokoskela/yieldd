@@ -11,19 +11,19 @@ struct MacOSGuestSSH {
     private let privateKeyURL: URL
     private let knownHostsURL: URL
     private let executor: any ProcessExecuting
-    private let port: UInt16
+    private let socketURL: URL?
 
     init(
         templateURL: URL,
         executableURL: URL = URL(fileURLWithPath: "/usr/bin/ssh"),
-        port: UInt16 = 22,
+        socketURL: URL? = nil,
         executor: any ProcessExecuting
     ) {
         self.executableURL = executableURL
         privateKeyURL = templateURL.appendingPathComponent(Self.privateKeyFilename)
         knownHostsURL = templateURL.appendingPathComponent(Self.knownHostsFilename)
         self.executor = executor
-        self.port = port
+        self.socketURL = socketURL
     }
 
     static func validateTemplate(at templateURL: URL) throws {
@@ -59,7 +59,7 @@ struct MacOSGuestSSH {
 
     @discardableResult func execute(
         _ arguments: [String],
-        address: String,
+        address: String = Self.hostKeyAlias,
         standardInput: Data? = nil,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
@@ -94,9 +94,12 @@ struct MacOSGuestSSH {
     ) throws -> ProcessResult {
         let request = ProcessRequest(
             executableURL: executableURL,
-            arguments: [
+            arguments: (socketURL.map {
+                ["-o", "ProxyCommand=/usr/bin/nc -U '" + $0.path
+                    .replacingOccurrences(of: "'", with: "'\\''")
+                    .replacingOccurrences(of: "%", with: "%%") + "'"]
+            } ?? []) + [
                 "-F", "/dev/null",
-                "-p", String(port),
                 "-i", privateKeyURL.path,
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=\(max(1, Int(min(timeout ?? 10, 10).rounded(.up))))",
@@ -168,13 +171,13 @@ struct MacOSGuestConnection {
     static let retryDelay: TimeInterval = 0.5
     static let sshAttemptTimeout: TimeInterval = 5
 
-    private let resolver: any MacOSGuestAddressResolving
+    private let resolver: (any MacOSGuestAddressResolving)?
     private let checkTransport: (String, TimeInterval) throws -> Void
     private let validateGuest: (String, TimeInterval) throws -> Void
     private let currentTime: () -> TimeInterval
 
     init(
-        resolver: any MacOSGuestAddressResolving = MacOSGuestAddressResolver(),
+        resolver: (any MacOSGuestAddressResolving)? = nil,
         ssh: MacOSGuestSSH,
         currentTime: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
@@ -217,7 +220,7 @@ struct MacOSGuestConnection {
     }
 
     func waitUntilReady(
-        address: String,
+        address: String = MacOSGuestSSH.hostKeyAlias,
         timeout: TimeInterval = Self.readinessTimeout,
         checkCancellation: () throws -> Void = {},
         wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:)
@@ -264,6 +267,7 @@ struct MacOSGuestConnection {
         checkCancellation: () throws -> Void,
         wait: (TimeInterval) throws -> Void
     ) throws -> String {
+        let resolver = resolver ?? MacOSGuestAddressResolver()
         while true {
             try checkCancellation()
             let remaining = deadline - currentTime()

@@ -116,7 +116,7 @@ struct AgentInstallCommand: ParsableCommand {
         stateDirectory: URL? = nil,
         memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission(),
         loadStorage: ((URL) throws -> RunnerStorage?)? = nil,
-        network: (any MacOSRunnerNetworking)? = nil
+        requireRelay: () throws -> Void = { try MacOSRunnerNetwork.requireRelay() }
     ) throws {
         let slots = try runners.serviceConfiguration()
         try memoryAdmission.validateCapacity(reserving: slots.memoryReservationBytes)
@@ -127,7 +127,7 @@ struct AgentInstallCommand: ParsableCommand {
         if let templateURL = configuration.runners.macOSTemplateURL {
             if let storage { try storage.validateMacOS(template: templateURL, clones: storage.clonesURL) }
             try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory)
-            try (network ?? MacOSRunnerNetwork(stateDirectory: store.directory)).prepare()
+            try requireRelay()
         }
         guard !preflightOnly else {
             // Machine-readable result consumed by install-local-agent.sh.

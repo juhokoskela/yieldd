@@ -31,7 +31,7 @@ enum MacProbe {
         }
         let executable = URL(fileURLWithPath: CommandLine.arguments[3])
         let relay = try await Task.detached { try RunnerNetworkRelay.start(executableURL: executable) }.value
-        print("Packet relay SSH endpoint: 127.0.0.1:\(relay.sshPort)")
+        print("Packet relay SSH socket: \(relay.sshSocketURL.path)")
         do {
             try await runGuest(template: template, root: root, relay: relay)
         } catch {
@@ -68,7 +68,7 @@ enum MacProbe {
         config.bootLoader = VZMacOSBootLoader()
         config.cpuCount = 4
         config.memorySize = 8 * 1024 * 1024 * 1024
-        config.networkDevices = [try socket.device()]
+        config.networkDevices = [socket.device()]
         config.storageDevices = [
             VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: clone.appendingPathComponent("Disk.img"), readOnly: false))
         ]
