@@ -31,16 +31,20 @@ func (l lease) secretName() string {
 }
 
 type state struct {
-	Config     config `json:"config"`
-	Owner      string `json:"owner"`
-	ScaleSetID int    `json:"scale_set_id"`
-	Lease      *lease `json:"lease,omitempty"`
+	Config     config            `json:"config"`
+	Owner      string            `json:"owner"`
+	ScaleSetID int               `json:"scale_set_id"`
+	Leases     map[string]*lease `json:"leases,omitempty"`
 }
 
 type stateStore struct {
 	root *os.Root
 	lock *os.File
 }
+
+const maximumStateBytes = 2 << 20
+
+var previousVersionState = errors.New("single-assignment journal found; finish recovery with the previous coordinator version before upgrading; do not delete unresolved state")
 
 func openStore(path string) (*stateStore, error) {
 	if !filepath.IsAbs(path) {
@@ -92,17 +96,25 @@ func (s *stateStore) load(c config) (*state, error) {
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("state file must be private and regular")
 	}
-	if info.Size() > 2<<20 {
+	if info.Size() > maximumStateBytes {
 		return nil, errors.New("state file exceeded size limit")
 	}
 	var value state
-	decoder := json.NewDecoder(io.LimitReader(file, 2<<20))
+	// Recognize the old field only to give an actionable refusal, not to migrate it.
+	envelope := struct {
+		*state
+		PreviousLease json.RawMessage `json:"lease"`
+	}{state: &value}
+	decoder := json.NewDecoder(io.LimitReader(file, maximumStateBytes))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := decoder.Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("read coordinator state: %w", err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, errors.New("unexpected trailing state data")
+	}
+	if envelope.PreviousLease != nil {
+		return nil, previousVersionState
 	}
 	if value.Config != c {
 		return nil, errors.New("state belongs to a different configuration; recover with its original configuration and use a separate state directory for the new configuration")
@@ -110,10 +122,17 @@ func (s *stateStore) load(c config) (*state, error) {
 	if _, err := uuid.Parse(value.Owner); err != nil {
 		return nil, errors.New("invalid state owner")
 	}
-	if value.ScaleSetID < 0 || (value.Lease != nil && value.ScaleSetID == 0) {
+	if value.ScaleSetID < 0 || (len(value.Leases) != 0 && value.ScaleSetID == 0) {
 		return nil, errors.New("invalid scale set identity")
 	}
-	if l := value.Lease; l != nil {
+	if len(value.Leases) > maximumAssignments {
+		return nil, errors.New("too many saved assignments")
+	}
+	var slots [maximumAssignments]bool
+	for name, l := range value.Leases {
+		if l == nil || name != l.Name {
+			return nil, errors.New("invalid assignment identity")
+		}
 		if c.LocalOnly && l.Local == nil {
 			return nil, errors.New("local-only queue contains a fallback lease")
 		}
@@ -123,6 +142,12 @@ func (s *stateStore) load(c config) (*state, error) {
 		if err := l.validateLocal(c.DeviceID); err != nil {
 			return nil, err
 		}
+		if l.Local != nil {
+			if slots[l.Local.Slot] {
+				return nil, errors.New("multiple assignments occupy one worker slot")
+			}
+			slots[l.Local.Slot] = true
+		}
 	}
 	return &value, nil
 }
@@ -131,6 +156,9 @@ func (s *stateStore) save(value *state) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
+	}
+	if len(data) > maximumStateBytes {
+		return errors.New("state file exceeded size limit")
 	}
 	name := "state-" + uuid.NewString() + ".tmp"
 	file, err := s.root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -163,11 +191,11 @@ func (l *lease) validateLocal(device string) error {
 	if (a.JobCompleted && !a.JobStarted) || ((a.JobStarted || a.JobCompleted) && a.Phase != localIssued) {
 		return errors.New("invalid local job state")
 	}
-	if device == "" || a.DeviceID != device || a.Expires.IsZero() || l.DispatchIntent {
+	if device == "" || a.DeviceID != device || a.Slot < 0 || a.Slot >= maximumAssignments || a.Expires.IsZero() || l.DispatchIntent {
 		return errors.New("invalid local lease identity")
 	}
 	switch a.Phase {
-	case localOffered:
+	case localOffered, localDeclined:
 		if l.RunnerID != 0 || l.JIT != "" {
 			return errors.New("unaccepted offer has credentials")
 		}

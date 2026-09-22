@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -28,7 +30,9 @@ type bootstrapAPI interface {
 	runnerBusy(context.Context, string, int) (bool, error)
 }
 
-// The event loop serializes listener callbacks and device requests. The state-directory lock excludes another local owner.
+const maximumAssignments = 16
+
+// One event loop owns every assignment in a repository/platform queue.
 type coordinator struct {
 	state             *state
 	save              func(*state) error
@@ -36,186 +40,335 @@ type coordinator struct {
 	bootstrap         bootstrapAPI
 	logger            *slog.Logger
 	device            *deviceQueue
-	reportedLocalHold string
+	reportedLocalHold map[string]localPhase
 	refreshDemand     bool
+	paused            error
+}
+
+type assignment struct {
+	*coordinator
+	lease *lease
+}
+
+type journalWriteError struct{ cause error }
+
+func (e *journalWriteError) Error() string { return e.cause.Error() }
+func (e *journalWriteError) Unwrap() error { return e.cause }
+
+func isJournalWrite(err error) bool {
+	var journal *journalWriteError
+	return errors.As(err, &journal)
+}
+
+func (c *coordinator) hasFallback() bool {
+	for _, l := range c.state.Leases {
+		if l.Local == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *coordinator) hasPendingOffer() bool {
+	for _, l := range c.state.Leases {
+		if l.Local != nil && !l.CleanupIntent && l.Local.Phase != localIssued {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *coordinator) hasIssuedLocal() bool {
+	for _, l := range c.state.Leases {
+		if l.Local != nil && l.Local.Phase == localIssued {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *coordinator) assigned(name string) *assignment {
+	return &assignment{coordinator: c, lease: c.state.Leases[name]}
+}
+
+func (c *coordinator) names() []string {
+	return slices.Sorted(maps.Keys(c.state.Leases))
+}
+
+// Publish the complete journal before changing the event loop's view.
+func (a *assignment) replace(nextLease *lease) error {
+	next := *a.state
+	next.Leases = maps.Clone(a.state.Leases)
+	if next.Leases == nil {
+		next.Leases = make(map[string]*lease)
+	}
+	if nextLease == nil {
+		delete(next.Leases, a.lease.Name)
+	} else {
+		next.Leases[nextLease.Name] = nextLease
+	}
+	if err := a.save(&next); err != nil {
+		return &journalWriteError{err}
+	}
+	*a.state = next
+	a.lease = nextLease
+	a.device.update(a.state)
+	return nil
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
-	if err := c.recordLocalJob(job.RunnerName, job.RunnerID, false); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, false); err != nil {
 		return err
 	}
 	c.logger.Info("Job started", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID)
 	return nil
 }
+
 func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
-	if err := c.recordLocalJob(job.RunnerName, job.RunnerID, true); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, true); err != nil {
 		return err
 	}
 	c.logger.Info("Job completed", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID, "result", job.Result)
 	return nil
 }
 
-func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (actual int, err error) {
-	defer func() {
-		if err != nil {
-			err = &provisioningError{err}
+func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, error) {
+	var failures []error
+	for _, name := range c.names() {
+		if err := ctx.Err(); err != nil {
+			return false, errors.Join(append(failures, err)...)
 		}
-	}()
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if c.state.Lease != nil {
-		local := c.state.Lease.Local
-		if count <= 0 && local != nil && local.Phase == localIssued && !local.JobStarted && !local.expired() {
-			// Retract idle startup authorization, not the obligation to confirm
-			// guest destruction. A busy runner can still renew an actual job.
-			next := *local
-			next.Expires = time.Now().UTC()
-			if err := c.saveLocal(&next, ""); err != nil {
-				return 1, err
+		if _, err := c.assigned(name).reconcile(ctx, recoverOnly); err != nil {
+			failures = append(failures, err)
+			if isJournalWrite(err) {
+				return false, errors.Join(failures...)
 			}
 		}
-		// Without issued credentials, an offer cannot have consumed the reported demand.
-		reoffer := c.state.Config.LocalOnly && c.state.Lease.Local != nil && c.state.Lease.Local.Phase != localIssued
-		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent && (c.state.Lease.Local == nil || c.state.Lease.Local.Phase != localIssued)
-		done, err := c.reconcile(ctx, recoverOnly)
-		if err != nil && c.state.Lease != nil && c.state.Lease.Local != nil && c.state.Lease.CleanupIntent && transientFailure(err) {
-			c.logger.Warn("Local cleanup retained for retry", "runner", c.state.Lease.Name, "retry_delay", cleanupRetryDelay, "error", err)
-			return 1, nil
+	}
+	return len(c.state.Leases) == 0, errors.Join(failures...)
+}
+
+func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	err := c.reconcileAndProvision(ctx, count)
+	if err != nil && !isJournalWrite(err) && !onlyCancellation(err) && c.hasIssuedLocal() {
+		// Stop provisioning, not renewal or completion of already issued siblings.
+		if c.paused == nil {
+			c.logger.Error("Queue provisioning paused; issued local runners can finish. Resolve the error and restart to resume", "error", err)
+			c.paused = err
 		}
-		if err != nil || !done {
-			return 1, err
+		c.device.forget(c.state.Owner)
+		err = nil
+	}
+	if err != nil {
+		err = &provisioningError{err}
+	}
+	return len(c.state.Leases), err
+}
+
+func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.hasFallback() {
+		// A queue already using fallback must not hold FIFO priority while
+		// blocked on GitHub. Rejoin after reconciliation if it still needs a Mac.
+		c.device.forget(c.state.Owner)
+	}
+	completed := false
+	var failures []error
+	for _, name := range c.names() {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
 		}
-		if !reoffer {
-			return 0, nil
+		a := c.assigned(name)
+		l := a.lease
+		local := l.Local
+		if count <= 0 && local != nil && local.Phase == localIssued && !local.JobStarted && !local.expired() {
+			next := *local
+			next.Expires = time.Now().UTC()
+			if err := a.saveLocal(&next, ""); err != nil {
+				return err
+			}
 		}
+		recoverOnly := (count <= 0 || c.paused != nil) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
+		done, err := a.reconcile(ctx, recoverOnly)
+		if err != nil && !isJournalWrite(err) && a.lease != nil && a.lease.Local != nil && a.lease.CleanupIntent && transientFailure(err) {
+			c.logger.Warn("Local cleanup retained for retry", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
+			continue
+		}
+		if err != nil {
+			failures = append(failures, err)
+			if isJournalWrite(err) || onlyCancellation(err) {
+				return errors.Join(failures...)
+			}
+			continue
+		}
+		completed = completed || (done && !(c.state.Config.LocalOnly && local != nil && local.Phase != localIssued))
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	if c.paused != nil {
+		if c.hasIssuedLocal() {
+			return nil
+		}
+		return c.paused
+	}
+	// Never replace completed execution from the listener's cached demand.
+	if completed {
+		return nil
 	}
 	if count > 0 && c.refreshDemand {
-		// Listener long-poll timeouts replay cached counts, including the job
-		// just cleaned up. Read current statistics before reserving another slot.
 		set, err := c.runners.GetRunnerScaleSetByID(ctx, c.state.ScaleSetID)
 		if err != nil {
-			return 0, &sdkError{"refresh demand after cleanup", err}
+			return &sdkError{"refresh demand after cleanup", err}
 		}
 		if set == nil || set.ID != c.state.ScaleSetID || set.Statistics == nil || set.Statistics.TotalAssignedJobs < 0 {
-			return 0, errors.New("invalid scale set statistics after cleanup")
+			return errors.New("invalid scale set statistics after cleanup")
 		}
 		count = set.Statistics.TotalAssignedJobs
 	}
-	if count <= 0 {
+	count = min(count, maximumAssignments)
+	if count <= len(c.state.Leases) {
 		c.device.forget(c.state.Owner)
-		return 0, nil
+		return nil
 	}
-	if c.state.Config.LocalOnly {
-		c.device.wait(c.state.Owner)
+	// Registration runs on this queue's event loop. Offer the next worker only
+	// after issuance so slow GitHub I/O cannot consume another offer's five seconds.
+	if c.hasPendingOffer() {
+		return nil
 	}
-	local := c.state.Config.DeviceID != "" && c.device.claim(c.state.Owner)
-	if !local && c.state.Config.LocalOnly {
-		return 0, nil
+	for len(c.state.Leases) < count {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if c.state.Config.LocalOnly {
+			c.device.wait(c.state.Owner)
+		}
+		l := &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
+		slot, local := 0, false
+		if c.state.Config.DeviceID != "" {
+			slot, local = c.device.claim(c.state.Owner, l.Name)
+		}
+		if !local {
+			if c.state.Config.LocalOnly {
+				return nil
+			}
+			// Preserve the existing paid-fallback limit while local work scales out.
+			if c.hasFallback() {
+				if c.state.Config.DeviceID != "" {
+					c.device.wait(c.state.Owner)
+				}
+				return nil
+			}
+		} else {
+			l.Local = &localLease{DeviceID: c.state.Config.DeviceID, Slot: slot, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
+		}
+		a := &assignment{coordinator: c, lease: l}
+		if err := a.replace(l); err != nil {
+			return err
+		}
+		c.refreshDemand = false
+		if local {
+			c.logger.Info("Local offer created", "runner", l.Name, "device", c.state.Config.DeviceID, "slot", slot, "accept_timeout", offerLifetime)
+			return nil
+		}
+		if err := a.register(ctx); err != nil {
+			return err
+		}
+		if err := a.prepare(ctx); err != nil {
+			return err
+		}
 	}
-	c.state.Lease = &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
-	c.refreshDemand = false
-	if local {
-		c.state.Lease.Local = &localLease{DeviceID: c.state.Config.DeviceID, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
-	}
-	if err := c.save(c.state); err != nil {
-		return 0, err
-	}
-	c.device.update(c.state)
-	if c.state.Lease.Local != nil {
-		c.logger.Info("Local offer created", "runner", c.state.Lease.Name, "device", c.state.Config.DeviceID, "accept_timeout", offerLifetime)
-		return 1, nil
-	}
-	if err := c.register(ctx); err != nil {
-		return 1, err
-	}
-	return 1, c.prepare(ctx)
+	return nil
 }
 
-func (c *coordinator) register(ctx context.Context) error {
-	l := c.state.Lease
-	generated, err := c.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, c.state.ScaleSetID)
+func (a *assignment) register(ctx context.Context) error {
+	l := a.lease
+	generated, err := a.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, a.state.ScaleSetID)
 	if err != nil {
 		return fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
 	}
-	if generated == nil || generated.Runner == nil || generated.Runner.ID <= 0 || generated.Runner.Name != l.Name || generated.Runner.RunnerScaleSetID != c.state.ScaleSetID || generated.EncodedJITConfig == "" {
+	if generated == nil || generated.Runner == nil || generated.Runner.ID <= 0 || generated.Runner.Name != l.Name || generated.Runner.RunnerScaleSetID != a.state.ScaleSetID || generated.EncodedJITConfig == "" {
 		return errors.New("invalid JIT response; provisioning intent retained for recovery")
 	}
-	l.RunnerID = generated.Runner.ID
-	l.JIT = generated.EncodedJITConfig
-	return c.save(c.state)
+	next := *l
+	next.RunnerID, next.JIT = generated.Runner.ID, generated.EncodedJITConfig
+	return a.replace(&next)
 }
 
-func (c *coordinator) prepare(ctx context.Context) error {
-	if c.state.Config.LocalOnly {
+func (a *assignment) prepare(ctx context.Context) error {
+	if a.state.Config.LocalOnly {
 		return errors.New("local-only queues cannot dispatch fallback runners")
 	}
-	l := c.state.Lease
+	l := a.lease
 	if l.RunnerID == 0 {
 		return errors.New("registration outcome is unknown; run with --recover before provisioning again")
 	}
 	if l.JIT == "" {
 		return errors.New("JIT configuration is missing; run with --recover")
 	}
-	if err := c.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
+	if err := a.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
 		return fmt.Errorf("store bootstrap credential: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	l.JIT = ""
-	l.DispatchIntent = true
-	if err := c.save(c.state); err != nil {
+	next := *l
+	next.JIT, next.DispatchIntent = "", true
+	if err := a.replace(&next); err != nil {
 		// Rename may have published intent before directory sync failed.
-		return errors.Join(err, c.beginCleanup(""))
+		return errors.Join(err, a.beginCleanup(""))
 	}
 	if err := ctx.Err(); err != nil {
 		// The durable save can outlast the deadline. No dispatch was attempted.
-		return errors.Join(err, c.beginCleanup(""))
+		return errors.Join(err, a.beginCleanup(""))
 	}
-	runID, err := c.bootstrap.dispatch(ctx, l, c.state.Config.Fallback)
+	l = a.lease
+	runID, err := a.bootstrap.dispatch(ctx, l, a.state.Config.Fallback)
 	if err != nil {
 		var notSent *requestNotSent
 		if errors.As(err, &notSent) {
-			return errors.Join(err, c.beginCleanup(""))
+			return errors.Join(err, a.beginCleanup(""))
 		}
 		if dispatchRejected(err) {
-			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover to clean up: %w", err), c.beginCleanup("rejected"))
+			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover to clean up: %w", err), a.beginCleanup("rejected"))
 		}
 		return fmt.Errorf("dispatch outcome is uncertain; restart to reconcile, not redispatch: %w", err)
 	}
-	l.RunID = runID
-	if err := c.save(c.state); err != nil {
+	next = *a.lease
+	next.RunID = runID
+	if err := a.replace(&next); err != nil {
 		return fmt.Errorf("record dispatched bootstrap: %w", err)
 	}
-	c.logger.Info("Bootstrap dispatched", "runner", l.Name, "run", runID, "infrastructure", c.state.Config.Infrastructure)
+	a.logger.Info("Bootstrap dispatched", "runner", l.Name, "run", runID, "infrastructure", a.state.Config.Infrastructure)
 	return nil
 }
 
-func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, error) {
-	l := c.state.Lease
+func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, error) {
+	l := a.lease
 	if l == nil {
 		return true, nil
 	}
 	if l.CleanupIntent {
-		return c.finishCleanup(ctx, recoverOnly)
+		return a.finishCleanup(ctx, recoverOnly)
 	}
 	if l.Local != nil {
-		return c.reconcileLocal(ctx, recoverOnly)
+		return a.reconcileLocal(ctx, recoverOnly)
 	}
 	if !l.DispatchIntent {
 		if recoverOnly {
-			if err := c.beginCleanup(""); err != nil {
+			if err := a.beginCleanup(""); err != nil {
 				return false, err
 			}
-			return c.finishCleanup(ctx, recoverOnly)
+			return a.finishCleanup(ctx, recoverOnly)
 		}
-		return false, c.prepare(ctx)
+		return false, a.prepare(ctx)
 	}
 	var run *workflowRun
 	var err error
 	if l.RunID == 0 {
-		run, err = c.bootstrap.findRun(ctx, l)
+		run, err = a.bootstrap.findRun(ctx, l)
 		if err != nil {
 			return false, err
 		}
@@ -223,10 +376,10 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 			return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, retry reconciliation later without redispatching", l.Name)
 		}
 	} else {
-		run, err = c.bootstrap.getRun(ctx, l.RunID)
+		run, err = a.bootstrap.getRun(ctx, l.RunID)
 		var missing *missingWorkflowRun
 		if errors.As(err, &missing) {
-			return c.recoverMissingRun(ctx, recoverOnly)
+			return a.recoverMissingRun(ctx, recoverOnly)
 		}
 		if err != nil {
 			return false, err
@@ -236,24 +389,26 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 		return false, errors.New("bootstrap run identity does not match its lease")
 	}
 	if l.RunID == 0 {
-		l.RunID = run.ID
-		if err := c.save(c.state); err != nil {
+		next := *l
+		next.RunID = run.ID
+		if err := a.replace(&next); err != nil {
 			return false, err
 		}
 	}
+	l = a.lease
 	if run.Status != "completed" {
 		if !recoverOnly {
 			return false, nil
 		}
-		err := c.bootstrap.cancelRun(ctx, l.RunID)
+		err := a.bootstrap.cancelRun(ctx, l.RunID)
 		if err == nil {
-			c.logger.Info("Bootstrap cancellation requested; waiting for terminal state", "run", l.RunID)
+			a.logger.Info("Bootstrap cancellation requested; waiting for terminal state", "run", l.RunID)
 			return false, nil
 		}
 		if !hasHTTPStatus(err, 409) {
 			return false, fmt.Errorf("cancel bootstrap: %w", err)
 		}
-		run, err = c.bootstrap.getRun(ctx, l.RunID)
+		run, err = a.bootstrap.getRun(ctx, l.RunID)
 		if err != nil {
 			return false, fmt.Errorf("recheck bootstrap after cancellation conflict: %w", err)
 		}
@@ -264,28 +419,28 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 			return false, nil
 		}
 	}
-	if err := c.beginCleanup(run.Conclusion); err != nil {
+	if err := a.beginCleanup(run.Conclusion); err != nil {
 		return false, err
 	}
-	return c.finishCleanup(ctx, recoverOnly)
+	return a.finishCleanup(ctx, recoverOnly)
 }
 
-func (c *coordinator) recoverMissingRun(ctx context.Context, recoverOnly bool) (bool, error) {
-	runner, err := c.runners.GetRunnerByName(ctx, c.state.Lease.Name)
+func (a *assignment) recoverMissingRun(ctx context.Context, recoverOnly bool) (bool, error) {
+	runner, err := a.runners.GetRunnerByName(ctx, a.lease.Name)
 	if err != nil {
 		return false, &sdkError{"check runner for missing workflow", err}
 	}
 	if runner != nil {
 		return false, errors.New("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover")
 	}
-	if err := c.beginCleanup("unknown"); err != nil {
+	if err := a.beginCleanup("unknown"); err != nil {
 		return false, err
 	}
-	return c.finishCleanup(ctx, recoverOnly)
+	return a.finishCleanup(ctx, recoverOnly)
 }
 
-func (c *coordinator) beginCleanup(conclusion string) error {
-	l := c.state.Lease
+func (a *assignment) beginCleanup(conclusion string) error {
+	l := a.lease
 	if l.CleanupIntent {
 		return nil
 	}
@@ -293,25 +448,21 @@ func (c *coordinator) beginCleanup(conclusion string) error {
 	nextLease.CleanupIntent = true
 	nextLease.Conclusion = conclusion
 	nextLease.JIT = ""
-	next := *c.state
-	next.Lease = &nextLease
-	if err := c.save(&next); err != nil {
+	if err := a.replace(&nextLease); err != nil {
 		return fmt.Errorf("persist cleanup intent: %w", err)
 	}
-	*l = nextLease
-	c.device.update(c.state)
 	return nil
 }
 
-func (c *coordinator) finishCleanup(ctx context.Context, recoverOnly bool) (bool, error) {
-	l := c.state.Lease
-	if err := c.cleanup(ctx); err != nil {
+func (a *assignment) finishCleanup(ctx context.Context, recoverOnly bool) (bool, error) {
+	l := a.lease
+	if err := a.cleanup(ctx); err != nil {
 		return false, err
 	}
 	if l.Local != nil {
-		c.logger.Info("Local runner cleaned up", "runner", l.Name, "device", l.Local.DeviceID)
+		a.logger.Info("Local runner cleaned up", "runner", l.Name, "device", l.Local.DeviceID)
 	} else {
-		c.logger.Info("Bootstrap cleaned up", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion)
+		a.logger.Info("Bootstrap cleaned up", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion)
 	}
 	if l.RunID != 0 && l.Conclusion != "success" && !recoverOnly {
 		return true, fmt.Errorf("bootstrap %d concluded %s; stopped after cleanup rather than automatically retrying the workload", l.RunID, l.Conclusion)
@@ -319,44 +470,41 @@ func (c *coordinator) finishCleanup(ctx context.Context, recoverOnly bool) (bool
 	return true, nil
 }
 
-func (c *coordinator) cleanup(ctx context.Context) error {
-	l := c.state.Lease
+func (a *assignment) cleanup(ctx context.Context) error {
+	l := a.lease
 	if !l.CleanupIntent {
 		return errors.New("cleanup requires a persisted cleanup intent")
 	}
-	runner, err := c.runners.GetRunnerByName(ctx, l.Name)
+	runner, err := a.runners.GetRunnerByName(ctx, l.Name)
 	if err != nil {
 		return &sdkError{"find runner for cleanup", err}
 	}
 	if runner != nil {
-		if runner.Name != l.Name || runner.RunnerScaleSetID != c.state.ScaleSetID || (l.RunnerID != 0 && runner.ID != l.RunnerID) {
+		if runner.Name != l.Name || runner.RunnerScaleSetID != a.state.ScaleSetID || (l.RunnerID != 0 && runner.ID != l.RunnerID) {
 			return errors.New("runner identity does not match its lease; cleanup refused")
 		}
-		busy, err := c.bootstrap.runnerBusy(ctx, c.state.Config.Repository, runner.ID)
+		busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, runner.ID)
 		if err != nil {
 			return err
 		}
 		if busy {
 			return runnerStillBusy
 		}
-		if err := c.runners.RemoveRunner(ctx, int64(runner.ID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
+		if err := a.runners.RemoveRunner(ctx, int64(runner.ID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
 			return &sdkError{"remove runner", err}
 		}
 	}
 	if l.Local == nil {
-		if err := c.bootstrap.deleteSecret(ctx, l.secretName()); err != nil {
+		if err := a.bootstrap.deleteSecret(ctx, l.secretName()); err != nil {
 			return err
 		}
 	}
-	next := *c.state
-	next.Lease = nil
-	if err := c.save(&next); err != nil {
+	if err := a.replace(nil); err != nil {
 		return err
 	}
-	*c.state = next
+	delete(a.reportedLocalHold, l.Name)
 	if l.RunnerID != 0 || l.DispatchIntent || (l.Local != nil && l.Local.Phase == localIssued) {
-		c.refreshDemand = true
+		a.refreshDemand = true
 	}
-	c.device.update(c.state)
 	return nil
 }

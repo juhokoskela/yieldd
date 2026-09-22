@@ -43,27 +43,42 @@ func (s *coordinatorLoop) run() error {
 	var retryAt time.Time
 	for {
 		var expired <-chan time.Time
-		l := s.worker.state.Lease
-		if l != nil && l.Local != nil && l.CleanupIntent {
+
+		var deadline time.Time
+		cleanupPending := false
+		for _, l := range s.worker.state.Leases {
+			if l.Local == nil {
+				continue
+			}
+			if l.CleanupIntent {
+				cleanupPending = true
+				continue
+			}
+			if l.Local.Phase == localAccepted || l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered) {
+				when := l.Local.Expires
+				if l.Local.expired() {
+					when = time.Now()
+				}
+				if deadline.IsZero() || when.Before(deadline) {
+					deadline = when
+				}
+			}
+		}
+		if cleanupPending {
 			if retryAt.IsZero() {
 				retryAt = time.Now().Add(cleanupRetryDelay)
 			}
-			timer.Reset(time.Until(retryAt))
-			expired = timer.C
+			if deadline.IsZero() || retryAt.Before(deadline) {
+				deadline = retryAt
+			}
 		} else {
 			retryAt = time.Time{}
 		}
-		// Accepted leases cannot have delivered credentials. Offered leases need
-		// fresh demand on restart before their expiry may start paid fallback.
-		if l != nil && !l.CleanupIntent && l.Local != nil &&
-			(l.Local.Phase == localAccepted || (s.demandObserved && l.Local.Phase == localOffered)) {
-			delay := time.Until(l.Local.Expires)
-			if l.Local.expired() {
-				delay = 0
-			}
-			timer.Reset(delay)
+		if !deadline.IsZero() {
+			timer.Reset(time.Until(deadline))
 			expired = timer.C
 		}
+
 		select {
 		case <-s.ctx.Done():
 			return nil
@@ -159,7 +174,10 @@ func listenForDevice(address, token string, allowNonLoopback bool) (net.Listener
 
 func (d *deviceRouter) deviceHandler(token string) http.Handler {
 	expected := sha256.Sum256([]byte("Bearer " + token))
-	pollSlot := make(chan struct{}, 1)
+	var pollSlots [maximumAssignments]chan struct{}
+	for i := range pollSlots {
+		pollSlots[i] = make(chan struct{}, 1)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		provided := sha256.Sum256([]byte(r.Header.Get("Authorization")))
@@ -173,7 +191,7 @@ func (d *deviceRouter) deviceHandler(token string) http.Handler {
 			return
 		}
 		switch r.URL.Path {
-		case "/v1/poll", "/v1/accept", "/v1/complete", "/v1/renew":
+		case "/v1/poll", "/v1/accept", "/v1/decline", "/v1/complete", "/v1/renew":
 		default:
 			http.NotFound(w, r)
 			return
@@ -189,15 +207,19 @@ func (d *deviceRouter) deviceHandler(token string) http.Handler {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
+		if request.Slot < 0 || request.Slot >= maximumAssignments {
+			http.Error(w, "invalid worker slot", http.StatusBadRequest)
+			return
+		}
 		var response any
 		var err error
 		switch r.URL.Path {
 		case "/v1/poll":
 			select {
-			case pollSlot <- struct{}{}:
-				defer func() { <-pollSlot }()
+			case pollSlots[request.Slot] <- struct{}{}:
+				defer func() { <-pollSlots[request.Slot] }()
 			default:
-				http.Error(w, "one poll per device", http.StatusConflict)
+				http.Error(w, "one poll per worker slot", http.StatusConflict)
 				return
 			}
 			offer, pollErr := d.poll(r.Context(), request)
@@ -217,6 +239,9 @@ func (d *deviceRouter) deviceHandler(token string) http.Handler {
 			})
 		case "/v1/complete":
 			err = d.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error { return worker.completeDevice(ctx, request) })
+			response = struct{}{}
+		case "/v1/decline":
+			err = d.invoke(r.Context(), request, func(_ context.Context, worker *coordinator) error { return worker.declineDevice(request) })
 			response = struct{}{}
 		case "/v1/renew":
 			err = d.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error {

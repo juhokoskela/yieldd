@@ -76,14 +76,14 @@ func TestOfferTimerFallsBackWithoutAnotherDemandMessage(t *testing.T) {
 		}
 		// Polling refreshes availability, not the outstanding offer deadline.
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			c.device.pollNow()
+			c.device.pollNow(0)
 			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(time.Second)
 		synctest.Wait()
-		if w.dispatched != 1 || c.state.Lease.Local != nil || c.state.Lease.RunID != 99 {
+		if w.dispatched != 1 || singleLease(c.state).Local != nil || singleLease(c.state).RunID != 99 {
 			t.Fatal("timer did not dispatch hosted fallback", w.events)
 		}
 		err := loop.invoke(t.Context(), func(ctx context.Context) error {
@@ -116,7 +116,7 @@ func TestOfferAcceptedBeforeDeadlineCanRegisterAfterDeadline(t *testing.T) {
 		time.Sleep(4 * time.Second)
 		var registrationWindow time.Duration
 		w.beforeGenerate = func() {
-			registrationWindow = time.Until(c.state.Lease.Local.Expires)
+			registrationWindow = time.Until(singleLease(c.state).Local.Expires)
 			time.Sleep(10 * time.Second)
 		}
 		err := loop.invoke(t.Context(), func(ctx context.Context) error {
@@ -131,7 +131,7 @@ func TestOfferAcceptedBeforeDeadlineCanRegisterAfterDeadline(t *testing.T) {
 		}
 		time.Sleep(time.Minute)
 		synctest.Wait()
-		if w.dispatched != 0 || c.state.Lease.Local.Phase != localIssued || len(w.events) != 1 {
+		if w.dispatched != 0 || singleLease(c.state).Local.Phase != localIssued || len(w.events) != 1 {
 			t.Fatal("accepted offer also dispatched hosted fallback", w.events)
 		}
 		if !strings.Contains(logs.String(), "Local offer accepted") || !strings.Contains(logs.String(), "accept_latency=4s") {
@@ -227,13 +227,13 @@ func TestOfferTimerFailureStopsWithDurableRecoveryState(t *testing.T) {
 					t.Fatal("lost timer failure", err)
 				}
 				saved, err := store.load(c.state.Config)
-				if err != nil || saved.Lease == nil {
+				if err != nil || singleLease(saved) == nil {
 					t.Fatal("lost recovery state", err)
 				}
-				if phase == "save" && (saved.Lease.Local == nil || c.state.Lease.Local == nil || len(w.events) != 0) {
+				if phase == "save" && (singleLease(saved).Local == nil || singleLease(c.state).Local == nil || len(w.events) != 0) {
 					t.Fatal("failed transition mutated local offer")
 				}
-				if phase == "dispatch" && !saved.Lease.DispatchIntent {
+				if phase == "dispatch" && !singleLease(saved).DispatchIntent {
 					t.Fatal("lost ambiguous dispatch intent")
 				}
 			})
@@ -264,7 +264,7 @@ func TestRestoredOfferWaitsForDemandBeforeFallback(t *testing.T) {
 		}
 		time.Sleep(time.Minute)
 		synctest.Wait()
-		if c.state.Lease != nil || len(w.events) != 0 {
+		if singleLease(c.state) != nil || len(w.events) != 0 {
 			t.Fatal("retracted offer provisioned", w.events)
 		}
 	})
@@ -302,7 +302,7 @@ func TestRestoredLocalCleanupDoesNotWaitForDemand(t *testing.T) {
 				synctest.Wait()
 				time.Sleep(delay)
 				synctest.Wait()
-				if c.state.Lease != nil || c.device.owner != "" || world.runner != nil || world.dispatched != 0 {
+				if singleLease(c.state) != nil || c.device.slots[0].owner != "" || world.runner != nil || world.dispatched != 0 {
 					t.Fatal("restored cleanup waited for demand or provisioned a replacement")
 				}
 			})
@@ -320,7 +320,7 @@ func TestOfferTimerUsesReplacementOfferDeadline(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			c.device.pollNow()
+			c.device.pollNow(0)
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -349,12 +349,12 @@ func TestOfferAndAvailabilityHaveSeparateLifetimes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c, w, _ := newFixture(t)
 		c.state.Config.DeviceID = testDevice
-		c.device.pollNow()
+		c.device.pollNow(0)
 		time.Sleep(21 * time.Second)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)
 		}
-		if c.state.Lease.Local == nil || len(w.events) != 0 || time.Until(c.state.Lease.Local.Expires) != 5*time.Second {
+		if singleLease(c.state).Local == nil || len(w.events) != 0 || time.Until(singleLease(c.state).Local.Expires) != 5*time.Second {
 			t.Fatal("availability expired with the shorter acceptance deadline")
 		}
 	})

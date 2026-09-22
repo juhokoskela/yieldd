@@ -49,7 +49,7 @@ func TestFailedQueueAndItsRestartLeaveSiblingServing(t *testing.T) {
 		default:
 		}
 		saved, err := store.load(failed.state.Config)
-		if err != nil || saved.Lease == nil || saved.Lease.RunnerID != 0 {
+		if err != nil || singleLease(saved) == nil || singleLease(saved).RunnerID != 0 {
 			t.Fatal("uncertain registration journal lost", saved, err)
 		}
 		failed.state = saved
@@ -88,7 +88,7 @@ func TestFailedQueueLeavesFIFOButRetainsIssuedReservation(t *testing.T) {
 	stream := &controlledMessages{initial: 1, messages: make(chan *scaleset.RunnerScaleSetMessage, 1)}
 	stream.messages <- &scaleset.RunnerScaleSetMessage{
 		MessageID: 1, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
-		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: request.Runner, RunnerID: c.state.Lease.RunnerID}},
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: request.Runner, RunnerID: singleLease(c.state).RunnerID}},
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -96,7 +96,7 @@ func TestFailedQueueLeavesFIFOButRetainsIssuedReservation(t *testing.T) {
 	if err := p.run(ctx, false); !errors.Is(err, failure) {
 		t.Fatal("journal failure not surfaced", err)
 	}
-	if len(c.device.waiting) != 0 || c.device.owner != c.state.Owner || c.state.Lease == nil {
+	if len(c.device.waiting) != 0 || c.device.slots[0].owner != c.state.Owner || singleLease(c.state) == nil {
 		t.Fatal("failed worker lost its reservation or retained a waiting entry")
 	}
 }
@@ -130,7 +130,7 @@ func TestInterruptedRecoveryReturnsFailureWithLeaseRetained(t *testing.T) {
 		t.Fatal("interrupted recovery reported success", err)
 	}
 	saved, err := store.load(testConfig)
-	if err != nil || saved.Lease == nil || !saved.Lease.CleanupIntent {
+	if err != nil || singleLease(saved) == nil || !singleLease(saved).CleanupIntent {
 		t.Fatal("cleanup obligation lost", saved, err)
 	}
 }

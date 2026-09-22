@@ -32,7 +32,7 @@ for attempt in 1 2; do
             state="$(docker cp "$instance:/var/lib/yieldd/queues/example/$repository/$platform/state.json" - | tar -xOf -)"
             current_owner="$(jq -er '.owner' <<< "$state")"
             jq -e --arg repository "example/$repository" --arg platform "$platform" \
-                '.lease == null and .config.repository == $repository and
+                '.leases == null and .config.repository == $repository and
                 (.config.platform // "linux") == $platform and
                 (.config.local_only // false) == ($repository == "example/infrastructure")' <<< "$state" >/dev/null
             current_owners+=("$current_owner")

@@ -57,7 +57,7 @@ func startLoops(t *testing.T, cancel context.CancelFunc, loops []*coordinatorLoo
 	t.Cleanup(func() {
 		cancel()
 		for range loops {
-			if err := <-done; err != nil {
+			if err := <-done; err != nil && !onlyCancellation(err) {
 				t.Error(err)
 			}
 		}
@@ -85,13 +85,13 @@ func TestLocalOnlyCleanupRetriesWithoutDemandAndRetainsSlotUntilSuccess(t *testi
 		}); err != nil {
 			t.Fatal(err)
 		}
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		if _, err := local.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(offerLifetime)
 		synctest.Wait()
-		if local.worker.state.Lease == nil || !local.worker.state.Lease.CleanupIntent || router.queue.owner != local.worker.state.Owner {
+		if singleLease(local.worker.state) == nil || !singleLease(local.worker.state).CleanupIntent || router.queue.slots[0].owner != local.worker.state.Owner {
 			t.Fatal("failed cleanup did not retain the slot")
 		}
 		if n, err := loops[1].HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || worlds[1].dispatched != 1 {
@@ -100,7 +100,7 @@ func TestLocalOnlyCleanupRetriesWithoutDemandAndRetainsSlotUntilSuccess(t *testi
 		time.Sleep(cleanupRetryDelay - time.Second)
 		if err := local.invoke(t.Context(), func(context.Context) error {
 			worlds[0].lookupErr = nil
-			if local.worker.state.Lease == nil {
+			if singleLease(local.worker.state) == nil {
 				return fmt.Errorf("cleanup ran before its retry deadline")
 			}
 			return nil
@@ -110,12 +110,12 @@ func TestLocalOnlyCleanupRetriesWithoutDemandAndRetainsSlotUntilSuccess(t *testi
 		// This unrelated call must not postpone the pending retry.
 		time.Sleep(time.Second)
 		synctest.Wait()
-		if local.worker.state.Lease != nil || router.queue.owner != "" {
+		if singleLease(local.worker.state) != nil || router.queue.slots[0].owner != "" {
 			t.Fatal("cleanup did not retry autonomously")
 		}
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		synctest.Wait()
-		if offer := router.queue.pollNow(); offer == nil || offer.Owner != local.worker.state.Owner {
+		if offer := router.queue.pollNow(0); offer == nil || offer.Owner != local.worker.state.Owner {
 			t.Fatal("local-only demand was not requeued", offer)
 		}
 	})
@@ -131,14 +131,14 @@ func TestFallbackQueueCannotPassWaitingLocalOnlyQueue(t *testing.T) {
 	if n, err := local.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 {
 		t.Fatal(n, err)
 	}
-	queue.pollNow()
+	queue.pollNow(0)
 	if n, err := app.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || world.dispatched != 1 {
 		t.Fatal("fallback queue took the waiting queue's capacity", n, err)
 	}
 	if !slices.Equal(queue.waiting, []string{local.state.Owner}) {
 		t.Fatal("fallback queue joined the local FIFO", queue.waiting)
 	}
-	if n, err := local.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || local.state.Lease.Local == nil {
+	if n, err := local.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || singleLease(local.state).Local == nil {
 		t.Fatal("waiting queue did not receive capacity", n, err)
 	}
 }
@@ -146,14 +146,14 @@ func TestFallbackQueueCannotPassWaitingLocalOnlyQueue(t *testing.T) {
 func TestRepositoriesShareOneLocalSlotAndKeepHostedFallback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		router, loops, worlds := routerFixture(t, false)
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		for _, loop := range loops {
 			if n, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 {
 				t.Fatal(n, err)
 			}
 		}
 		synctest.Wait()
-		if loops[0].worker.state.Lease.Local == nil || worlds[0].dispatched != 0 || worlds[1].dispatched != 1 {
+		if singleLease(loops[0].worker.state).Local == nil || worlds[0].dispatched != 0 || worlds[1].dispatched != 1 {
 			t.Fatal("local capacity was duplicated or fallback lost")
 		}
 		handler := router.deviceHandler(strings.Repeat("x", 32))
@@ -181,7 +181,7 @@ func TestRepositoriesShareOneLocalSlotAndKeepHostedFallback(t *testing.T) {
 			t.Fatal(out.Code, out.Body)
 		}
 		synctest.Wait()
-		if worlds[0].runner != nil || loops[0].worker.state.Lease != nil || worlds[1].runner == nil || loops[1].worker.state.Lease == nil {
+		if worlds[0].runner != nil || singleLease(loops[0].worker.state) != nil || worlds[1].runner == nil || singleLease(loops[1].worker.state) == nil {
 			t.Fatal("cleanup crossed repository boundaries")
 		}
 		if out := requestDevice(handler, "complete", request); out.Code != 200 {
@@ -204,13 +204,13 @@ func TestLocalOnlyQueuesWaitInOrderAndWakeWithoutNewGitHubDemand(t *testing.T) {
 		}
 		synctest.Wait()
 		for i, loop := range loops {
-			if loop.worker.state.Lease != nil || len(worlds[i].events) != 0 {
+			if singleLease(loop.worker.state) != nil || len(worlds[i].events) != 0 {
 				t.Fatal("offline queue provisioned")
 			}
 		}
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		synctest.Wait()
-		offer := router.queue.pollNow()
+		offer := router.queue.pollNow(0)
 		if offer == nil || offer.Repository != "example/a" {
 			t.Fatal("first waiting queue lost its turn", offer)
 		}
@@ -226,9 +226,9 @@ func TestLocalOnlyQueuesWaitInOrderAndWakeWithoutNewGitHubDemand(t *testing.T) {
 		if _, err := loops[0].HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)
 		}
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		synctest.Wait()
-		offer = router.queue.pollNow()
+		offer = router.queue.pollNow(0)
 		if offer == nil || offer.Repository != "example/b" {
 			t.Fatal("waiting repository starved", offer)
 		}
@@ -243,7 +243,7 @@ func TestLocalOnlyQueuesWaitInOrderAndWakeWithoutNewGitHubDemand(t *testing.T) {
 func TestLocalOnlyExpiryReleasesOfferWithoutHostedSideEffects(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		router, loops, worlds := routerFixture(t, true)
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		if _, err := loops[0].HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)
 		}
@@ -257,9 +257,9 @@ func TestLocalOnlyExpiryReleasesOfferWithoutHostedSideEffects(t *testing.T) {
 				t.Fatal(world.events)
 			}
 		}
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		synctest.Wait()
-		offer := router.queue.pollNow()
+		offer := router.queue.pollNow(0)
 		if offer == nil || offer.Repository != "example/b" {
 			t.Fatal("expired queue did not yield", offer)
 		}
@@ -283,7 +283,7 @@ func TestRestoredExpiredLocalOnlyOfferRequeuesOutstandingDemand(t *testing.T) {
 						wantEvents = []string{"register"}
 					case "issuance":
 						c.save = func(s *state) error {
-							if s.Lease != nil && s.Lease.Local.Phase == localIssued {
+							if singleLease(s) != nil && singleLease(s).Local.Phase == localIssued {
 								return io.ErrUnexpectedEOF
 							}
 							return store.save(s)
@@ -294,12 +294,12 @@ func TestRestoredExpiredLocalOnlyOfferRequeuesOutstandingDemand(t *testing.T) {
 						if credential, err := c.acceptDevice(t.Context(), request); err == nil || credential != nil {
 							t.Fatal("acceptance did not fail before credential delivery", err)
 						}
-						if c.state.Lease.Local.Phase != localAccepted {
+						if singleLease(c.state).Local.Phase != localAccepted {
 							t.Fatal("failed acceptance did not retain its phase")
 						}
 						c.save, world.generateErr = store.save, nil
 					}
-					time.Sleep(time.Until(c.state.Lease.Local.Expires) + time.Second)
+					time.Sleep(time.Until(singleLease(c.state).Local.Expires) + time.Second)
 					saved, err := store.load(c.state.Config)
 					if err != nil {
 						t.Fatal(err)
@@ -317,12 +317,12 @@ func TestRestoredExpiredLocalOnlyOfferRequeuesOutstandingDemand(t *testing.T) {
 						t.Fatal(err)
 					}
 					cleared, err := store.load(c.state.Config)
-					if err != nil || cleared.Lease != nil || world.runner != nil {
+					if err != nil || singleLease(cleared) != nil || world.runner != nil {
 						t.Fatal("expired assignment was not cleaned up before polling", err)
 					}
-					router.queue.pollNow()
+					router.queue.pollNow(0)
 					synctest.Wait()
-					offer := router.queue.pollNow()
+					offer := router.queue.pollNow(0)
 					if (offer != nil) != (demand > 0) || !slices.Equal(world.events, wantEvents) {
 						t.Fatal("incorrect demand after expired offer recovery", demand, offer, world.events)
 					}
@@ -341,13 +341,13 @@ func TestIssuedLocalOnlyCleanupDoesNotReuseStaleDemand(t *testing.T) {
 	if _, err := c.acceptDevice(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.beginCleanup(""); err != nil {
+	if err := c.assigned(singleLease(c.state).Name).beginCleanup(""); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 {
 		t.Fatal(n, err)
 	}
-	if c.state.Lease != nil || world.runner != nil || c.device.pollNow() != nil || len(c.device.waiting) != 0 {
+	if singleLease(c.state) != nil || world.runner != nil || c.device.pollNow(0) != nil || len(c.device.waiting) != 0 {
 		t.Fatal("completed assignment requeued stale demand")
 	}
 }
@@ -360,7 +360,7 @@ func TestSlowHostedRepositoryDoesNotBlockAnotherRepositoryPoll(t *testing.T) {
 		provisioned := make(chan error, 1)
 		go func() { _, err := loops[0].HandleDesiredRunnerCount(t.Context(), 1); provisioned <- err }()
 		<-started
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		if _, err := loops[1].HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			close(release)
 			t.Fatal(err)
@@ -389,8 +389,8 @@ func TestRestoredLocalAssignmentHoldsSharedCapacityUntilAcknowledged(t *testing.
 	if err := queue.restore(saved); err != nil {
 		t.Fatal(err)
 	}
-	queue.pollNow()
-	if queue.claim("another queue") {
+	queue.pollNow(0)
+	if _, claimed := queue.claim("another queue", "other"); claimed {
 		t.Fatal("issued assignment lost local hold")
 	}
 	other := *saved
@@ -402,8 +402,8 @@ func TestRestoredLocalAssignmentHoldsSharedCapacityUntilAcknowledged(t *testing.
 	if err := c.completeDevice(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	queue.pollNow()
-	if !queue.claim("another queue") {
+	queue.pollNow(0)
+	if _, claimed := queue.claim("another queue", "other"); !claimed {
 		t.Fatal("completed assignment retained local hold")
 	}
 }
@@ -411,15 +411,15 @@ func TestRestoredLocalAssignmentHoldsSharedCapacityUntilAcknowledged(t *testing.
 func TestFailedLocalPublicationDoesNotExposeAnOffer(t *testing.T) {
 	c, world, _ := newFixture(t)
 	c.state.Config.DeviceID = testDevice
-	c.device.pollNow()
+	c.device.pollNow(0)
 	c.save = func(*state) error { return io.ErrUnexpectedEOF }
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
 		t.Fatal("save failure ignored")
 	}
-	if offer := c.device.pollNow(); offer != nil {
+	if offer := c.device.pollNow(0); offer != nil {
 		t.Fatal("uncommitted offer exposed", offer)
 	}
-	if c.device.claim("another queue") || len(world.events) != 0 {
+	if _, claimed := c.device.claim("another queue", "other"); claimed || len(world.events) != 0 {
 		t.Fatal("uncertain save released capacity or registered a runner")
 	}
 }
@@ -440,7 +440,7 @@ func TestConcurrentRepositoryDemandCannotDuplicateLocalCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	startLoops(t, cancel, loops)
-	router.queue.pollNow()
+	router.queue.pollNow(0)
 	start := make(chan struct{})
 	results := make(chan error, len(loops))
 	for _, loop := range loops {
@@ -455,7 +455,7 @@ func TestConcurrentRepositoryDemandCannotDuplicateLocalCapacity(t *testing.T) {
 	local, fallback := 0, 0
 	for i, loop := range loops {
 		if err := loop.invoke(ctx, func(context.Context) error {
-			if loop.worker.state.Lease.Local != nil {
+			if singleLease(loop.worker.state).Local != nil {
 				local++
 			}
 			fallback += worlds[i].dispatched
@@ -480,9 +480,9 @@ func TestRetractedLocalOnlyDemandDoesNotOccupyTheWaitingQueue(t *testing.T) {
 		if _, err := loops[0].HandleDesiredRunnerCount(t.Context(), 0); err != nil {
 			t.Fatal(err)
 		}
-		router.queue.pollNow()
+		router.queue.pollNow(0)
 		synctest.Wait()
-		offer := router.queue.pollNow()
+		offer := router.queue.pollNow(0)
 		if offer == nil || offer.Repository != "example/b" {
 			t.Fatal("cancelled demand retained its place", offer)
 		}
@@ -492,14 +492,14 @@ func TestRetractedLocalOnlyDemandDoesNotOccupyTheWaitingQueue(t *testing.T) {
 func TestLocalOnlyQueueRejectsHostedStateAndDispatch(t *testing.T) {
 	c, world, store := newFixture(t)
 	c.state.Config.DeviceID, c.state.Config.LocalOnly, c.state.Config.Fallback = testDevice, true, ""
-	c.state.Lease = &lease{Name: fixtureRunner, Created: time.Now().UTC()}
+	c.state.Leases = map[string]*lease{fixtureRunner: {Name: fixtureRunner, Created: time.Now().UTC()}}
 	if err := c.save(c.state); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.load(c.state.Config); err == nil {
 		t.Fatal("hosted state loaded into local-only queue")
 	}
-	if err := c.prepare(t.Context()); err == nil || len(world.events) != 0 {
+	if err := c.assigned(singleLease(c.state).Name).prepare(t.Context()); err == nil || len(world.events) != 0 {
 		t.Fatal("local-only fallback was attempted", err, world.events)
 	}
 }

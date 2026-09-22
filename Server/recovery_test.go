@@ -42,10 +42,10 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if saved.Lease == nil || saved.Lease.DispatchIntent || saved.Lease.JIT != "private-jit" || saved.Lease.RunnerID != 7 {
+					if singleLease(saved) == nil || singleLease(saved).DispatchIntent || singleLease(saved).JIT != "private-jit" || singleLease(saved).RunnerID != 7 {
 						t.Fatal("expired context recorded dispatch or lost resumable credentials")
 					}
-					if c.state.Lease.DispatchIntent || w.dispatched != 0 || w.secret != "private-jit" {
+					if singleLease(c.state).DispatchIntent || w.dispatched != 0 || w.secret != "private-jit" {
 						t.Fatal("dispatch attempted after upload exhausted its context")
 					}
 					c.state, w.afterSecret, w.dispatchErr = saved, nil, nil
@@ -53,14 +53,14 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 						if done, err := c.reconcile(t.Context(), true); err != nil || !done {
 							t.Fatal(done, err)
 						}
-						if c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 {
+						if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 {
 							t.Fatal("could not recover undispatched attempt")
 						}
 					} else {
 						if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 							t.Fatal(err)
 						}
-						if w.dispatched != 1 || w.findCalls != 0 || c.state.Lease.RunID != 99 {
+						if w.dispatched != 1 || w.findCalls != 0 || singleLease(c.state).RunID != 99 {
 							t.Fatal("restart could not resume provisioning")
 						}
 					}
@@ -89,7 +89,7 @@ func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
 						w.afterSecret = func() { time.Sleep(59 * time.Second) }
 					}
 					c.save = func(s *state) error {
-						if s.Lease != nil && s.Lease.DispatchIntent && !s.Lease.CleanupIntent {
+						if singleLease(s) != nil && singleLease(s).DispatchIntent && !singleLease(s).CleanupIntent {
 							if mode == "deadline" {
 								time.Sleep(2 * time.Second)
 							} else {
@@ -108,7 +108,7 @@ func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if saved.Lease == nil || !saved.Lease.CleanupIntent || saved.Lease.JIT != "" || saved.Lease.RunID != 0 {
+					if singleLease(saved) == nil || !singleLease(saved).CleanupIntent || singleLease(saved).JIT != "" || singleLease(saved).RunID != 0 {
 						t.Fatal("unattempted dispatch did not persist cleanup intent")
 					}
 					if w.dispatched != 0 || w.runner == nil || w.secret == "" {
@@ -118,7 +118,7 @@ func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
 					if done, err := c.reconcile(t.Context(), recoverOnly); err != nil || !done {
 						t.Fatal(done, err)
 					}
-					if c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 || w.findCalls != 0 {
+					if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 || w.findCalls != 0 {
 						t.Fatal("restart did not clean up the unattempted dispatch directly")
 					}
 				})
@@ -133,10 +133,10 @@ func TestUnattemptedDispatchCleanupSaveFailureRetainsObligation(t *testing.T) {
 	defer cancel()
 	failure := errors.New("disk full")
 	c.save = func(s *state) error {
-		if s.Lease != nil && s.Lease.CleanupIntent {
+		if singleLease(s) != nil && singleLease(s).CleanupIntent {
 			return failure
 		}
-		if s.Lease != nil && s.Lease.DispatchIntent {
+		if singleLease(s) != nil && singleLease(s).DispatchIntent {
 			cancel()
 		}
 		return store.save(s)
@@ -148,7 +148,7 @@ func TestUnattemptedDispatchCleanupSaveFailureRetainsObligation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Lease == nil || !saved.Lease.DispatchIntent || saved.Lease.CleanupIntent || c.state.Lease.CleanupIntent {
+	if singleLease(saved) == nil || !singleLease(saved).DispatchIntent || singleLease(saved).CleanupIntent || singleLease(c.state).CleanupIntent {
 		t.Fatal("failed cleanup save lost the durable obligation")
 	}
 	if w.dispatched != 0 || w.runner == nil || w.secret == "" {
@@ -163,7 +163,7 @@ func TestPublishedDispatchIntentSaveFailureEntersCleanup(t *testing.T) {
 		if err := store.save(s); err != nil {
 			return err
 		}
-		if s.Lease != nil && s.Lease.DispatchIntent && !s.Lease.CleanupIntent {
+		if singleLease(s) != nil && singleLease(s).DispatchIntent && !singleLease(s).CleanupIntent {
 			return failure
 		}
 		return nil
@@ -175,14 +175,14 @@ func TestPublishedDispatchIntentSaveFailureEntersCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Lease == nil || !saved.Lease.CleanupIntent || w.dispatched != 0 || w.runner == nil || w.secret == "" {
+	if singleLease(saved) == nil || !singleLease(saved).CleanupIntent || w.dispatched != 0 || w.runner == nil || w.secret == "" {
 		t.Fatal("published but unattempted dispatch did not enter cleanup")
 	}
 	c.state, c.save = saved, store.save
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if c.state.Lease != nil || w.dispatched != 0 || w.findCalls != 0 || w.runner != nil || w.secret != "" {
+	if singleLease(c.state) != nil || w.dispatched != 0 || w.findCalls != 0 || w.runner != nil || w.secret != "" {
 		t.Fatal("restart did not directly clean up the undispatched attempt")
 	}
 }
@@ -210,9 +210,9 @@ func TestRestartDoesNotCancelBootstrapBasedOnAge(t *testing.T) {
 					if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 						t.Fatal(err)
 					}
-					c.state.Lease.Created = serverNow.Add(-age)
+					singleLease(c.state).Created = serverNow.Add(-age)
 					if discover {
-						c.state.Lease.RunID = 0
+						singleLease(c.state).RunID = 0
 					}
 					if err := store.save(c.state); err != nil {
 						t.Fatal(err)
@@ -224,7 +224,7 @@ func TestRestartDoesNotCancelBootstrapBasedOnAge(t *testing.T) {
 					c.state = saved
 					api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
 						response.Header().Set("Date", serverNow.Format(http.TimeFormat))
-						run := map[string]any{"id": 99, "display_title": "Bootstrap " + saved.Lease.Name, "status": status, "created_at": serverNow.Add(-age)}
+						run := map[string]any{"id": 99, "display_title": "Bootstrap " + singleLease(saved).Name, "status": status, "created_at": serverNow.Add(-age)}
 						if discover {
 							json.NewEncoder(response).Encode(map[string]any{"workflow_runs": []any{run}})
 						} else {
@@ -236,7 +236,7 @@ func TestRestartDoesNotCancelBootstrapBasedOnAge(t *testing.T) {
 						t.Fatal(err)
 					}
 					cancelled := w.events[len(w.events)-1] == "cancel"
-					if cancelled || w.dispatched != 1 || c.state.Lease == nil || w.secret == "" {
+					if cancelled || w.dispatched != 1 || singleLease(c.state) == nil || w.secret == "" {
 						t.Fatal("age triggered cancellation or cleanup", w.events)
 					}
 				})
@@ -272,13 +272,13 @@ func TestRejectedDispatchRecoversAfterStateReload(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.state = saved
-			if !saved.Lease.CleanupIntent || saved.Lease.Conclusion != "rejected" {
+			if !singleLease(saved).CleanupIntent || singleLease(saved).Conclusion != "rejected" {
 				t.Fatal("rejection was not durable")
 			}
 			if done, err := c.reconcile(t.Context(), recoverOnly); err != nil || !done {
 				t.Fatalf("rejected dispatch could not recover: done=%v err=%v", done, err)
 			}
-			if c.state.Lease != nil || w.runner != nil || w.secret != "" || requests != 1 {
+			if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || requests != 1 {
 				t.Fatal("rejected attempt was not cleaned up exactly once")
 			}
 		})
@@ -323,16 +323,16 @@ func TestDispatchCancellationTracksPayloadConsumption(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if saved.Lease.CleanupIntent != (consumed == 0) {
+				if singleLease(saved).CleanupIntent != (consumed == 0) {
 					t.Fatal("cleanup intent does not reflect whether dispatch could have been sent")
 				}
 				c.state = saved
 				done, err := c.reconcile(t.Context(), recoverOnly)
 				if consumed == 0 {
-					if err != nil || !done || c.state.Lease != nil || w.runner != nil || w.secret != "" || w.findCalls != 0 {
+					if err != nil || !done || singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.findCalls != 0 {
 						t.Fatal("definitely unattempted dispatch did not recover directly", done, err)
 					}
-				} else if err == nil || done || c.state.Lease == nil || w.runner == nil || w.secret == "" {
+				} else if err == nil || done || singleLease(c.state) == nil || w.runner == nil || w.secret == "" {
 					t.Fatal("uncertain dispatch was cleaned up", done, err)
 				}
 			})
@@ -355,7 +355,7 @@ func TestInterruptedUndispatchedCleanupCannotResumeProvisioning(t *testing.T) {
 				w.deleteErr = failure
 			} else {
 				c.save = func(s *state) error {
-					if s.Lease == nil {
+					if singleLease(s) == nil {
 						return failure
 					}
 					return store.save(s)
@@ -372,13 +372,13 @@ func TestInterruptedUndispatchedCleanupCannotResumeProvisioning(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.state, c.save, w.deleteErr = saved, store.save, nil
-			if !saved.Lease.CleanupIntent {
+			if !singleLease(saved).CleanupIntent {
 				t.Fatal("cleanup intent did not survive restart")
 			}
 			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 				t.Fatal(err)
 			}
-			if c.state.Lease != nil || w.dispatched != 0 || w.secret != "" {
+			if singleLease(c.state) != nil || w.dispatched != 0 || w.secret != "" {
 				t.Fatal("normal restart resumed provisioning after runner deletion")
 			}
 		})
@@ -395,7 +395,7 @@ func TestCancellationConflictRechecksTerminalState(t *testing.T) {
 	if done, err := c.reconcile(t.Context(), true); err != nil || !done {
 		t.Fatalf("completion race blocked cleanup: done=%v err=%v", done, err)
 	}
-	if c.state.Lease != nil || w.runner != nil || w.secret != "" {
+	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" {
 		t.Fatal("terminal run left a cleanup obligation")
 	}
 	if w.getCalls != 2 {
@@ -418,7 +418,7 @@ func TestCleanupIntentMustBeDurableBeforeDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.runner == nil || c.state.Lease.CleanupIntent || saved.Lease.CleanupIntent {
+	if w.runner == nil || singleLease(c.state).CleanupIntent || singleLease(saved).CleanupIntent {
 		t.Fatal("deletion or phase transition occurred before durable intent")
 	}
 }
@@ -428,7 +428,7 @@ func TestRejectionPersistenceFailureRetainsAmbiguousDispatch(t *testing.T) {
 	c.bootstrap = bootstrapWithDispatchAPI{bootstrapAPI: w, api: testAPI(t, func(response http.ResponseWriter, request *http.Request) { response.WriteHeader(http.StatusForbidden) })}
 	failure := errors.New("disk full")
 	c.save = func(s *state) error {
-		if s.Lease != nil && s.Lease.CleanupIntent {
+		if singleLease(s) != nil && singleLease(s).CleanupIntent {
 			return failure
 		}
 		return store.save(s)
@@ -440,7 +440,7 @@ func TestRejectionPersistenceFailureRetainsAmbiguousDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !saved.Lease.DispatchIntent || saved.Lease.CleanupIntent || c.state.Lease.CleanupIntent || w.runner == nil || w.secret == "" {
+	if !singleLease(saved).DispatchIntent || singleLease(saved).CleanupIntent || singleLease(c.state).CleanupIntent || w.runner == nil || w.secret == "" {
 		t.Fatal("failed rejection persistence lost the cleanup obligation")
 	}
 }
@@ -449,7 +449,7 @@ func TestLostRunIDPersistenceUsesDiscoveryWithoutRedispatch(t *testing.T) {
 	c, w, store := newFixture(t)
 	failure := errors.New("disk full")
 	c.save = func(s *state) error {
-		if s.Lease != nil && s.Lease.RunID != 0 {
+		if singleLease(s) != nil && singleLease(s).RunID != 0 {
 			return failure
 		}
 		return store.save(s)
@@ -461,14 +461,14 @@ func TestLostRunIDPersistenceUsesDiscoveryWithoutRedispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Lease.RunID != 0 || !saved.Lease.DispatchIntent {
+	if singleLease(saved).RunID != 0 || !singleLease(saved).DispatchIntent {
 		t.Fatal("lost dispatch intent")
 	}
 	c.state, c.save = saved, store.save
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if w.dispatched != 1 || w.findCalls != 1 || c.state.Lease.RunID != 99 {
+	if w.dispatched != 1 || w.findCalls != 1 || singleLease(c.state).RunID != 99 {
 		t.Fatal("lost run ID was not reconciled")
 	}
 }
@@ -487,7 +487,7 @@ func TestFailedBootstrapConclusionSurvivesInterruptedCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !saved.Lease.CleanupIntent || saved.Lease.Conclusion != "failure" {
+	if !singleLease(saved).CleanupIntent || singleLease(saved).Conclusion != "failure" {
 		t.Fatal("lost terminal conclusion")
 	}
 	c.state, w.deleteErr = saved, nil
@@ -495,7 +495,7 @@ func TestFailedBootstrapConclusionSurvivesInterruptedCleanup(t *testing.T) {
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "concluded failure") {
 		t.Fatal("bootstrap failure not preserved", err)
 	}
-	if c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
+	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
 		t.Fatal("terminal cleanup did not finish")
 	}
 }
@@ -519,12 +519,12 @@ func TestMissingWorkflowRequiresAbsentRunnerBeforeCleanup(t *testing.T) {
 				}
 				done, err := c.reconcile(t.Context(), recoverOnly)
 				if registered {
-					if err == nil || done || c.state.Lease.CleanupIntent || w.secret == "" || w.runner == nil {
+					if err == nil || done || singleLease(c.state).CleanupIntent || w.secret == "" || w.runner == nil {
 						t.Fatal("missing workflow allowed cleanup of a registered runner", done, err)
 					}
 					return
 				}
-				if !done || (err != nil) == recoverOnly || c.state.Lease != nil || w.secret != "" || w.dispatched != 1 {
+				if !done || (err != nil) == recoverOnly || singleLease(c.state) != nil || w.secret != "" || w.dispatched != 1 {
 					t.Fatal("missing workflow did not clean up while preserving unknown conclusion", done, err)
 				}
 			})
@@ -560,10 +560,10 @@ func TestMissingWorkflowDoesNotConfuseLostAccessWithDeletion(t *testing.T) {
 			c.bootstrap = bootstrapWithRunAPI{bootstrapAPI: w, api: api}
 			done, err := c.reconcile(t.Context(), true)
 			if mode == "deleted" {
-				if err != nil || !done || c.state.Lease != nil || w.secret != "" {
+				if err != nil || !done || singleLease(c.state) != nil || w.secret != "" {
 					t.Fatal("verified deletion failed to recover", done, err)
 				}
-			} else if err == nil || done || c.state.Lease == nil || c.state.Lease.CleanupIntent || w.secret == "" {
+			} else if err == nil || done || singleLease(c.state) == nil || singleLease(c.state).CleanupIntent || w.secret == "" {
 				t.Fatal("unverified workflow absence allowed cleanup", done, err)
 			}
 		})
@@ -590,10 +590,10 @@ func TestZeroDemandCleansUpOnlyUndispatchedLeases(t *testing.T) {
 				t.Fatal(err)
 			}
 			if dispatched {
-				if count != 1 || c.state.Lease == nil || w.runner == nil || w.secret == "" || w.dispatched != 1 || w.events[len(w.events)-1] == "cancel" {
+				if count != 1 || singleLease(c.state) == nil || w.runner == nil || w.secret == "" || w.dispatched != 1 || w.events[len(w.events)-1] == "cancel" {
 					t.Fatal("zero demand interrupted a dispatched bootstrap", w.events)
 				}
-			} else if count != 0 || c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 {
+			} else if count != 0 || singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 0 {
 				t.Fatal("zero demand resumed provisioning instead of cleanup", w.events)
 			}
 		})
@@ -629,7 +629,7 @@ func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 			if done || (err == nil) != (mode == "running") {
 				t.Fatal(done, err)
 			}
-			if c.state.Lease.CleanupIntent || w.runner == nil || w.secret == "" {
+			if singleLease(c.state).CleanupIntent || w.runner == nil || w.secret == "" {
 				t.Fatal("cleaned up without verified termination")
 			}
 			wantReads := 2

@@ -18,11 +18,13 @@ type localPhase string
 
 const (
 	localOffered  localPhase = "offered"
+	localDeclined localPhase = "declined"
 	localAccepted localPhase = "accepted"
 	localIssued   localPhase = "issued"
 )
 
 type localLease struct {
+	Slot         int        `json:"slot"`
 	DeviceID     string     `json:"device_id"`
 	Phase        localPhase `json:"phase"`
 	Expires      time.Time  `json:"expires"`
@@ -34,6 +36,8 @@ func (l *localLease) expired() bool {
 	remaining := time.Until(l.Expires)
 	lifetime := offerLifetime
 	switch l.Phase {
+	case localDeclined:
+		return true
 	case localAccepted:
 		lifetime = registrationLifetime
 	case localIssued:
@@ -44,12 +48,14 @@ func (l *localLease) expired() bool {
 }
 
 type deviceRequest struct {
+	Slot     int    `json:"slot"`
 	DeviceID string `json:"device_id"`
 	Owner    string `json:"owner,omitempty"`
 	Runner   string `json:"runner,omitempty"`
 }
 
 type deviceOffer struct {
+	Slot         int    `json:"slot"`
 	Owner        string `json:"owner"`
 	Runner       string `json:"runner"`
 	Repository   string `json:"repository"`
@@ -79,33 +85,63 @@ func (c *coordinator) acceptDevice(ctx context.Context, request deviceRequest) (
 	if err := c.checkDevice(request); err != nil {
 		return nil, err
 	}
-	l := c.state.Lease
-	if l == nil || l.Name != request.Runner || l.Local == nil || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
+	return c.assigned(request.Runner).accept(ctx, request)
+}
+
+func (c *coordinator) declineDevice(request deviceRequest) error {
+	if err := c.checkDevice(request); err != nil {
+		return err
+	}
+	a := c.assigned(request.Runner)
+	l := a.lease
+	if l == nil || l.Local == nil {
+		return nil
+	}
+	if l.Local.Slot != request.Slot || (l.Local.Phase != localOffered && l.Local.Phase != localDeclined) {
+		return &deviceError{status: http.StatusConflict, message: "only an unaccepted offer for this worker can be declined"}
+	}
+	if l.Local.Phase != localDeclined {
+		next := *l.Local
+		next.Phase = localDeclined
+		if err := a.saveLocal(&next, ""); err != nil {
+			return err
+		}
+		c.logger.Info("Local offer declined; reconciling without the acceptance delay", "runner", l.Name, "slot", request.Slot)
+	}
+	c.device.redrive(c.state.Owner)
+	return nil
+}
+
+func (a *assignment) accept(ctx context.Context, request deviceRequest) (*deviceCredential, error) {
+	l := a.lease
+	if a.paused != nil || l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
 		return nil, &deviceError{status: http.StatusGone, message: "offer is no longer available; clean up without starting a runner"}
 	}
 	next := *l.Local
 	next.Phase = localAccepted
 	next.Expires = time.Now().UTC().Add(registrationLifetime)
 	acceptLatency := time.Since(l.Created)
-	if err := c.saveLocal(&next, l.JIT); err != nil {
+	if err := a.saveLocal(&next, l.JIT); err != nil {
 		return nil, err
 	}
-	c.logger.Info("Local offer accepted", "runner", l.Name, "device", next.DeviceID, "accept_latency", acceptLatency)
+	a.logger.Info("Local offer accepted", "runner", l.Name, "device", next.DeviceID, "accept_latency", acceptLatency)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := c.register(ctx); err != nil {
+	if err := a.register(ctx); err != nil {
 		return nil, err
 	}
+	l = a.lease
 	credential := &deviceCredential{JIT: l.JIT}
 	issued := *l.Local
 	issued.Phase = localIssued
 	issued.Expires = time.Now().UTC().Add(localStartupLifetime)
 	// Persist possible delivery before returning credentials. Never issue them a second time.
-	if err := c.saveLocal(&issued, ""); err != nil {
+	if err := a.saveLocal(&issued, ""); err != nil {
 		return nil, err
 	}
-	c.logger.Info("Local credentials issued", "runner", l.Name, "device", l.Local.DeviceID)
+	a.logger.Info("Local credentials issued", "runner", l.Name, "device", l.Local.DeviceID)
+	a.device.redrive(a.state.Owner)
 	return credential, nil
 }
 
@@ -117,14 +153,17 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 	if err := c.checkDevice(request); err != nil {
 		return nil, err
 	}
-	l := c.state.Lease
-	if l == nil || l.Name != request.Runner || l.Local == nil || l.Local.Phase != localIssued {
+	return c.assigned(request.Runner).renew(ctx, request)
+}
+func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
+	l := a.lease
+	if l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.Local.Phase != localIssued {
 		return &deviceAuthorization{}, nil
 	}
 	if l.CleanupIntent || l.Local.JobCompleted {
 		return &deviceAuthorization{}, nil
 	}
-	busy, err := c.bootstrap.runnerBusy(ctx, c.state.Config.Repository, l.RunnerID)
+	busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, l.RunnerID)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +171,7 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 		if !l.Local.JobStarted {
 			next := *l.Local
 			next.JobStarted = true
-			if err := c.saveLocal(&next, ""); err != nil {
+			if err := a.saveLocal(&next, ""); err != nil {
 				return nil, err
 			}
 		}
@@ -146,9 +185,9 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 	return &deviceAuthorization{Continue: !l.Local.expired()}, nil
 }
 
-func (c *coordinator) recordLocalJob(runner string, id int, completed bool) error {
-	l := c.state.Lease
-	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.Name != runner || l.RunnerID != id {
+func (a *assignment) recordLocalJob(id int, completed bool) error {
+	l := a.lease
+	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.RunnerID != id {
 		return nil
 	}
 	next := *l.Local
@@ -157,84 +196,82 @@ func (c *coordinator) recordLocalJob(runner string, id int, completed bool) erro
 	if next == *l.Local {
 		return nil
 	}
-	return c.saveLocal(&next, "")
+	return a.saveLocal(&next, "")
 }
 
 func (c *coordinator) completeDevice(ctx context.Context, request deviceRequest) error {
 	if err := c.checkDevice(request); err != nil {
 		return err
 	}
-	l := c.state.Lease
-	if l == nil || l.Name != request.Runner || l.Local == nil {
+	return c.assigned(request.Runner).complete(ctx, request)
+}
+func (a *assignment) complete(ctx context.Context, request deviceRequest) error {
+	l := a.lease
+	if l == nil || l.Local == nil {
 		// Completion is idempotent, including a lost response after clearing the lease.
 		return nil
 	}
-	if err := c.beginCleanup(""); err != nil {
+	if l.Local.Slot != request.Slot {
+		return &deviceError{status: http.StatusConflict, message: "assignment belongs to another worker slot"}
+	}
+	if err := a.beginCleanup(""); err != nil {
 		return err
 	}
-	_, err := c.finishCleanup(ctx, true)
+	_, err := a.finishCleanup(ctx, true)
 	return err
 }
 
-func (c *coordinator) reconcileLocal(ctx context.Context, recoverOnly bool) (bool, error) {
-	l := c.state.Lease
+func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool, error) {
+	l := a.lease
 	if l.Local.Phase == localIssued {
-		c.reportLocalHold("Local assignment blocks local and hosted provisioning until the Mac confirms guest destruction")
+		a.reportLocalHold("Local assignment retains its slot until the Mac confirms guest destruction")
 		if recoverOnly {
 			return false, errors.New("local credentials may be in use; reconnect the assigned Mac to destroy its guest and acknowledge cleanup")
 		}
 		return false, nil
 	}
-	if recoverOnly || (l.Local.Phase == localAccepted && l.Local.expired()) {
-		if err := c.beginCleanup(""); err != nil {
+	expired := l.Local.expired()
+	if recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.hasFallback())) {
+		if err := a.beginCleanup(""); err != nil {
 			return false, err
 		}
-		return c.finishCleanup(ctx, true)
+		if a.state.Config.LocalOnly && l.Local.Phase == localOffered && expired {
+			a.logger.Info("Local offer expired; waiting for local capacity", "runner", l.Name)
+		}
+		return a.finishCleanup(ctx, true)
 	}
 	if l.Local.Phase == localAccepted {
-		c.reportLocalHold("Waiting for local acceptance to finish; undelivered credentials will be cleaned up after expiry")
+		a.reportLocalHold("Waiting for local acceptance to finish; undelivered credentials will be cleaned up after expiry")
 		return false, nil
 	}
-	if !l.Local.expired() {
+	if !expired {
 		return false, nil
-	}
-	if c.state.Config.LocalOnly {
-		if err := c.beginCleanup(""); err != nil {
-			return false, err
-		}
-		c.logger.Info("Local offer expired; waiting for local capacity", "runner", l.Name)
-		return c.finishCleanup(ctx, true)
 	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
-	if err := c.saveLocal(nil, l.JIT); err != nil {
+	if err := a.saveLocal(nil, l.JIT); err != nil {
 		return false, err
 	}
-	c.logger.Info("Local offer expired; using hosted fallback", "runner", l.Name, "device", c.state.Config.DeviceID, "offer_age", time.Since(l.Created))
-	if err := c.register(ctx); err != nil {
+	a.logger.Info("Local offer expired; using hosted fallback", "runner", l.Name, "device", a.state.Config.DeviceID, "offer_age", time.Since(l.Created))
+	if err := a.register(ctx); err != nil {
 		return false, err
 	}
-	return false, c.prepare(ctx)
+	return false, a.prepare(ctx)
 }
 
-func (c *coordinator) saveLocal(local *localLease, jit string) error {
-	nextLease := *c.state.Lease
+func (a *assignment) saveLocal(local *localLease, jit string) error {
+	nextLease := *a.lease
 	nextLease.Local, nextLease.JIT = local, jit
-	next := *c.state
-	next.Lease = &nextLease
-	if err := c.save(&next); err != nil {
-		return err
-	}
-	*c.state.Lease = nextLease
-	c.device.update(c.state)
-	return nil
+	return a.replace(&nextLease)
 }
 
-func (c *coordinator) reportLocalHold(message string) {
-	l := c.state.Lease
-	identity := l.Name + "/" + string(l.Local.Phase)
-	if c.reportedLocalHold == identity {
+func (a *assignment) reportLocalHold(message string) {
+	l := a.lease
+	if a.reportedLocalHold[l.Name] == l.Local.Phase {
 		return
 	}
-	c.reportedLocalHold = identity
-	c.logger.Warn(message, "runner", l.Name, "phase", l.Local.Phase)
+	if a.reportedLocalHold == nil {
+		a.reportedLocalHold = make(map[string]localPhase)
+	}
+	a.reportedLocalHold[l.Name] = l.Local.Phase
+	a.logger.Warn(message, "runner", l.Name, "phase", l.Local.Phase)
 }
