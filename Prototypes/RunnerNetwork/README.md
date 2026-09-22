@@ -64,7 +64,7 @@ ssh -F /dev/null \
   -o GlobalKnownHostsFile=/dev/null \
   -o UserKnownHostsFile=/Volumes/YielddRunners/VM.bundle/SSHKnownHosts \
   -o HostKeyAlias=yieldd-macos-template -o StrictHostKeyChecking=yes \
-  -p REPLACE_PORT runner@127.0.0.1 \
+  -o "ProxyCommand=/usr/bin/nc -U 'REPLACE_SOCKET_PATH'" runner@yieldd-macos-template \
   '/usr/bin/curl --noproxy "*" --max-time 10 --silent --show-error --output /dev/null --write-out "%{http_code}" https://github.com/'
 ```
 
