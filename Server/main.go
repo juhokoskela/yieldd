@@ -23,9 +23,10 @@ func main() {
 
 func run() error {
 	var cfg config
-	var directory, clientListen, macOSFallback string
+	var directory, clientListen, macOSFallback, repositories, localOnly string
 	var recoverOnly, allowNonLoopbackClientListen bool
-	flag.StringVar(&cfg.Repository, "repository", "", "Application repository (OWNER/REPOSITORY)")
+	flag.StringVar(&repositories, "repositories", "", "Comma-separated application repositories (OWNER/REPOSITORY)")
+	flag.StringVar(&localOnly, "local-only-repositories", "", "Repositories that wait for local capacity and never dispatch fallback")
 	flag.StringVar(&cfg.Infrastructure, "infrastructure", "", "Infrastructure repository (OWNER/REPOSITORY)")
 	flag.StringVar(&cfg.Fallback, "fallback-runner", "", "Linux fallback target as a JSON label string or array")
 	flag.StringVar(&macOSFallback, "macos-fallback-runner", "", "Enable yieldd-macos with this fallback target as a JSON label string or array")
@@ -38,16 +39,9 @@ func run() error {
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
-	configs := []config{cfg}
-	if macOSFallback != "" {
-		mac := cfg
-		mac.Platform, mac.Fallback = "macos", macOSFallback
-		configs = append(configs, mac)
-	}
-	for _, c := range configs {
-		if err := c.validate(); err != nil {
-			return err
-		}
+	configs, err := repositoryConfigs(cfg, repositories, localOnly, macOSFallback)
+	if err != nil {
+		return err
 	}
 	if !filepath.IsAbs(directory) {
 		return errors.New("state directory must be absolute")
@@ -61,6 +55,11 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
+	root, err := openRepositoryStore(directory, configs)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	deviceToken := os.Getenv("YIELDD_CLIENT_TOKEN")
 	var deviceListener net.Listener
 	if clientListen != "" && !recoverOnly {
@@ -73,19 +72,24 @@ func run() error {
 	}
 	mux := http.NewServeMux()
 	var workers []*platformCoordinator
+	defer func() { closeCoordinators(workers...) }()
+	platforms := map[string][]*coordinatorLoop{}
 	for _, c := range configs {
-		path := directory
-		if c.Platform == "macos" {
-			path = filepath.Join(directory, "macos")
-		}
+		path := filepath.Join(directory, queueDirectory(c))
 		worker, err := openPlatformCoordinator(ctx, c, path, token, recoverOnly)
 		if err != nil {
 			return err
 		}
-		defer worker.close()
 		workers = append(workers, worker)
-		handler := worker.loop.deviceHandler(deviceToken)
-		if c.Platform == "macos" {
+		platforms[c.platform()] = append(platforms[c.platform()], worker.loop)
+	}
+	for platform, loops := range platforms {
+		router, err := newDeviceRouter(cfg.DeviceID, ctx.Done(), loops)
+		if err != nil {
+			return err
+		}
+		handler := router.deviceHandler(deviceToken)
+		if platform == "macos" {
 			mux.Handle("/v1/macos/", platformDeviceHandler(handler))
 		} else {
 			mux.Handle("/", handler)

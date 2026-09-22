@@ -1,36 +1,43 @@
 # Scale Set coordinator prototype
 
-This Go service routes jobs for one application repository. `runs-on: yieldd` targets Linux; `runs-on: yieldd-linux` targets the same scale set when GitHub retains that alias. `runs-on: yieldd-macos` targets a separate macOS scale set when enabled. Each platform uses its own user-configured fallback target, dispatched through a separate infrastructure repository.
+This Go service routes jobs for up to 16 application repositories through one coordinator and one Mac connection. Each repository has its own Linux and optional macOS scale sets. `runs-on: yieldd` targets Linux; `runs-on: yieldd-linux` targets the same scale set when GitHub retains that alias. `runs-on: yieldd-macos` targets macOS. Each platform uses its user-configured fallback target, dispatched through the infrastructure repository, unless that application repository is local-only.
 
-This prototype has capacity for one runner per enabled platform. An optional [connected Mac](../Docs/connected-mac-prototype.md) supplies Linux ARM64 containers and macOS ARM64 VMs on demand. Otherwise, the coordinator provisions that platform's fallback. An issued local assignment awaiting cleanup acknowledgement blocks its own platform, including fallback, but not the other platform. An idle disconnected Mac does not hold the slot after availability expires. The installed Swift agent remains standalone; connected mode uses the foreground `yieldd connect` command.
+This prototype has capacity for one runner per repository/platform queue. An optional [connected Mac](../Docs/connected-mac-prototype.md) supplies one Linux ARM64 container slot and one macOS ARM64 VM slot shared across all repositories. Its existing memory budget still governs whether both can run at once. Other queues can use fallback concurrently. An issued local assignment awaiting cleanup acknowledgement blocks its repository/platform queue and that shared Mac slot, but not fallback for other repositories or the other platform. An idle disconnected Mac does not hold a slot after availability expires. The installed Swift agent remains standalone; connected mode uses the foreground `yieldd connect` command.
 
 The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scaleset/tree/v0.4.0). It scales from GitHub's assigned-job count, not individual job notifications. GitHub chooses which queued job a runner receives.
 
 ## Setup
 
-Use a Linux or macOS coordinator with Go 1.27.1 or newer. Run one coordinator for this repository and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same label during the experiment.
+Use a Linux or macOS coordinator with Go 1.27.1 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same repository's label during the experiment.
 
 The infrastructure repository must contain the `runner-bootstrap.yml` workflow and the per-bootstrap credential selector on `main`. The coordinator generates names such as `yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef`; the workflow reads the corresponding `YIELDD_JIT_0123456789ABCDEF0123456789ABCDEF` secret. The old shared `YIELDD_BOOTSTRAP_JIT` secret is not used.
 
-Provide `GH_TOKEN` through the coordinator's environment. The token needs runner administration access to the application repository, plus workflow dispatch, cancellation, and repository-secret write access in the infrastructure repository. Keep it on the server. GitHub App enrollment and token rotation are not implemented in this prototype.
+Provide `GH_TOKEN` through the coordinator's environment. The token needs runner administration access to every application repository, plus workflow dispatch, cancellation, and repository-secret write access in the infrastructure repository. Keep it on the server. GitHub App enrollment and token rotation are not implemented in this prototype.
 
 From `Server/`:
 
 ```sh
 go run . \
-  --repository juhokoskela/yieldd \
+  --repositories juhokoskela/GlassEQ,juhokoskela/yieldd,juhokoskela/yieldd-infra,juhokoskela/GlassEQServer \
+  --local-only-repositories juhokoskela/yieldd-infra \
   --infrastructure juhokoskela/yieldd-infra \
   --fallback-runner '"ubuntu-24.04"' \
+  --device-id "$YIELDD_DEVICE_ID" \
+  --client-listen 127.0.0.1:8787 \
   --state-dir /absolute/private/yieldd-state
 ```
 
-Add `--macos-fallback-runner '"macos-26"'` to enable the macOS scale set. Neither platform has a default fallback provider. Linux keeps its original scale-set ID and state directory; startup requests the `yieldd-linux` alias. If GitHub retains only `yieldd`, startup preserves that identity and warns that workflows must use `runs-on: yieldd`. This applies to saved, discovered, and newly created Linux sets. Missing base labels, unexpected labels, and changed identities are rejected. macOS stores its independent identity and lease in the `macos/` child directory. Enabling it does not change the saved Linux configuration. Finish outstanding macOS assignments before disabling that queue, and retain its original configuration for recovery.
+Add `--macos-fallback-runner '"macos-26"'` to enable macOS queues for all repositories. Neither platform has a default fallback provider. Startup requests the `yieldd-linux` alias for each Linux set. If GitHub retains only `yieldd`, startup preserves that identity and warns that workflows must use `runs-on: yieldd`. This applies to saved, discovered, and newly created sets. Missing base labels, unexpected labels, and changed identities are rejected.
+
+Repositories listed in `--local-only-repositories` must also appear in `--repositories` and require a connected device. They wait for local capacity, without registering a runner or uploading credentials while waiting. An expired unaccepted offer returns to the local queue instead of dispatching fallback. Waiting local-only queues receive capacity in arrival order. The infrastructure repository may run its own CI this way, but cannot use itself for fallback. Keep its `runner-bootstrap.yml` on an external disposable provider; ordinary CI jobs may use `yieldd` or `yieldd-macos`.
 
 The fallback can also be a JSON label array, such as `'["self-hosted","linux","disposable"]'`. It must select a disposable host with that platform's OS and a workload-compatible architecture and support the infrastructure action's Node runtime. The provider must permit nested runners. Arbitrary provider labels cannot establish compatibility; the operator owns that choice. A target containing `yieldd`, `yieldd-linux`, or `yieldd-macos` is rejected to avoid routing back to this coordinator.
 
 Use trusted workloads and private repositories. The outer bootstrap and nested job share an operating-system account; neither the private HOME nor the reduced environment is a security sandbox. Repository access to the infrastructure workflow and secrets must be restricted accordingly.
 
-The state directory is created with mode `0700`; existing permissive directories are rejected. `state.json` is atomically replaced with mode `0600` and synced to disk. It temporarily contains JIT credentials until their encrypted upload succeeds. Keep the directory private, outside version control, on persistent local storage. One process holds its ownership lock. The lock does not coordinate separate hosts or different state directories.
+The state directory is created with mode `0700`; existing permissive directories are rejected. Each queue stores its identity and lease at `queues/owner/repository/linux/state.json` or `queues/owner/repository/macos/state.json`, using lowercase repository names. Reordering the repository list does not change those identities. Files are atomically replaced with mode `0600` and synced to disk. They temporarily contain JIT credentials until delivery or encrypted upload succeeds. Keep the directory private, outside version control, on persistent local storage. A deployment-wide ownership lock excludes another process using that root; queue locks also protect individual journals. The locks do not coordinate separate hosts or different state directories.
+
+Startup refuses to omit any saved queue. Before removing a repository or platform, finish its work, stop the Mac and coordinator, run recovery with the original configuration, then archive that queue's directory. Changing a queue's fallback or local-only policy also requires completed recovery and a fresh queue directory. Never remove a journal to bypass an unresolved assignment.
 
 ## Container deployment on Linux
 
@@ -48,14 +55,18 @@ Create a private environment file outside the checkout, for example `/etc/yieldd
 GH_TOKEN=REPLACE_WITH_SERVER_GITHUB_TOKEN
 YIELDD_CLIENT_TOKEN=REPLACE_WITH_SHARED_DEVICE_TOKEN
 YIELDD_DEVICE_ID=REPLACE_WITH_EXISTING_LOWERCASE_DEVICE_UUID
-YIELDD_REPOSITORY=juhokoskela/yieldd
+YIELDD_REPOSITORIES=juhokoskela/GlassEQ,juhokoskela/yieldd,juhokoskela/yieldd-infra,juhokoskela/GlassEQServer
+YIELDD_LOCAL_ONLY_REPOSITORIES=juhokoskela/yieldd-infra
 YIELDD_INFRASTRUCTURE=juhokoskela/yieldd-infra
+YIELDD_STATE_VOLUME=yieldd-coordinator-multi-repository-state
 YIELDD_FALLBACK_RUNNER='"ubuntu-24.04"'
 # Optional: enable macOS with a user-selected fallback.
 YIELDD_MACOS_FALLBACK_RUNNER='"macos-26"'
 ```
 
-The fallback remains required and may instead be a JSON label array. Credentials are injected at runtime, never copied into the build context or image. Docker administrators can inspect container environment variables; restrict access to the daemon and the environment file. Avoid printing `docker compose config` with real credentials.
+The fallback remains required for the application queues and may instead be a JSON label array. `yieldd-infra` is local-only in this example; the other three repositories retain fallback. Credentials are injected at runtime, never copied into the build context or image. Docker administrators can inspect container environment variables; restrict access to the daemon and the environment file. Avoid printing `docker compose config` with real credentials.
+
+This release replaces `--repository` / `YIELDD_REPOSITORY` and the single-repository state layout. Before upgrading an existing deployment, finish local jobs and their cleanup acknowledgements, stop the Mac client, and recover the old coordinator with its original binary, configuration, and volume. Stop the old coordinator before launching the new one. Keep its volume intact and explicitly select a fresh `YIELDD_STATE_VOLUME`, as above. The new version refuses old `state.json` or `macos/state.json` layouts; it does not migrate unresolved leases. Existing GitHub scale sets are discovered by name. Reconnect the Mac to the same HTTPS origin after startup; its arguments and token are unchanged.
 
 From `Server/` on the Linux host:
 
@@ -80,9 +91,9 @@ Use your actual domain with a publicly trusted certificate. Then start the Mac c
   --device-id "$YIELDD_DEVICE_ID"
 ```
 
-Compose keeps state in the named volume `yieldd-coordinator-state`, with a private directory owned by UID `65532`. The root filesystem is read-only; only the state volume is writable. It limits the service to one CPU, 512 MiB RAM, and 128 processes/threads. Recreating the container preserves the volume and coordinator identity. Back it up as sensitive data. Never use `docker compose down --volumes` or prune this volume while recovery obligations remain. Bridge networking removes direct access to the host's loopback namespace; it is not an outbound LAN firewall. Existing host-proxy configurations can keep forwarding to `127.0.0.1:8787` after recreation.
+Compose keeps state in `YIELDD_STATE_VOLUME` (default `yieldd-coordinator-state`), with a private directory owned by UID `65532`. The root filesystem is read-only; only the state volume is writable. It limits the service to one CPU, 512 MiB RAM, and 128 processes/threads. Recreating the container preserves the volume and queue identities. Back it up as sensitive data. Never use `docker compose down --volumes` or prune this volume while recovery obligations remain. Bridge networking removes direct access to the host's loopback namespace; it is not an outbound LAN firewall. Existing host-proxy configurations can keep forwarding to `127.0.0.1:8787` after recreation.
 
-Compose restarts the coordinator unless explicitly stopped and allows 90 seconds for shutdown. Repeated errors still require operator attention; restarting does not make an ambiguous dispatch safe to repeat. To stop without deleting state:
+Compose restarts the coordinator unless explicitly stopped and allows 90 seconds for shutdown. Queue sessions close concurrently within one shared 15-second budget after the workers stop and device HTTP drains. Repeated errors still require operator attention; restarting does not make an ambiguous dispatch safe to repeat. To stop without deleting state:
 
 ```sh
 docker compose --env-file /etc/yieldd/coordinator.env stop coordinator
@@ -95,7 +106,8 @@ set -a
 . /etc/yieldd/coordinator.env
 set +a
 docker compose --env-file /etc/yieldd/coordinator.env run --rm coordinator \
-  --repository "$YIELDD_REPOSITORY" \
+  --repositories "$YIELDD_REPOSITORIES" \
+  --local-only-repositories "${YIELDD_LOCAL_ONLY_REPOSITORIES:-}" \
   --infrastructure "$YIELDD_INFRASTRUCTURE" \
   --fallback-runner "$YIELDD_FALLBACK_RUNNER" \
   --macos-fallback-runner "${YIELDD_MACOS_FALLBACK_RUNNER:-}" \
@@ -139,21 +151,21 @@ To cancel and clean up a recorded bootstrap without provisioning another, stop t
 
 ```sh
 go run . \
-  --repository juhokoskela/yieldd \
+  --repositories juhokoskela/yieldd \
   --infrastructure juhokoskela/yieldd-infra \
   --fallback-runner '"ubuntu-24.04"' \
   --state-dir /absolute/private/yieldd-state \
   --recover
 ```
 
-Recovery does not delete the scale set or cancel the original application workflow. It refuses to remove a busy or mismatched runner. Changing configuration requires recovering the old state with its original arguments and choosing a separate state directory. Never delete an active lease to force a retry.
-
-This revision removes the prototype's `secret_stored` state field. Recover any outstanding lease with the previous binary before upgrading. Files containing the removed field are rejected rather than silently reinterpreted; a cleared state file remains compatible.
+Recovery visits every configured queue independently. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. Changing a queue's configuration requires recovering its old state with the original arguments and choosing a fresh queue directory. Never delete an active lease to force a retry.
 
 ## Validation status
 
 Local tests exercise the upstream listener callback integration, encrypted HTTP credential delivery, dispatch identity, interrupted provisioning, exclusive state ownership, and cleanup failures. CI runs the Go race detector and vet. These checks do not establish live provider behavior for new configurations.
 
+Multi-repository tests cover shared local admission, independent fallback, queue-specific acceptance and cleanup, local-only waiting, restart identities, and rejected state omissions. The Mac's existing owner/runner protocol is unchanged. Multi-repository execution on EC2 and the connected Mac still requires live acceptance.
+
 Manual cross-repository pickup already succeeded with a repository JIT runner: [application run](https://github.com/juhokoskela/yieldd/actions/runs/34688921974) and [infrastructure run](https://github.com/juhokoskela/yieldd-infra/actions/runs/34688923785). That was not a coordinator or Scale Set test.
 
-Live coordinator acceptance on September 17 confirmed automatic hosted pickup, restart reconciliation, and intentional workload failure followed by cleanup. The failure case preserved the application failure while the bootstrap succeeded. Cancellation and no-pickup cases remain separate checks. Linux connected execution has also been exercised live. macOS connected execution and dual-platform routing still need live acceptance. Start with one trusted job at a time and inspect the run conclusions, exact registration, and cleanup state.
+Live single-repository acceptance on September 17 confirmed automatic hosted pickup, restart reconciliation, and intentional workload failure followed by cleanup. The failure case preserved the application failure while the bootstrap succeeded. Earlier testing also exercised Linux and macOS connected execution and capacity-triggered fallback. Validate each new multi-repository queue with a trusted job and inspect the run conclusion, exact registration, and cleanup state before increasing concurrency.

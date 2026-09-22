@@ -3,7 +3,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 configuration="$(GH_TOKEN=configuration-test YIELDD_CLIENT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-    YIELDD_REPOSITORY=example/application YIELDD_INFRASTRUCTURE=example/infrastructure \
+    YIELDD_REPOSITORIES=example/application,example/infrastructure \
+    YIELDD_LOCAL_ONLY_REPOSITORIES=example/infrastructure YIELDD_INFRASTRUCTURE=example/infrastructure \
+    YIELDD_STATE_VOLUME=yieldd-compose-test-state \
     YIELDD_FALLBACK_RUNNER='"ubuntu-24.04"' YIELDD_MACOS_FALLBACK_RUNNER='' \
     YIELDD_DEVICE_ID=01234567-89ab-4def-8123-456789abcdef \
     docker compose --env-file /dev/null -f compose.yaml config --format json)"
@@ -16,6 +18,11 @@ jq -e '.services.coordinator |
     .read_only == true and .cap_drop == ["ALL"] and
     .security_opt == ["no-new-privileges:true"] and
     (.command | index("0.0.0.0:8787")) != null and
+    (.command | index("--repositories")) != null and
+    (.command | index("example/application,example/infrastructure")) != null and
+    (.command | index("--local-only-repositories")) != null and
+    .command[(.command | index("--local-only-repositories")) + 1] == "example/infrastructure" and
     (.command | index("--allow-non-loopback-client-listen")) != null' <<< "$configuration" >/dev/null
+jq -e '.volumes.state.name == "yieldd-compose-test-state"' <<< "$configuration" >/dev/null
 
 echo 'Compose limits and loopback-only port publication validated.'

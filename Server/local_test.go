@@ -18,9 +18,7 @@ func localFixture(t *testing.T) (*coordinator, *fakeWorld, *stateStore, deviceRe
 	t.Helper()
 	c, w, store := newFixture(t)
 	c.state.Config.DeviceID = testDevice
-	if _, err := c.pollDevice(deviceRequest{DeviceID: testDevice}); err != nil {
-		t.Fatal(err)
-	}
+	c.device.pollNow()
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 {
 		t.Fatalf("offer: %d %v", n, err)
 	}
@@ -64,7 +62,7 @@ func TestIssuedLocalLeaseSurvivesRestartAndDisconnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.state = saved
-	c.availableUntil = time.Time{}
+	c.device.availableUntil = time.Time{}
 	c.state.Lease.Local.Expires = time.Now().Add(-time.Hour)
 	for _, demand := range []int{0, 1, 10} {
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), demand); err != nil || n != 1 {
@@ -113,7 +111,7 @@ func TestLocalCapacityExpiresAndZeroDemandRetractsUnacceptedOffer(t *testing.T) 
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 0); err != nil || n != 0 {
 		t.Fatalf("retract: %d %v", n, err)
 	}
-	c.availableUntil = time.Now().Add(-time.Second)
+	c.device.availableUntil = time.Now().Add(-time.Second)
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +202,7 @@ func TestDeviceHTTPAuthenticatesAndDoesNotReplayCredentials(t *testing.T) {
 	go func() { defer close(done); loop.run() }()
 	t.Cleanup(func() { cancel(); <-done })
 	token := strings.Repeat("x", 32)
-	server := httptest.NewServer(loop.deviceHandler(token))
+	server := httptest.NewServer(deviceHandlerFor(t, loop, token))
 	t.Cleanup(server.Close)
 	body, _ := json.Marshal(request)
 	for _, test := range []struct {
@@ -345,7 +343,7 @@ func TestDeviceRequestRejectsOversizedAndUnknownFields(t *testing.T) {
 	go func() { defer close(done); loop.run() }()
 	defer func() { cancel(); <-done }()
 	token := strings.Repeat("x", 32)
-	handler := loop.deviceHandler(token)
+	handler := deviceHandlerFor(t, loop, token)
 	for _, body := range []string{`{"device_id":"` + strings.Repeat("x", 4096) + `"}`, `{"device_id":"x","command":"execute"}`, `{} {}`} {
 		request := httptest.NewRequestWithContext(ctx, "POST", "/v1/accept", strings.NewReader(body))
 		request.Header.Set("Authorization", "Bearer "+token)

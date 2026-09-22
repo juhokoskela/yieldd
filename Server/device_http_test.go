@@ -20,7 +20,7 @@ func TestDeviceHTTPValidationAndShutdownDiagnostics(t *testing.T) {
 	c.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	handler := newCoordinatorLoop(ctx, c).deviceHandler(strings.Repeat("x", 32))
+	handler := deviceHandlerFor(t, newCoordinatorLoop(ctx, c), strings.Repeat("x", 32))
 	body, _ := json.Marshal(request)
 	for _, test := range []struct {
 		method, path, body string
@@ -54,7 +54,7 @@ func TestDeviceHTTPDrainDeliversAlreadyIssuedCredential(t *testing.T) {
 	defer func() { cancel(); <-loopDone }()
 	issued := make(chan struct{})
 	release := make(chan struct{})
-	handler := loop.deviceHandler(strings.Repeat("x", 32))
+	handler := deviceHandlerFor(t, loop, strings.Repeat("x", 32))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handler.ServeHTTP(w, r)
 		close(issued)
@@ -116,7 +116,7 @@ func TestLongPollTimeoutAndWakeup(t *testing.T) {
 				done := make(chan struct{})
 				go func() { defer close(done); loop.run() }()
 				defer func() { cancel(); <-done }()
-				handler := loop.deviceHandler(strings.Repeat("x", 32))
+				handler := deviceHandlerFor(t, loop, strings.Repeat("x", 32))
 				request := func(device string) *httptest.ResponseRecorder {
 					r := httptest.NewRequest("POST", "/v1/poll", strings.NewReader(`{"device_id":"`+device+`"}`))
 					r.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 32))
@@ -150,46 +150,4 @@ func TestLongPollTimeoutAndWakeup(t *testing.T) {
 			})
 		})
 	}
-}
-
-func TestQueuedPollRefreshesAvailabilityAfterSlowHostedPreparation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c, w, _ := newFixture(t)
-		c.state.Config.DeviceID = testDevice
-		ctx, cancel := context.WithCancel(t.Context())
-		loop := newCoordinatorLoop(ctx, c)
-		done := make(chan struct{})
-		go func() { defer close(done); loop.run() }()
-		defer func() { cancel(); <-done }()
-		entered := make(chan struct{})
-		release := make(chan struct{})
-		w.afterSecret = func() { close(entered); <-release }
-		provision := make(chan error, 1)
-		go func() { _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); provision <- err }()
-		<-entered
-		polled := make(chan error, 1)
-		go func() {
-			polled <- loop.invoke(t.Context(), func(context.Context) error { _, err := c.pollDevice(deviceRequest{DeviceID: testDevice}); return err })
-		}()
-		synctest.Wait()
-		time.Sleep(35 * time.Second)
-		close(release)
-		if err := <-provision; err != nil {
-			t.Fatal(err)
-		}
-		if err := <-polled; err != nil {
-			t.Fatal(err)
-		}
-		w.run.Status = "completed"
-		w.run.Conclusion = "success"
-		if _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-			t.Fatal(err)
-		}
-		if c.state.Lease.Local == nil {
-			t.Fatal("fresh pending poll lost preference")
-		}
-	})
 }

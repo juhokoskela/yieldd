@@ -34,7 +34,7 @@ type coordinator struct {
 	runners           runnerAPI
 	bootstrap         bootstrapAPI
 	logger            *slog.Logger
-	availableUntil    time.Time
+	device            *deviceQueue
 	reportedLocalHold string
 }
 
@@ -63,6 +63,8 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, err
 	}
 	if c.state.Lease != nil {
+		// An unaccepted offer cannot have consumed the reported demand.
+		reoffer := c.state.Config.LocalOnly && c.state.Lease.Local != nil && c.state.Lease.Local.Phase == localOffered
 		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent && (c.state.Lease.Local == nil || c.state.Lease.Local.Phase != localIssued)
 		done, err := c.reconcile(ctx, recoverOnly)
 		if err != nil && c.state.Lease != nil && c.state.Lease.Local != nil && c.state.Lease.CleanupIntent && transientFailure(err) {
@@ -72,19 +74,29 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		if err != nil || !done {
 			return 1, err
 		}
-		return 0, nil
+		if !reoffer {
+			return 0, nil
+		}
 	}
 	if count <= 0 {
+		c.device.forget(c.state.Owner)
 		return 0, nil
 	}
+	local := c.state.Config.DeviceID != "" && c.device.claim(c.state.Owner)
+	if !local && c.state.Config.LocalOnly {
+		return 0, nil
+	}
+	if !local {
+		c.device.forget(c.state.Owner)
+	}
 	c.state.Lease = &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
-	if time.Now().Before(c.availableUntil) {
+	if local {
 		c.state.Lease.Local = &localLease{DeviceID: c.state.Config.DeviceID, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
-		c.availableUntil = time.Time{}
 	}
 	if err := c.save(c.state); err != nil {
 		return 0, err
 	}
+	c.device.update(c.state)
 	if c.state.Lease.Local != nil {
 		c.logger.Info("Local offer created", "runner", c.state.Lease.Name, "device", c.state.Config.DeviceID, "accept_timeout", offerLifetime)
 		return 1, nil
@@ -110,6 +122,9 @@ func (c *coordinator) register(ctx context.Context) error {
 }
 
 func (c *coordinator) prepare(ctx context.Context) error {
+	if c.state.Config.LocalOnly {
+		return errors.New("local-only queues cannot dispatch fallback runners")
+	}
 	l := c.state.Lease
 	if l.RunnerID == 0 {
 		return errors.New("registration outcome is unknown; run with --recover before provisioning again")
@@ -259,6 +274,7 @@ func (c *coordinator) beginCleanup(conclusion string) error {
 		return fmt.Errorf("persist cleanup intent: %w", err)
 	}
 	*l = nextLease
+	c.device.update(c.state)
 	return nil
 }
 
@@ -313,5 +329,6 @@ func (c *coordinator) cleanup(ctx context.Context) error {
 		return err
 	}
 	*c.state = next
+	c.device.update(c.state)
 	return nil
 }

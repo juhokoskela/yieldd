@@ -2,7 +2,7 @@
 
 This prototype offers one Linux ARM64 container slot, one macOS ARM64 VM slot, or both from one Mac. Application jobs use `runs-on: yieldd` (Linux), `yieldd-linux`, or `yieldd-macos`. If the coordinator warns that GitHub did not retain the `yieldd-linux` alias, use `yieldd` for Linux; macOS remains separate. An idle slot creates no guest and reserves no RAM. Polling advertises a snapshot of available memory; an offer must acquire an atomic reservation before acceptance.
 
-There is at most one active runner per platform across local and fallback execution. Both local slots share one host-memory budget: Linux reserves 12 GiB and macOS reserves 8 GiB while provisioning or executing. A 24-GiB host's 18-GiB budget cannot run both simultaneously, but neither idle slot can starve the other. A platform without local capacity uses its configured fallback. This is not yet a multi-device scheduler or installed connected agent. Workloads must support the chosen fallback architecture as well as local ARM64.
+The coordinator can serve multiple repositories. Each repository/platform queue has at most one active runner across local and fallback execution. The Mac supplies one local slot per platform, shared across those repositories. Both local slots share one host-memory budget: Linux reserves 12 GiB and macOS reserves 8 GiB while provisioning or executing. A 24-GiB host's 18-GiB budget cannot run both simultaneously, but neither idle slot can starve the other. A queue without local capacity uses its configured fallback, unless its repository is local-only. This is not yet a multi-device scheduler or installed connected agent. Workloads using fallback must support its architecture as well as local ARM64.
 
 ## Setup
 
@@ -14,7 +14,7 @@ From `Server/`, start the coordinator:
 
 ```sh
 GH_TOKEN="$(gh auth token)" go run . \
-  --repository juhokoskela/yieldd \
+  --repositories juhokoskela/yieldd \
   --infrastructure juhokoskela/yieldd-infra \
   --fallback-runner '"ubuntu-24.04"' \
   --device-id "$YIELDD_DEVICE_ID" \
@@ -25,6 +25,8 @@ GH_TOKEN="$(gh auth token)" go run . \
 Bind the native HTTP listener to loopback. The Compose container explicitly opts into wildcard binding with `--allow-non-loopback-client-listen` and publishes only a host-loopback port. Without that flag, wildcard binding is rejected. For a remote Mac, expose it through a trusted HTTPS reverse proxy on the coordinator host. Forward `/v1/` and the Authorization header, allow 20-second long polls and 60-second operations, and disable response caching and credential/body logging. The Mac validates normal system TLS trust and refuses redirects. Direct loopback HTTP is permitted only for same-host testing.
 
 For a separate Linux host, the [coordinator container setup](../Server/README.md#container-deployment-on-linux) provides a non-root image, persistent state, and a Compose service behind the host's HTTPS proxy. Only the coordinator moves into that container; `yieldd connect` remains a native macOS process.
+
+Add repositories to the coordinator's comma-separated `--repositories` list, not to the Mac command. Use `--local-only-repositories` for repositories that must wait rather than use fallback. The infrastructure repository's own CI must be local-only, while its fallback bootstrap workflow continues to target an external provider. The [server setup](../Server/README.md#setup) describes queue state and the required migration from single-repository deployments.
 
 On the Mac, rebuild the guest image with JIT support and the CLI, from the repository root:
 
@@ -71,13 +73,13 @@ On the Mac, offer both platforms through one process:
   --macos-template /Users/juhokoskela/VM.bundle
 ```
 
-For macOS only, omit `--platform linux`. With no platform flags, the existing command remains Linux-only. The macOS template path must be absolute and outside the managed clone directory. Both slots poll independently without reserving memory; when simultaneous offers exceed the budget, only the slot that acquires its reservation can accept. The other offer expires into its own fallback. On a host with enough memory, the two platforms can execute concurrently.
+For macOS only, omit `--platform linux`. With no platform flags, the existing command remains Linux-only. The macOS template path must be absolute and outside the managed clone directory. Both slots poll independently without reserving memory; when simultaneous offers exceed the budget, only the slot that acquires its reservation can accept. The other offer expires into fallback, or returns to waiting for a local-only repository. On a host with enough memory, the two platforms can execute concurrently, including jobs from different repositories.
 
 The proxy must forward all of `/v1/`, including `/v1/macos/`. Workflows need only `runs-on: yieldd-macos`; no workflow-side routing action is needed.
 
 ## Delivery and recovery
 
-An offer contains the repository, coordinator identity, runner identity, and the queue's Linux or macOS ARM64 platform. It contains no executable command. The Mac has five seconds to accept an offer; guest startup is not part of that deadline. A coordinator timer starts hosted fallback when an unaccepted offer expires, without waiting for another GitHub demand message. On restart, the coordinator first confirms current demand with GitHub so it can retract an obsolete offer. Acceptance and expiry share the same event loop, so they cannot both win. An in-progress coordinator operation can delay timer handling. Logs report acceptance latency and expired offers.
+An offer contains the repository, queue identity, runner identity, and the queue's Linux or macOS ARM64 platform. It contains no executable command. Acceptance, renewal, and cleanup route by the persisted queue identity, not by the currently waiting repository. The Mac has five seconds to accept an offer; guest startup is not part of that deadline. A coordinator timer starts hosted fallback when an unaccepted offer expires, without waiting for another GitHub demand message. Local-only offers instead release their claim and wait again. On restart, the coordinator first confirms current demand with GitHub so it can retract an obsolete offer. Acceptance and expiry share the queue's event loop, so they cannot both win. An in-progress operation can delay that queue's timer, but not another queue's polling. Logs report acceptance latency and expired offers.
 
 Availability remains valid for 30 seconds after a poll. Acceptance starts a separate 30-second registration window: if credential delivery never reaches the issued phase, the next demand reconciliation after expiry, or zero demand, triggers registration cleanup before another allocation. Issued credentials never expire into hosted fallback.
 
@@ -89,7 +91,7 @@ Upgrade the coordinator before the Mac client: the new client requires `/v1/rene
 
 Transport failures and retryable HTTP responses trigger a five-second retry delay. During execution, renewal failures use the remaining offline grace. Before accepting more work after an interrupted assignment, the client destroys any recorded guest and retries acknowledgement. It never retries acceptance or resumes the recorded listener. Restarting `connect` uses the same recovery path. Failed destruction, permanent HTTP errors, and invalid responses stop the client with unresolved recovery state retained. Standalone runner commands refuse to bypass that journal. Empty polls have a one-second client-side delay, and memory admission reports when it cannot advertise capacity.
 
-Restart the coordinator with the same arguments and state directory after a server interruption. Once credentials may have reached a Mac, disconnection and elapsed time do not authorize hosted replacement. An issued assignment without a cleanup acknowledgement blocks new provisioning for its platform, including hosted fallback, until the Mac returns. The coordinator reports this hold. Once cleanup intent is durable, normal reconciliation can finish registration cleanup without another acknowledgement; transient local-cleanup failures retain the lease and retry on subsequent reconciliation. `--recover` cannot bypass an issued local assignment. A stopped idle client does not block hosted fallback after its advertised availability expires.
+Restart the coordinator with the same configuration and state directory after a server interruption. Once credentials may have reached a Mac, disconnection and elapsed time do not authorize hosted replacement. An issued assignment without a cleanup acknowledgement blocks its repository/platform queue and the shared local slot until the Mac returns; other repositories can still use fallback. The coordinator reports this hold. Once cleanup intent is durable, normal reconciliation can finish registration cleanup without another acknowledgement; transient local-cleanup failures retain the lease and retry on subsequent reconciliation. `--recover` cannot bypass an issued local assignment. A stopped idle client does not block hosted fallback after its advertised availability expires.
 
 If the coordinator's original state is permanently lost, restoring it is preferable to abandoning recovery. Otherwise, first stop the old coordinator and manually remove the exact runner registration from the application repository's GitHub settings. Then, on the Mac, use the original server and device ID and the runner name printed in the recovery error:
 

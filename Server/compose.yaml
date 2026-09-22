@@ -18,8 +18,10 @@ services:
       GH_TOKEN: ${GH_TOKEN:?Set GH_TOKEN}
       YIELDD_CLIENT_TOKEN: ${YIELDD_CLIENT_TOKEN:?Set YIELDD_CLIENT_TOKEN}
     command:
-      - --repository
-      - ${YIELDD_REPOSITORY:?Set YIELDD_REPOSITORY}
+      - --repositories
+      - ${YIELDD_REPOSITORIES:?Set YIELDD_REPOSITORIES to comma-separated OWNER/REPOSITORY names}
+      - --local-only-repositories
+      - ${YIELDD_LOCAL_ONLY_REPOSITORIES:-}
       - --infrastructure
       - ${YIELDD_INFRASTRUCTURE:?Set YIELDD_INFRASTRUCTURE}
       - --fallback-runner
@@ -43,4 +45,4 @@ services:
 
 volumes:
   state:
-    name: yieldd-coordinator-state
+    name: ${YIELDD_STATE_VOLUME:-yieldd-coordinator-state}

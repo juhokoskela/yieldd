@@ -15,6 +15,7 @@ type config struct {
 	Fallback       string `json:"fallback"`
 	DeviceID       string `json:"device_id,omitempty"`
 	Platform       string `json:"platform,omitempty"`
+	LocalOnly      bool   `json:"local_only,omitempty"`
 }
 
 func (c config) platform() string {
@@ -49,8 +50,14 @@ func (c config) validate() error {
 			return errors.New("repository and infrastructure must be OWNER/REPOSITORY")
 		}
 	}
-	if strings.EqualFold(c.Repository, c.Infrastructure) {
+	if strings.EqualFold(c.Repository, c.Infrastructure) && !c.LocalOnly {
 		return errors.New("application and infrastructure repositories must differ")
+	}
+	if c.LocalOnly {
+		if c.DeviceID == "" || c.Fallback != "" {
+			return errors.New("local-only queues require a device and cannot configure a fallback")
+		}
+		return nil
 	}
 	var label string
 	var labels []string

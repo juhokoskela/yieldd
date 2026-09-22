@@ -7,14 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
 )
 
-// Each platform owns a journal, message session, and serialized lifecycle.
-// Linux retains its original directory and scale-set identity.
+// Each repository/platform queue owns a journal, message session, and serialized lifecycle.
 type platformCoordinator struct {
 	cancel   context.CancelFunc
 	store    *stateStore
@@ -31,7 +31,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	p := &platformCoordinator{store: store}
 	defer func() {
 		if err != nil {
-			p.close()
+			closeCoordinators(p)
 		}
 	}()
 	saved, err := store.load(cfg)
@@ -49,7 +49,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: slog.Default().With("platform", cfg.platform())}
+	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, device: newDeviceQueue(), logger: slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())}
 	loopContext, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	p.loop = newCoordinatorLoop(loopContext, worker)
@@ -77,13 +77,21 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	return p, nil
 }
 
-func (p *platformCoordinator) close() {
+func closeCoordinators(workers ...*platformCoordinator) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var pending sync.WaitGroup
+	for _, worker := range workers {
+		pending.Go(func() { worker.close(ctx) })
+	}
+	pending.Wait()
+}
+
+func (p *platformCoordinator) close(ctx context.Context) {
 	if p.cancel != nil {
 		p.cancel()
 	}
 	if p.session != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
 		if err := p.session.Close(ctx); err != nil {
 			slog.Error("Close scale set session", "error", &sdkError{"close message session", err})
 		}
@@ -109,7 +117,7 @@ func (p *platformCoordinator) run(ctx context.Context, recoverOnly bool) error {
 	}
 	defer p.cancel()
 	worker := p.loop.worker
-	worker.logger.Info("Serving scale set", "repository", worker.state.Config.Repository, "scale_set", worker.state.ScaleSetID, "capacity", 1, "fallback", worker.state.Config.Fallback)
+	worker.logger.Info("Serving scale set", "scale_set", worker.state.ScaleSetID, "capacity", 1, "local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
 	done := make(chan error, 1)
 	go func() { done <- p.loop.run(); p.cancel() }()
 	err := p.messages.Run(p.loop.ctx, p.loop)

@@ -114,6 +114,9 @@ func (s *stateStore) load(c config) (*state, error) {
 		return nil, errors.New("invalid scale set identity")
 	}
 	if l := value.Lease; l != nil {
+		if c.LocalOnly && l.Local == nil {
+			return nil, errors.New("local-only queue contains a fallback lease")
+		}
 		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0) || (l.Conclusion != "" && !l.CleanupIntent) || ((l.DispatchIntent || l.CleanupIntent) && l.JIT != "") {
 			return nil, errors.New("invalid provisioning lease")
 		}

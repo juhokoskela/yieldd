@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -22,15 +23,16 @@ type coordinatorCall struct {
 
 // One event loop owns all coordinator state, including writes that span remote API calls.
 type coordinatorLoop struct {
-	worker         *coordinator
-	ctx            context.Context
-	calls          chan coordinatorCall
-	changed        chan struct{}
-	demandObserved bool
+	worker          *coordinator
+	ctx             context.Context
+	calls           chan coordinatorCall
+	capacityChanged chan struct{}
+	demandObserved  bool
+	desiredCount    int
 }
 
 func newCoordinatorLoop(ctx context.Context, worker *coordinator) *coordinatorLoop {
-	return &coordinatorLoop{worker: worker, ctx: ctx, calls: make(chan coordinatorCall), changed: make(chan struct{}, 1)}
+	return &coordinatorLoop{worker: worker, ctx: ctx, calls: make(chan coordinatorCall), capacityChanged: make(chan struct{}, 1)}
 }
 
 func (s *coordinatorLoop) run() error {
@@ -52,15 +54,27 @@ func (s *coordinatorLoop) run() error {
 		select {
 		case <-s.ctx.Done():
 			return nil
+		case <-s.capacityChanged:
+			if s.ctx.Err() != nil {
+				return nil
+			}
+			if s.demandObserved {
+				ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
+				_, err := s.worker.HandleDesiredRunnerCount(ctx, s.desiredCount)
+				cancel()
+				if err != nil {
+					return err
+				}
+			}
 		case <-expired:
 			if s.ctx.Err() != nil {
 				return nil
 			}
 			ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
-			_, err := s.worker.reconcileLocal(ctx, false)
+			_, err := s.worker.HandleDesiredRunnerCount(ctx, s.desiredCount)
 			cancel()
 			if err != nil {
-				return &provisioningError{err}
+				return err
 			}
 		case call := <-s.calls:
 			ctx, cancel := context.WithTimeout(call.ctx, 60*time.Second)
@@ -98,13 +112,10 @@ func (s *coordinatorLoop) HandleDesiredRunnerCount(ctx context.Context, count in
 	var actual int
 	err := s.invoke(ctx, func(ctx context.Context) (err error) {
 		s.demandObserved = true
+		s.desiredCount = count
 		actual, err = s.worker.HandleDesiredRunnerCount(ctx, count)
 		return err
 	})
-	select {
-	case s.changed <- struct{}{}:
-	default:
-	}
 	return actual, err
 }
 func (s *coordinatorLoop) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error {
@@ -134,7 +145,7 @@ func listenForDevice(address, token string, allowNonLoopback bool) (net.Listener
 	return net.Listen("tcp", address)
 }
 
-func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
+func (s *deviceRouter) deviceHandler(token string) http.Handler {
 	expected := sha256.Sum256([]byte("Bearer " + token))
 	pollSlot := make(chan struct{}, 1)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -187,18 +198,18 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 				response = offer
 			}
 		case "/v1/accept":
-			err = s.invoke(r.Context(), func(ctx context.Context) error {
-				credential, acceptErr := s.worker.acceptDevice(ctx, request)
+			err = s.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error {
+				credential, acceptErr := worker.acceptDevice(ctx, request)
 				response = credential
 				return acceptErr
 			})
 		case "/v1/complete":
-			err = s.invoke(r.Context(), func(ctx context.Context) error { return s.worker.completeDevice(ctx, request) })
+			err = s.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error { return worker.completeDevice(ctx, request) })
 			response = struct{}{}
 		case "/v1/renew":
-			err = s.invoke(r.Context(), func(ctx context.Context) error {
+			err = s.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error {
 				var renewalErr error
-				response, renewalErr = s.worker.renewDevice(ctx, request)
+				response, renewalErr = worker.renewDevice(ctx, request)
 				return renewalErr
 			})
 		default:
@@ -214,7 +225,11 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 			if errors.As(err, &rejection) {
 				http.Error(w, rejection.message, rejection.status)
 			} else {
-				s.worker.logger.Error("Device request failed", "error", err)
+				logger := slog.Default()
+				if loop := s.loops[request.Owner]; loop != nil {
+					logger = loop.worker.logger
+				}
+				logger.Error("Device request failed", "error", err)
 				http.Error(w, "coordinator operation failed; retain local recovery state", http.StatusServiceUnavailable)
 			}
 			return
@@ -222,25 +237,4 @@ func (s *coordinatorLoop) deviceHandler(token string) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(response)
 	})
-}
-
-func (s *coordinatorLoop) poll(ctx context.Context, request deviceRequest) (*deviceOffer, error) {
-	timer := time.NewTimer(20 * time.Second)
-	defer timer.Stop()
-	for {
-		var offer *deviceOffer
-		err := s.invoke(ctx, func(context.Context) (err error) { offer, err = s.worker.pollDevice(request); return err })
-		if err != nil || offer != nil {
-			return offer, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-s.ctx.Done():
-			return nil, s.ctx.Err()
-		case <-timer.C:
-			return nil, nil
-		case <-s.changed:
-		}
-	}
 }

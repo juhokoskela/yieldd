@@ -76,8 +76,8 @@ func TestOfferTimerFallsBackWithoutAnotherDemandMessage(t *testing.T) {
 		}
 		// Polling refreshes availability, not the outstanding offer deadline.
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			_, err := c.pollDevice(request)
-			return err
+			c.device.pollNow()
+			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -280,8 +280,8 @@ func TestOfferTimerUsesReplacementOfferDeadline(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			_, err := c.pollDevice(deviceRequest{DeviceID: testDevice})
-			return err
+			c.device.pollNow()
+			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -309,9 +309,7 @@ func TestOfferAndAvailabilityHaveSeparateLifetimes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c, w, _ := newFixture(t)
 		c.state.Config.DeviceID = testDevice
-		if _, err := c.pollDevice(deviceRequest{DeviceID: testDevice}); err != nil {
-			t.Fatal(err)
-		}
+		c.device.pollNow()
 		time.Sleep(21 * time.Second)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)
