@@ -1,4 +1,10 @@
 # Sourced by the relay and prototype build scripts.
+patched_source_directory() {
+    local prefix="$1" revision="$2" patch="$3" digest
+    digest=$(shasum -a 256 "$patch") || return
+    printf '%s-%s-%s\n' "$prefix" "$revision" "${digest%% *}"
+}
+
 prepare_checkout() (
     local repository="$1" revision="$2" destination="$3" patch="$4"
     shift 4

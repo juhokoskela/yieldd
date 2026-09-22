@@ -60,7 +60,6 @@ for state in pristine patched staged; do
     if [[ "$state" == staged ]]; then git -C "$checkout" add other; fi
     before=$(git -C "$checkout" write-tree)
     if [[ "$state" == patched ]]; then
-        # This is accepted by the old reverse-check-only implementation.
         git -C "$checkout" apply --reverse --check "$patch"
     fi
     expect_rejection
@@ -119,5 +118,21 @@ prepare_checkout "$repository" "$revision" "$checkout" "$patch" .build generated
 printf 'unexpected sibling\n' > "$checkout/generated/other.swift"
 expect_rejection .build generated/helper.swift
 [[ -f "$checkout/generated/other.swift" ]]
+
+first=$(patched_source_directory "$fixture/cache" "$revision" "$patch")
+prepare_checkout "$repository" "$revision" "$first" "$patch"
+printf 'another patch\n' > "$repository/source"
+git -C "$repository" add source
+git -C "$repository" diff --cached --binary > "$fixture/next.patch"
+second=$(patched_source_directory "$fixture/cache" "$revision" "$fixture/next.patch")
+[[ "$first" != "$second" ]]
+prepare_checkout "$repository" "$revision" "$second" "$fixture/next.patch"
+[[ "$(<"$first/source")" == patched && "$(<"$second/source")" == 'another patch' ]]
+[[ "$(patched_source_directory "$fixture/cache" "$revision" "$patch")" == "$first" ]]
+[[ "$(patched_source_directory "$fixture/cache" different-revision "$patch")" != "$first" ]]
+prepare_checkout "$repository" "$revision" "$first" "$patch"
+checkout="$first"
+printf 'unexpected edit\n' > "$checkout/other"
+expect_rejection
 
 echo 'Patched-source checks passed; unexpected changes were rejected without discarding them.'

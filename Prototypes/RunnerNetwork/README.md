@@ -27,8 +27,8 @@ This macOS check builds and signs both probes, runs the relay tests with the rac
 Public-network and fuzz checks are separate:
 
 ```sh
-(cd Prototypes/RunnerNetwork && YIELDD_NETWORK_LIVE=1 go test -run TestPublicHTTPS -v -timeout 30s)
-(cd Prototypes/RunnerNetwork && go test -run '^$' -fuzz FuzzFrameBoundary -fuzztime 10s -parallel 2)
+(cd Prototypes/RunnerNetwork && YIELDD_NETWORK_LIVE=1 go test -modfile ../../.build/network-relay.mod -run TestPublicHTTPS -v -timeout 30s)
+(cd Prototypes/RunnerNetwork && go test -modfile ../../.build/network-relay.mod -run '^$' -fuzz FuzzFrameBoundary -fuzztime 10s -parallel 2)
 ```
 
 The preparation script creates pinned source checkouts under `.build/`, applies the two checked-in patches, builds the relay and both probes, and ad-hoc signs the probes with the existing virtualization entitlement. It refreshes generated copies of `LinuxProbe.swift`, `MacProbeLifecycle.swift`, and `MacProbeLifecycleTests.swift` from this directory, plus `PacketSocket.swift` and `RunnerNetworkRelay.swift` from `Sources/Yieldd/`. Edit those originals, not their `.build/` copies. It does not install, stop, or reconfigure Apple Container. Go dependencies belong to this separate module, not the coordinator. `Scripts/build-network-relay.sh` builds only the relay for the signed app, without building the Container fork or probes.
@@ -76,15 +76,20 @@ ssh -F /dev/null \
 
 `container.patch` targets Apple Container 1.3.1 at `a9a62e28f6beb88940122a3d7b286f2d5ae8053a`. It adds an experimental `network-socket` machine setting and a typed `ContainerConfiguration.networkSocket` field, replaces the built-in network with the socket attachment, and disables SSH-agent forwarding in that mode. Labels cannot select the attachment. It requires `home-mount=none`; the runtime refuses another network alongside the relay.
 
-The shared `PacketSocket.swift` is copied into the fork during preparation. No Containerization dependency fork is needed. Compile and run the configuration tests without starting any service:
+The shared `PacketSocket.swift` is copied into the fork during preparation. No Containerization dependency fork is needed. Dependency checkout paths include their pinned revision and patch digest. Changing a patch selects a new checkout without deleting old work; unexpected edits in a selected checkout still fail validation. The relay build uses a generated module file and disables VCS metadata.
+
+After preparation, compile and run the configuration tests from the repository root without starting any service:
 
 ```sh
+repo_root="$PWD"
+prototype_dir="$repo_root/Prototypes/RunnerNetwork"
+source "$prototype_dir/source-paths.sh"
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  swift build --package-path .build/network-container --target ContainerRuntimeLinuxServer -j 6
+  swift build --package-path "$container_source" --target ContainerRuntimeLinuxServer -j 6
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  swift build --package-path .build/network-container --target MachineAPIService -j 6
+  swift build --package-path "$container_source" --target MachineAPIService -j 6
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  swift test --package-path .build/network-container --filter MachineConfigTests -j 6
+  swift test --package-path "$container_source" --filter MachineConfigTests -j 6
 ```
 
 Do not run the fork's `system start` or `make install` on this host yet. The API server uses the same launchd service name as the installed Container service, even with a different data root. The Linux probe below runs the patched runtime over anonymous, in-process XPC instead.
@@ -93,7 +98,7 @@ Do not run the fork's `system start` or `make install` on this host yet. The API
 
 ## Disposable Linux probe
 
-The build produces `.build/network-container/.build/debug/yieldd-linux-network-probe`. It takes seven positional arguments:
+The build produces `$container_source/.build/debug/yieldd-linux-network-probe` using the path selected above. It takes seven positional arguments:
 
 ```text
 yieldd-linux-network-probe EMPTY_ROOT KERNEL INITFS ROOTFS RELAY SOCKET_DIR FIXTURE_URL

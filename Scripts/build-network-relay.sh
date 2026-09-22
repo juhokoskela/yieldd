@@ -3,10 +3,12 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 prototype_dir="$repo_root/Prototypes/RunnerNetwork"
-source "$repo_root/Scripts/prepare-patched-source.sh"
+source "$prototype_dir/source-paths.sh"
 mkdir -p "$repo_root/.build"
 prepare_checkout https://github.com/containers/gvisor-tap-vsock.git \
-    9cfc86f66679ef0feed0f20ba1df558fe2bef5c6 \
-    "$repo_root/.build/network-gvproxy" "$prototype_dir/gvproxy.patch"
+    "$gvproxy_revision" "$gvproxy_source" "$prototype_dir/gvproxy.patch"
 cd "$prototype_dir"
-go build -trimpath -o "$repo_root/.build/yieldd-network-relay" .
+cp go.mod "$relay_module"
+cp go.sum "${relay_module%.mod}.sum"
+go mod edit -modfile "$relay_module" -replace "github.com/containers/gvisor-tap-vsock=$gvproxy_source"
+go build -modfile "$relay_module" -buildvcs=false -trimpath -o "$repo_root/.build/yieldd-network-relay" .
