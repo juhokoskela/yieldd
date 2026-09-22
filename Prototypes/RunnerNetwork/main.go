@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/transport"
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
@@ -28,7 +29,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 	if err := runOwnedRelay(ctx, *socket, os.Stdin, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		reported := make(chan struct{})
+		go func() { defer close(reported); fmt.Fprintln(os.Stderr, err) }()
+		select {
+		case <-reported:
+		case <-time.After(100 * time.Millisecond):
+		}
 		os.Exit(1)
 	}
 }
@@ -67,13 +73,11 @@ func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, di
 	}()
 	defer func() { stop(); <-ownerDone; owner.Close() }()
 	counts := new(denialCounters)
-	reported := make(chan struct{})
-	go func() { defer close(reported); counts.report(ctx, diagnostics) }()
+	// Diagnostics belong to the helper process. Never join a reporter that may
+	// be blocked by its consumer; process exit also ends that goroutine.
+	go counts.report(ctx, diagnostics)
 	err := serve(ctx, socket, ready, counts)
-	interrupted := ctx.Err() != nil
-	stop()
-	<-reported
-	if err != nil && !interrupted {
+	if err != nil && ctx.Err() == nil {
 		return err
 	}
 	return nil

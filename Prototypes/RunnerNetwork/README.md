@@ -8,7 +8,7 @@ The policy denies private, loopback, link-local, shared-address, multicast, rese
 
 Guest DNS goes directly to Cloudflare's public resolver at `1.1.1.1:53` over TCP, through the same destination check. It never uses the Mac's resolver, hosts file, search domains, VPN DNS, or mDNS, and does not fall back to them on failure. The service forwards only Internet-class A queries. It returns no addresses for AAAA queries and refuses other record types, single-label names, `.local`, `.localhost`, and `home.arpa`. At most 16 upstream queries run concurrently. Public DNS and other permitted Internet traffic can still carry arbitrary data; this is not an exfiltration filter.
 
-The relay writes cumulative counts of denied destinations, dropped frames, and rejected DNS queries to stderr every 30 seconds and on normal exit. It does not log queried names, destinations, or individual packets. The private `0700` parent directory protects the socket during creation, before its own mode becomes `0600`.
+The relay attempts to write cumulative counts of denied destinations, dropped frames, and rejected DNS queries to stderr every 30 seconds and on shutdown. Counter reporting is best effort: process exit never waits for it, so final totals may be lost even on normal shutdown. Fatal-error reporting gets at most 100 ms before exit. It does not log queried names, destinations, or individual packets. The private `0700` parent directory protects the socket during creation, before its own mode becomes `0600`.
 
 Both probes use `Sources/Yieldd/RunnerNetworkRelay.swift` to own the relay process. Startup requires a version-1 JSON readiness response, bounded to 1 KiB, with a loopback SSH port. The owner keeps a close-on-exec pipe open; EOF or any input revokes the relay's lifetime. This also stops the relay when the owner dies, without a fixed job-duration limit or a stored PID used for recovery. Explicit shutdown closes that pipe, allows one second to exit, then sends TERM and finally KILL if needed. The supervisor removes its private socket directory only after confirming that the process exited.
 
@@ -39,7 +39,7 @@ Socket tests honor a short, writable `TMPDIR`. If its path would exceed Darwin's
 
 Tests that create an upstream network run in separate child processes, matching the relay's ownership model. Upstream DHCP, DNS, and stack workers live until process exit; repeatedly creating networks in one test process accumulates them. Cancellation tests still require the relay to return, close SSH clients, and remove its socket before the child exits.
 
-Process tests cover readiness validation, startup failure and cancellation, unexpected relay exit, idempotent cleanup, and a child that ignores EOF and TERM. Separate Go process tests revoke the lifetime pipe through EOF, input, and abrupt owner death, and check shutdown on SIGTERM while the owner remains connected. They require the relay process, socket, and SSH connection to close within bounded deadlines.
+Process tests cover readiness validation, startup failure and cancellation, unexpected relay exit, idempotent cleanup, and a child that ignores EOF and TERM. Separate Go process tests revoke the lifetime pipe through EOF, input, and abrupt owner death, and check shutdown on SIGTERM while the owner remains connected. They require the relay process, socket, and SSH connection to close within bounded deadlines. EOF, owner death, and startup failure are also tested with a full stderr pipe that is never drained.
 
 ## Disposable macOS probe
 
@@ -128,7 +128,7 @@ Still unverified or deliberately incomplete:
 - The full modified Linux machine CLI/service path, including first-boot setup and persisted machine cleanup. The live harness bypasses those layers, not the runtime itself.
 - Normal backend integration, continuous relay health monitoring during Linux operations, durable cleanup, memory/CPU/connection budgets, and performance under load. The shared process supervisor is used by the probes only. Upstream network services live for the helper process; this design uses one helper per guest.
 - An owner crash closes the relay but can leave its temporary directory or guest-side socket path. There is no durable relay-directory sweep yet. Process-level lifecycle checks do not establish VM or runner recovery.
-- Denial totals are process-local and can be lost on a crash or forced termination. There is no durable metric collection or alerting yet.
+- Denial totals are process-local and best effort, including during normal shutdown. There is no durable metric collection or alerting yet.
 - Public DNS and permitted Internet endpoints remain possible data channels. Rejecting unneeded record types in the built-in service does not restrict jobs from using another public DNS or HTTPS service.
 - IPv6 Internet support and a complete review of the third-party packet stack.
 - Public-address hairpinning through a router or VPN, and interface changes affecting an already-established connection. The current address check covers local interface addresses at connection creation, not every possible public route back into a private network.
