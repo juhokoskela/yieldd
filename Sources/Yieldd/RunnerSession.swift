@@ -182,6 +182,7 @@ struct RunnerSessionCleanupFailure {
 enum RunnerSessionCleanupStep: String, Equatable {
     case githubRunner = "GitHub runner"
     case machine
+    case network = "network relay"
     case runnerProcess = "runner process"
     case leaseRecord = "lease record"
 }

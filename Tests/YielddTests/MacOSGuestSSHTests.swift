@@ -1,6 +1,19 @@
 import Darwin
 import Foundation
 import Testing
+
+@Test
+func guestSSHRequiresAnAddressWithoutARelay() throws {
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let ssh = MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), executor: executor)
+    #expect(throws: MacOSGuestSSHError.missingAddress) {
+        try ssh.execute(["true"], timeout: 5, outputCapture: .all)
+    }
+    #expect(throws: MacOSGuestSSHError.missingAddress) {
+        try MacOSGuestConnection(ssh: ssh).waitUntilReady()
+    }
+    #expect(executor.requests.isEmpty)
+}
 @testable import Yieldd
 
 private let sshURL = URL(fileURLWithPath: "/usr/bin/ssh")

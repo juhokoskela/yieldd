@@ -4,6 +4,17 @@ import Testing
 @testable import Yieldd
 
 @Suite struct RunnerNetworkRelayTests {
+    @Test func shutdownToleratesAnAlreadyRemovedDirectory() throws {
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let executable = try fixture.script("printf '%s\\n' '\(fixture.ready)'\nexec /bin/cat")
+        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
+        try FileManager.default.removeItem(at: fixture.directory)
+        try relay.stop()
+        try relay.stop()
+        try fixture.requireExited()
+    }
+
     @Test func readinessAndIdempotentShutdown() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
@@ -110,6 +121,18 @@ import Testing
         #expect(try fixture.relayDirectories().isEmpty)
     }
 
+    @Test func droppingOwnerAfterAnExpiredStopStillCleansUp() throws {
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let executable = try fixture.script("trap '' TERM\nprintf '%s\\n' '\(fixture.ready)'\nexec /usr/bin/tail -f /dev/null")
+        var relay: RunnerNetworkRelay? = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory)
+        do { try #require(relay).stop(deadline: .now()) }
+        catch RunnerNetworkRelayError.stopTimedOut {}
+        relay = nil
+        try fixture.requireExited()
+        #expect(try fixture.relayDirectories().isEmpty)
+    }
+
     @Test(arguments: [0.0, 0.1])
     func shutdownRespectsTheRemainingBudget(seconds: TimeInterval) throws {
         let fixture = try RelayProcessFixture()
@@ -166,16 +189,22 @@ import Testing
         #expect(try fixture.relayDirectories().isEmpty)
     }
 
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"] != nil))
-    func actualRelayHandshakeAndShutdown() throws {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"] != nil), arguments: [false, true])
+    func actualRelayHandshakeAndShutdown(expiredDeadline: Bool) throws {
         let executable = try #require(ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"])
-        let relay = try RunnerNetworkRelay.start(executableURL: URL(fileURLWithPath: executable))
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let relay = try RunnerNetworkRelay.start(executableURL: URL(fileURLWithPath: executable), directory: fixture.directory)
         defer { try? relay.stop() }
         try relay.check()
         #expect(FileManager.default.fileExists(atPath: relay.sshSocketURL.path))
         var info = stat()
         #expect(lstat(relay.socketURL.path, &info) == 0)
         #expect(info.st_mode & S_IFMT == S_IFSOCK)
+        if expiredDeadline {
+            do { try relay.stop(deadline: .now()) }
+            catch RunnerNetworkRelayError.stopTimedOut {}
+        }
         try relay.stop()
         #expect(!FileManager.default.fileExists(atPath: relay.socketURL.deletingLastPathComponent().path))
     }

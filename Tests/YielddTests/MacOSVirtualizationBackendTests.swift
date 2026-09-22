@@ -15,7 +15,6 @@ private func makeBackend(
     maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil },
     bootTimeout: TimeInterval = MacOSVirtualMachineLifecycle.bootTimeout,
     stopTimeout: TimeInterval = MacOSVirtualMachineLifecycle.stopTimeout,
-    requireRelay: @escaping () throws -> Void = {},
     loadStorage: @escaping () throws -> RunnerStorage? = { nil },
     makeMachine: @escaping (URL, UInt64, URL) throws -> any MacOSVirtualMachineControlling
 ) throws -> MacOSVirtualizationBackend {
@@ -23,7 +22,7 @@ private func makeBackend(
         stateDirectory: fixture.rootURL, templateURL: templateURL ?? fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: executor, network: network, checkCancellation: checkCancellation, wait: wait,
         maximumExecutionDeadline: maximumExecutionDeadline, bootTimeout: bootTimeout, stopTimeout: stopTimeout,
-        requireEntitlement: {}, requireRelay: requireRelay, loadStorage: loadStorage, makeMachine: makeMachine
+        requireEntitlement: {}, loadStorage: loadStorage, makeMachine: makeMachine
     )
 }
 
@@ -137,7 +136,6 @@ func macOSBackendCleansCloneAfterCreationOrBootFailure(failBoot: Bool) throws {
     }
     #expect(machine.stopCount == (failBoot ? 1 : 0))
     #expect(network.relays.first?.stops == 1)
-    #expect(network.removed.last == macOSBackendID)
     #expect(try fixture.cloneRootContents().isEmpty)
 }
 
@@ -159,7 +157,6 @@ func macOSBackendStopsAndRemovesCloneAfterReadinessFailure() throws {
     #expect(machine.stopCount == 1)
     #expect(machine.isStopped)
     #expect(network.relays.first?.stops == 1)
-    #expect(network.removed.last == macOSBackendID)
     #expect(try fixture.cloneRootContents().isEmpty)
 }
 
@@ -244,17 +241,17 @@ func macOSBackendRunsThroughTheExistingSession() throws {
 private final class BackendNetwork: MacOSRunnerNetworking {
     var startError: (any Error)?
     var relays: [BackendRelay] = []
-    var removed: [RunnerID] = []
-    var onStart: (BackendRelay) -> Void = { _ in }
+    var relayFailure: (any Error)?
+    var relayStopFailure: (any Error)?
     func start(for id: RunnerID, checkCancellation: () throws -> Void) throws -> any RunnerNetworkRelaying {
         try checkCancellation()
         if let startError { throw startError }
         let relay = BackendRelay()
         relays.append(relay)
-        onStart(relay)
+        relay.failure = relayFailure
+        relay.stopFailure = relayStopFailure
         return relay
     }
-    func remove(_ id: RunnerID) throws { removed.append(id) }
 }
 
 private final class BackendRelay: RunnerNetworkRelaying {
@@ -265,31 +262,15 @@ private final class BackendRelay: RunnerNetworkRelaying {
     var stopFailure: (any Error)?
     var stops = 0
     var stopDeadline: DispatchTime?
+    var isRunning: Bool { failure == nil && !stopped }
+    private var stopped = false
     func check() throws { if let failure { throw failure } }
     func stop(deadline: DispatchTime?) throws {
         stops += 1
         stopDeadline = deadline
         if let stopFailure { throw stopFailure }
+        stopped = true
     }
-}
-
-@Test
-func macOSBackendRejectsMissingRelayBeforeRecordingIntent() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let network = BackendNetwork()
-    let backend = try makeBackend(fixture,
-        executor: RecordingProcessExecutor(outcomes: []), network: network,
-        requireRelay: { throw TestFailure.create },
-        makeMachine: { _, _, _ in Issue.record("VM must not be constructed"); throw TestFailure.create }
-    )
-    var recorded = false
-    #expect(throws: TestFailure.create) {
-        try backend.create(id: macOSBackendID, memory: .full, recordIntent: { recorded = true })
-    }
-    #expect(!recorded)
-    #expect(network.relays.isEmpty)
-    #expect(!FileManager.default.fileExists(atPath: fixture.cloneRootURL.path))
 }
 
 @Test
@@ -303,7 +284,6 @@ func macOSBackendRelayStartupFailureDoesNotBootOrRetainClone() throws {
         makeMachine: { _, _, _ in Issue.record("No NAT fallback may boot"); throw TestFailure.runnerJob }
     )
     #expect(throws: TestFailure.create) { try backend.create(id: macOSBackendID, memory: .full) }
-    #expect(network.removed.last == macOSBackendID)
     #expect(try fixture.cloneRootContents().isEmpty)
 }
 
@@ -312,7 +292,7 @@ func macOSBackendChecksRelayWhileVMStartupIsPending() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let network = BackendNetwork()
-    network.onStart = { $0.failure = TestFailure.runnerJob }
+    network.relayFailure = TestFailure.runnerJob
     let machine = ProbeVirtualMachine(completesStart: false)
     let backend = try makeBackend(fixture,
         executor: RecordingProcessExecutor(outcomes: []), network: network, bootTimeout: 0.1,
@@ -351,7 +331,7 @@ func macOSBackendRelayCleanupFailureRetainsSessionLeaseAndCapacity() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let network = BackendNetwork()
-    network.onStart = { $0.stopFailure = TestFailure.cleanup }
+    network.relayStopFailure = TestFailure.cleanup
     let machine = ProbeVirtualMachine()
     let backend = try makeBackend(fixture,
         executor: RecordingProcessExecutor(outcomes: [
@@ -363,36 +343,14 @@ func macOSBackendRelayCleanupFailureRetainsSessionLeaseAndCapacity() throws {
     let session = EphemeralRunnerSession(backend: backend, github: BackendGitHub(), memoryAdmission: memory, leaseStore: leaseStore)
     #expect(throws: RunnerSessionError.self) { try session.run(id: macOSBackendID, repository: GitHubRepository("owner/repo")) }
     #expect(machine.isStopped)
+    #expect(try !fixture.cloneRootContents().isEmpty)
     #expect(try leaseStore.load().map(\.runnerID) == [macOSBackendID])
     #expect(throws: TestFailure.memoryAllocation) {
         _ = try memory.acquireWithoutWaiting(reserving: RunnerPlatform.macOS.memoryReservationBytes)
     }
     network.relays.first?.stopFailure = nil
     try backend.destroy(macOSBackendID)
-}
-
-@Test
-func macOSBackendRelayStopFailureStillStopsVMAndRetainsCleanup() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let network = BackendNetwork()
-    let machine = ProbeVirtualMachine()
-    let backend = try makeBackend(fixture,
-        executor: RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 2)),
-        network: network, makeMachine: { _, _, _ in machine }
-    )
-    try backend.create(id: macOSBackendID, memory: .full)
-    let relay = try #require(network.relays.first)
-    relay.stopFailure = TestFailure.cleanup
-    network.removed = []
-    #expect(throws: TestFailure.cleanup) { try backend.destroy(macOSBackendID) }
-    #expect(machine.isStopped)
-    #expect(network.removed.isEmpty)
-    #expect(try !fixture.cloneRootContents().isEmpty)
-    relay.stopFailure = nil
-    try backend.destroy(macOSBackendID)
-    #expect(relay.stops == 2)
-    #expect(network.removed == [macOSBackendID])
+    #expect(network.relays.first?.stops == 2)
     #expect(try fixture.cloneRootContents().isEmpty)
 }
 

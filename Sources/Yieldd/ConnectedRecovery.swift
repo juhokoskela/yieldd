@@ -19,9 +19,7 @@ func recoverConnectedPlatforms(
                     confirmRegistrationRemoved: confirmation, destroy: { id in
                         switch platform {
                         case .macOS:
-                            try RunnerNetworkDirectories(stateDirectory: directory).remove(id)
-                            let clones = try (makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) })(.runners)
-                            try clones.remove(id)
+                            try removeMacOSRunnerFiles(id, in: directory, makeCloneStore: makeCloneStore)
                         case .linux:
                             let container = try ExecutableLocator().locate("container")
                             let executor = ProcessExecutor(checkCancellation: stop.check)

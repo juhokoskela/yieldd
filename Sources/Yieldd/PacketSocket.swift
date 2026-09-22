@@ -6,6 +6,8 @@ import Virtualization
 final class PacketSocket: Sendable {
     let handle: FileHandle
     private let localPath: String
+    private let deviceID: dev_t
+    private let inode: ino_t
 
     init(path: String) throws {
         guard path.hasPrefix("/"), !path.utf8.contains(0) else { throw POSIXError(.EINVAL) }
@@ -38,6 +40,9 @@ final class PacketSocket: Sendable {
                 }
             }
             bound = true
+            guard lstat(localPath, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            deviceID = info.st_dev
+            inode = info.st_ino
             guard chmod(localPath, 0o600) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             try Self.address(path) { address, length in
                 guard Darwin.connect(descriptor, address, length) == 0 else {
@@ -52,7 +57,12 @@ final class PacketSocket: Sendable {
         self.handle = handle
     }
 
-    deinit { unlink(localPath) }
+    deinit {
+        var info = stat()
+        if lstat(localPath, &info) == 0, info.st_dev == deviceID, info.st_ino == inode {
+            unlink(localPath)
+        }
+    }
 
     func device() -> VZVirtioNetworkDeviceConfiguration {
         let device = VZVirtioNetworkDeviceConfiguration()

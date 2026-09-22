@@ -31,7 +31,6 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     private let executor: any ProcessExecuting
     private let network: any MacOSRunnerNetworking
     private let requireEntitlement: () throws -> Void
-    private let requireRelay: () throws -> Void
     private let loadStorage: () throws -> RunnerStorage?
     private let makeMachine: (URL, UInt64, URL) throws -> any MacOSVirtualMachineControlling
     private let checkCancellation: () throws -> Void
@@ -56,7 +55,6 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         bootTimeout: TimeInterval = MacOSVirtualMachineLifecycle.bootTimeout,
         stopTimeout: TimeInterval = MacOSVirtualMachineLifecycle.stopTimeout,
         requireEntitlement: @escaping () throws -> Void = VirtualizationEntitlement.requireCurrentProcess,
-        requireRelay: @escaping () throws -> Void = { try MacOSRunnerNetwork.requireRelay() },
         loadStorage: (() throws -> RunnerStorage?)? = nil,
         makeMachine: @escaping (URL, UInt64, URL) throws -> any MacOSVirtualMachineControlling =
             { try MacOSVirtualMachineLifecycle.makeMachine(bundleURL: $0, memoryBytes: $1, networkSocketURL: $2) }
@@ -72,7 +70,6 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         self.bootTimeout = bootTimeout
         self.stopTimeout = stopTimeout
         self.requireEntitlement = requireEntitlement
-        self.requireRelay = requireRelay
         self.loadStorage = loadStorage ?? { try RunnerStorage.validated(in: stateDirectory, executor: executor) }
         self.makeMachine = makeMachine
     }
@@ -92,7 +89,6 @@ final class MacOSVirtualizationBackend: RunnerBackend {
 
     func prepare() throws {
         try loadStorage()?.validateMacOS(template: templateURL, clones: clones.rootURL)
-        try requireRelay()
     }
 
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
@@ -106,7 +102,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
             try prepare()
             try validateStorage(id)
             if let guest = guests[id], case let .ready(machine) = guest.phase,
-               case .running = machine.state, (try? guest.relay.check()) != nil {
+               case .running = machine.state, guest.relay.isRunning {
                 return
             }
             try recordIntent()
@@ -220,26 +216,35 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     }
 
     private func destroyLocked(_ id: RunnerID) throws {
+        var failures: [RunnerSessionCleanupFailure] = []
         if let guest = guests[id] {
-            var failures: [RunnerSessionCleanupFailure] = []
+            var machineStopped = true
             // Revoke networking even when the VM cannot stop. Still attempt both
             // operations; retain ownership and capacity until both have succeeded.
             do { try guest.relay.stop(deadline: maximumExecutionDeadline()) }
-            catch { failures.append(.init(step: .machine, error: error)) }
+            catch { failures.append(.init(step: .network, error: error)) }
             if let machine = guest.machine {
                 do {
                     try MacOSVirtualMachineLifecycle.forceStop(
                         machine, timeout: stopTimeout, checkDeadline: checkCleanupDeadline
                     )
-                } catch { failures.append(.init(step: .machine, error: error)) }
+                } catch {
+                    machineStopped = false
+                    failures.append(.init(step: .machine, error: error))
+                }
             }
-            if failures.count == 1 { throw failures[0].error }
-            if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
-            guests.removeValue(forKey: id)
+            if !machineStopped || guest.relay.isRunning {
+                if failures.count == 1 && failures[0].step == .machine { throw failures[0].error }
+                throw RunnerSessionError.cleanupFailed(failures)
+            }
+            if failures.isEmpty { guests.removeValue(forKey: id) }
         }
-        try network.remove(id)
-        try loadStorage()?.validatePath(clones.rootURL)
-        try clones.remove(id)
+        do {
+            try loadStorage()?.validatePath(clones.rootURL)
+            try clones.remove(id)
+        } catch { failures.append(.init(step: .machine, error: error)) }
+        if failures.count == 1 && failures[0].step == .machine { throw failures[0].error }
+        if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
     }
 
     private func validateStorage(_ id: RunnerID) throws {

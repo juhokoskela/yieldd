@@ -101,11 +101,14 @@ struct RunnerCleanup {
         repository: GitHubRepository,
         removeClone: () throws -> Void
     ) -> [RunnerSessionCleanupFailure] {
-        [
+        var failures = [
             cleanupFailure(step: .githubRunner) {
                 try github.removeRunners(named: id.value, from: repository)
             },
-            cleanupFailure(step: .machine, operation: removeClone),
         ].compactMap { $0 }
+        do { try removeClone() }
+        catch let RunnerSessionError.cleanupFailed(entries) { failures.append(contentsOf: entries) }
+        catch { failures.append(.init(step: .machine, error: error)) }
+        return failures
     }
 }

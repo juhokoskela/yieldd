@@ -5,6 +5,19 @@ import Testing
 import Virtualization
 
 struct PacketSocketTests {
+    @Test func delayedDestructionPreservesReplacementEndpoint() throws {
+        let fixture = try SocketFixture()
+        try fixture.bindRelay()
+        var previous: PacketSocket? = try PacketSocket(path: fixture.path)
+        try #require(previous).handle.write(contentsOf: Data([1]))
+        #expect(unlink(fixture.path + ".vm") == 0)
+        let replacement = try PacketSocket(path: fixture.path)
+        previous = nil
+        withExtendedLifetime(replacement) {
+            #expect(FileManager.default.fileExists(atPath: fixture.path + ".vm"))
+        }
+    }
+
     @Test func connectsAndRemovesOnlyItsOwnEndpoint() throws {
         let fixture = try SocketFixture()
         try fixture.bindRelay()

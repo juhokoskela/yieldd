@@ -59,7 +59,7 @@ struct MacOSGuestSSH {
 
     @discardableResult func execute(
         _ arguments: [String],
-        address: String = Self.hostKeyAlias,
+        address: String? = nil,
         standardInput: Data? = nil,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
@@ -86,12 +86,21 @@ struct MacOSGuestSSH {
 
     @discardableResult private func run(
         _ command: String,
-        address: String,
+        address: String?,
         timeout: TimeInterval?,
         standardInput: Data? = nil,
         outputCapture: ProcessOutputCapture = .tail(maxBytes: Self.outputTailBytes),
         cancellable: Bool = true
     ) throws -> ProcessResult {
+        let destination: String
+        if socketURL != nil {
+            destination = Self.hostKeyAlias
+        } else {
+            guard let address, !address.isEmpty, address != Self.hostKeyAlias else {
+                throw MacOSGuestSSHError.missingAddress
+            }
+            destination = address
+        }
         let request = ProcessRequest(
             executableURL: executableURL,
             arguments: (socketURL.map {
@@ -112,7 +121,7 @@ struct MacOSGuestSSH {
                 "-o", "PasswordAuthentication=no",
                 "-o", "StrictHostKeyChecking=yes",
                 "-o", "UserKnownHostsFile=\(Self.configurationValue(knownHostsURL.path))",
-                "runner@\(address)",
+                "runner@\(destination)",
                 // OpenSSH sends one command through the remote login shell.
                 command,
             ],
@@ -171,13 +180,13 @@ struct MacOSGuestConnection {
     static let retryDelay: TimeInterval = 0.5
     static let sshAttemptTimeout: TimeInterval = 5
 
-    private let resolver: (any MacOSGuestAddressResolving)?
+    private let resolver: any MacOSGuestAddressResolving
     private let checkTransport: (String, TimeInterval) throws -> Void
     private let validateGuest: (String, TimeInterval) throws -> Void
     private let currentTime: () -> TimeInterval
 
     init(
-        resolver: (any MacOSGuestAddressResolving)? = nil,
+        resolver: any MacOSGuestAddressResolving = MacOSGuestAddressResolver(),
         ssh: MacOSGuestSSH,
         currentTime: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
@@ -220,13 +229,12 @@ struct MacOSGuestConnection {
     }
 
     func waitUntilReady(
-        address: String = MacOSGuestSSH.hostKeyAlias,
         timeout: TimeInterval = Self.readinessTimeout,
         checkCancellation: () throws -> Void = {},
         wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:)
     ) throws {
         precondition(timeout.isFinite && timeout > 0)
-        try waitUntilReady(address: address, deadline: currentTime() + timeout, checkCancellation: checkCancellation, wait: wait)
+        try waitUntilReady(address: MacOSGuestSSH.hostKeyAlias, deadline: currentTime() + timeout, checkCancellation: checkCancellation, wait: wait)
     }
 
     private func waitUntilReady(
@@ -267,7 +275,6 @@ struct MacOSGuestConnection {
         checkCancellation: () throws -> Void,
         wait: (TimeInterval) throws -> Void
     ) throws -> String {
-        let resolver = resolver ?? MacOSGuestAddressResolver()
         while true {
             try checkCancellation()
             let remaining = deadline - currentTime()
@@ -334,6 +341,7 @@ struct MacOSGuestConnection {
 }
 
 enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
+    case missingAddress
     case invalidCommandArgument
     case insecurePrivateKey(path: String, permissions: mode_t)
     case insecureKnownHosts(path: String, permissions: mode_t)
@@ -342,6 +350,8 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .missingAddress:
+            "A direct macOS guest SSH connection requires an explicit address."
         case .invalidCommandArgument:
             "macOS guest command arguments must not contain NUL bytes."
         case let .insecurePrivateKey(path, permissions):

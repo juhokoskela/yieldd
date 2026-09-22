@@ -629,7 +629,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
     private let packetSocket: PacketSocket?
     private var failure: (any Error)?
 
-    init(bundleURL: URL, memoryBytes: UInt64, packetSocket: PacketSocket? = nil) throws {
+    init(bundleURL: URL, memoryBytes: UInt64, packetSocket: PacketSocket?) throws {
         self.packetSocket = packetSocket
         let configuration = try Self.configuration(
             bundleURL: bundleURL,
