@@ -32,21 +32,16 @@ struct RunnerRecovery {
             failures: [RunnerSessionCleanupFailure]
         )] = []
         var recoveryFailures: [RunnerSessionCleanupFailure] = []
-
+        let networkDirectories = Result { try RunnerNetworkDirectories(stateDirectory: leaseStore.directory) }
         do {
-            try RunnerNetworkDirectories(stateDirectory: leaseStore.directory)
-                .removeUnleased(keeping: Set(leases.map(\.runnerID)))
+            try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: Set(leases.map(\.runnerID)),
+                                         checkCancellation: checkCancellation, makeCloneStore: makeCloneStore)
         } catch {
-            recoveryFailures.append(.init(step: .machine, error: error))
-        }
-
-        for kind in RunnerCloneKind.allCases {
-            do {
-                try makeCloneStore(kind).removeUnleased(
-                    keeping: kind == .runners ? Set(leases.map(\.runnerID)) : [], checkCancellation: checkCancellation)
-            } catch {
-                if isCancellation(error) { throw error }
-                recoveryFailures.append(RunnerSessionCleanupFailure(step: .machine, error: error))
+            if isCancellation(error) { throw error }
+            if case let RunnerSessionError.cleanupFailed(failures) = error {
+                recoveryFailures.append(contentsOf: failures)
+            } else {
+                recoveryFailures.append(.init(step: .machine, error: error))
             }
         }
 
@@ -69,7 +64,7 @@ struct RunnerRecovery {
                 failures = cleanup.removeRegistrationAndClone(
                     id: lease.runnerID, repository: lease.repository
                 ) {
-                    try RunnerNetworkDirectories(stateDirectory: leaseStore.directory).remove(lease.runnerID)
+                    try networkDirectories.get().remove(lease.runnerID)
                     try makeCloneStore(.runners).remove(lease.runnerID)
                 }
             }

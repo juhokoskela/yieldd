@@ -5,8 +5,12 @@ func removeUnleasedMacOSClones(in directory: URL, keeping ids: Set<RunnerID>, ch
                                makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) }
     var failures: [RunnerSessionCleanupFailure] = []
+    try checkCancellation()
     do { try RunnerNetworkDirectories(stateDirectory: directory).removeUnleased(keeping: ids) }
-    catch { failures.append(.init(step: .machine, error: error)) }
+    catch {
+        if isCancellation(error) { throw error }
+        failures.append(.init(step: .machine, error: error))
+    }
     for kind in RunnerCloneKind.allCases {
         do {
             try makeCloneStore(kind)
