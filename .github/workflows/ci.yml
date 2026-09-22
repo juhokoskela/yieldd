@@ -79,8 +79,10 @@ jobs:
         run: |
           go test -race ./...
           go vet ./...
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build and smoke-test coordinator image
         run: |
           bash test-compose.sh
-          docker build -t local/yieldd-coordinator:dev .
+          docker buildx build --load -t local/yieldd-coordinator:dev .
           bash test-image.sh
