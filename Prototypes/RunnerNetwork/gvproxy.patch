@@ -1,0 +1,139 @@
+diff --git a/pkg/services/forwarder/tcp.go b/pkg/services/forwarder/tcp.go
+index ae18ada..e3c9394 100644
+--- a/pkg/services/forwarder/tcp.go
++++ b/pkg/services/forwarder/tcp.go
+@@ -17,7 +17,7 @@ import (
+ 
+ const linkLocalSubnet = "169.254.0.0/16"
+ 
+-func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool) *tcp.Forwarder {
++func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, dial func(string, string) (net.Conn, error)) *tcp.Forwarder {
+ 	return tcp.NewForwarder(s, 0, 10, func(r *tcp.ForwarderRequest) {
+ 		localAddress := r.ID().LocalAddress
+ 
+@@ -31,7 +31,7 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
+ 			localAddress = replaced
+ 		}
+ 		natLock.Unlock()
+-		outbound, err := net.Dial("tcp", net.JoinHostPort(localAddress.String(), fmt.Sprint(r.ID().LocalPort)))
++		outbound, err := dial("tcp", net.JoinHostPort(localAddress.String(), fmt.Sprint(r.ID().LocalPort)))
+ 		if err != nil {
+ 			log.Tracef("net.Dial() = %v", err)
+ 			r.Complete(true)
+@@ -42,6 +42,7 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
+ 		ep, tcpErr := r.CreateEndpoint(&wq)
+ 		r.Complete(false)
+ 		if tcpErr != nil {
++			outbound.Close()
+ 			if _, ok := tcpErr.(*tcpip.ErrConnectionRefused); ok {
+ 				// transient error
+ 				log.Debugf("r.CreateEndpoint() = %v", tcpErr)
+diff --git a/pkg/services/forwarder/udp.go b/pkg/services/forwarder/udp.go
+index 7b00312..e2f63ae 100644
+--- a/pkg/services/forwarder/udp.go
++++ b/pkg/services/forwarder/udp.go
+@@ -14,7 +14,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/waiter"
+ )
+ 
+-func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool) *udp.Forwarder {
++func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, dial func(string, string) (net.Conn, error)) *udp.Forwarder {
+ 	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
+ 		localAddress := r.ID().LocalAddress
+ 
+@@ -41,7 +41,7 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
+ 		}
+ 
+ 		p, _ := NewUDPProxy(&autoStoppingListener{underlying: gonet.NewUDPConn(&wq, ep)}, func() (net.Conn, error) {
+-			return net.Dial("udp", net.JoinHostPort(localAddress.String(), strconv.Itoa(int(r.ID().LocalPort))))
++			return dial("udp", net.JoinHostPort(localAddress.String(), strconv.Itoa(int(r.ID().LocalPort))))
+ 		})
+ 		go func() {
+ 			p.Run()
+diff --git a/pkg/types/configuration.go b/pkg/types/configuration.go
+index cf56dc3..7dd7f44 100644
+--- a/pkg/types/configuration.go
++++ b/pkg/types/configuration.go
+@@ -3,9 +3,16 @@ package types
+ import (
+ 	"net"
+ 	"regexp"
++
++	"github.com/miekg/dns"
+ )
+ 
+ type Configuration struct {
++	// Overrides the built-in DNS service without consulting the host resolver.
++	DNSHandler dns.Handler `yaml:"-"`
++	// Host-side forwarding hook. The destination has already undergone NAT translation.
++	Dial func(network, address string) (net.Conn, error) `yaml:"-"`
++
+ 	// Print packets on stderr
+ 	Debug bool `yaml:"debug,omitempty"`
+ 
+diff --git a/pkg/virtualnetwork/services.go b/pkg/virtualnetwork/services.go
+index 57c5daf..d1b2c71 100644
+--- a/pkg/virtualnetwork/services.go
++++ b/pkg/virtualnetwork/services.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/containers/gvisor-tap-vsock/pkg/services/forwarder"
+ 	"github.com/containers/gvisor-tap-vsock/pkg/tap"
+ 	"github.com/containers/gvisor-tap-vsock/pkg/types"
++	dnswire "github.com/miekg/dns"
+ 	log "github.com/sirupsen/logrus"
+ 	"gvisor.dev/gvisor/pkg/tcpip"
+ 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+@@ -24,9 +25,13 @@ func addServices(configuration *types.Configuration, s *stack.Stack, ipPool *tap
+ 	var natLock sync.Mutex
+ 	translation := parseNATTable(configuration)
+ 
+-	tcpForwarder := forwarder.TCP(s, translation, &natLock, configuration.Ec2MetadataAccess)
++	dial := configuration.Dial
++	if dial == nil {
++		dial = net.Dial
++	}
++	tcpForwarder := forwarder.TCP(s, translation, &natLock, configuration.Ec2MetadataAccess, dial)
+ 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
+-	udpForwarder := forwarder.UDP(s, translation, &natLock, configuration.Ec2MetadataAccess)
++	udpForwarder := forwarder.UDP(s, translation, &natLock, configuration.Ec2MetadataAccess, dial)
+ 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+ 
+ 	dnsMux, err := dnsServer(configuration, s)
+@@ -77,22 +82,31 @@ func dnsServer(configuration *types.Configuration, s *stack.Stack) (http.Handler
+ 		return nil, err
+ 	}
+ 
+-	server, err := dns.New(udpConn, tcpLn, configuration.DNS)
+-	if err != nil {
+-		return nil, err
++	var serveUDP, serveTCP func() error
++	var mux http.Handler
++	if configuration.DNSHandler != nil {
++		serveUDP = (&dnswire.Server{PacketConn: udpConn, Handler: configuration.DNSHandler}).ActivateAndServe
++		serveTCP = (&dnswire.Server{Listener: tcpLn, Handler: configuration.DNSHandler}).ActivateAndServe
++		mux = http.NewServeMux()
++	} else {
++		server, err := dns.New(udpConn, tcpLn, configuration.DNS)
++		if err != nil {
++			return nil, err
++		}
++		serveUDP, serveTCP, mux = server.Serve, server.ServeTCP, server.Mux()
+ 	}
+ 
+ 	go func() {
+-		if err := server.Serve(); err != nil {
++		if err := serveUDP(); err != nil {
+ 			log.Error(err)
+ 		}
+ 	}()
+ 	go func() {
+-		if err := server.ServeTCP(); err != nil {
++		if err := serveTCP(); err != nil {
+ 			log.Error(err)
+ 		}
+ 	}()
+-	return server.Mux(), nil
++	return mux, nil
+ }
+ 
+ func dhcpServer(configuration *types.Configuration, s *stack.Stack, ipPool *tap.IPPool) (http.Handler, error) {
