@@ -1,4 +1,4 @@
-@testable import ContainerRuntimeLinuxServer
+@testable import Yieldd
 import Darwin
 import Foundation
 import Testing
@@ -13,7 +13,7 @@ struct PacketSocketTests {
             #expect(fcntl(socket.handle.fileDescriptor, F_GETFD) & FD_CLOEXEC != 0)
             let attributes = try FileManager.default.attributesOfItem(atPath: fixture.path + ".vm")
             #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
-            let device = try socket.device()
+            let device = socket.device()
             #expect(device.macAddress.string == "02:00:00:00:00:02")
             #expect(device.attachment is VZFileHandleNetworkDeviceAttachment)
             try socket.handle.write(contentsOf: Data([1, 2, 3, 4]))

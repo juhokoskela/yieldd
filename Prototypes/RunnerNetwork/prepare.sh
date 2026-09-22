@@ -26,15 +26,12 @@ copy_source "$prototype_dir/LinuxProbe.swift" \
     "$repo_root/.build/network-container/Sources/YielddNetworkProbe/LinuxProbe.swift"
 copy_source "$repo_root/Sources/Yieldd/RunnerNetworkRelay.swift" \
     "$repo_root/.build/network-container/Sources/YielddNetworkProbe/RunnerNetworkRelay.swift"
-copy_source "$prototype_dir/PacketSocketTests.swift" \
-    "$repo_root/.build/network-container/Tests/YielddNetworkPrototypeTests/PacketSocketTests.swift"
 copy_source "$prototype_dir/MacProbeLifecycle.swift" \
     "$repo_root/.build/network-container/Tests/YielddNetworkPrototypeTests/MacProbeLifecycle.swift"
 copy_source "$prototype_dir/MacProbeLifecycleTests.swift" \
     "$repo_root/.build/network-container/Tests/YielddNetworkPrototypeTests/MacProbeLifecycleTests.swift"
 
 cd "$prototype_dir"
-cp "$repo_root/.build/yieldd-network-relay" "$repo_root/.build/network-prototype"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 xcrun swiftc -swift-version 6 -parse-as-library "$repo_root/Sources/Yieldd/PacketSocket.swift" MacProbe.swift MacProbeLifecycle.swift \
     "$repo_root/Sources/Yieldd/RunnerNetworkRelay.swift" \

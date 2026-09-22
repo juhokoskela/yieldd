@@ -54,7 +54,7 @@ final class PacketSocket: Sendable {
 
     deinit { unlink(localPath) }
 
-    func device() throws -> VZVirtioNetworkDeviceConfiguration {
+    func device() -> VZVirtioNetworkDeviceConfiguration {
         let device = VZVirtioNetworkDeviceConfiguration()
         device.macAddress = VZMACAddress(string: "02:00:00:00:00:02")!
         device.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: handle)

@@ -5,10 +5,15 @@ on:
     paths:
       - 'Prototypes/RunnerNetwork/**'
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
+      - 'Sources/Yieldd/MacOSRunnerNetwork*.swift'
+      - 'Sources/Yieldd/MacOSVirtualizationBackend.swift'
       - 'Sources/Yieldd/PacketSocket.swift'
       - 'Scripts/build-network-relay.sh'
       - 'Scripts/prepare-patched-source.sh'
       - 'Tests/YielddTests/RunnerNetworkRelayTests.swift'
+      - 'Tests/YielddTests/MacOSRunnerNetworkTests.swift'
+      - 'Tests/YielddTests/MacOSVirtualizationBackendTests.swift'
+      - 'Tests/YielddTests/PacketSocketTests.swift'
       - 'Packaging/yieldd.entitlements'
       - '.github/workflows/network-prototype.yml'
   push:
@@ -16,10 +21,15 @@ on:
     paths:
       - 'Prototypes/RunnerNetwork/**'
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
+      - 'Sources/Yieldd/MacOSRunnerNetwork*.swift'
+      - 'Sources/Yieldd/MacOSVirtualizationBackend.swift'
       - 'Sources/Yieldd/PacketSocket.swift'
       - 'Scripts/build-network-relay.sh'
       - 'Scripts/prepare-patched-source.sh'
       - 'Tests/YielddTests/RunnerNetworkRelayTests.swift'
+      - 'Tests/YielddTests/MacOSRunnerNetworkTests.swift'
+      - 'Tests/YielddTests/MacOSVirtualizationBackendTests.swift'
+      - 'Tests/YielddTests/PacketSocketTests.swift'
       - 'Packaging/yieldd.entitlements'
       - '.github/workflows/network-prototype.yml'
   workflow_dispatch:
