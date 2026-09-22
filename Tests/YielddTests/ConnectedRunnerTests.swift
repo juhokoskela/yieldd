@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import Synchronization
 import Testing
 @testable import Yieldd
 
@@ -335,7 +336,7 @@ func connectedClientRetriesOnlyThroughRecovery(_ stage: String) throws {
             if polls > 1 { throw TestFailure.runnerJob }
             if stage == "poll" { throw ConnectedRunnerError.http(503) }
             return connectedOffer
-        }, run: { _, _, release in
+        }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, release in
             events.append("run")
             release()
             if stage == "run" { throw ConnectedRunnerError.transport }
@@ -368,7 +369,7 @@ func connectedClientRetainsCapacityWhenGuestDestructionFails() throws {
         }, release: { reservation in
             releases += 1
             memory.release(reservation)
-        }, poll: { connectedOffer }, run: { offer, allocation, release in
+        }, poll: { connectedOffer }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { offer, allocation, release in
             try runner.run(offer, memory: allocation, releaseCapacity: release)
         }, wait: { _ in Issue.record("A permanent destruction failure must escape") }, retrying: {})
     }
@@ -404,7 +405,7 @@ func connectedClientRetainsCapacityUntilRecoverySucceeds() throws {
                 throw CancellationError()
             }
             return connectedOffer
-        }, run: { _, _, _ in throw ConnectedRunnerError.transport }, wait: { _ in }, retrying: {})
+        }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in throw ConnectedRunnerError.transport }, wait: { _ in }, retrying: {})
     }
     #expect(recoveries == 3 && polls == 2 && releases == 1)
 }
@@ -433,7 +434,7 @@ func connectedClientBoundsEmptyPollsWithoutReservingMemory() throws {
         try runConnectedClient(checkCancellation: {}, recover: {}, acquire: {
             Issue.record("Idle polling must not acquire RAM")
             return nil
-        }, release: { _ in Issue.record("No reservation to release") }, poll: { nil }, run: { _, _, _ in
+        }, release: { _ in Issue.record("No reservation to release") }, poll: { nil }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in
             Issue.record("Empty polls must not execute")
         }, wait: { delay in
             #expect(delay == 1)
@@ -453,7 +454,7 @@ func connectedClientRecoversTransientCleanupBeforeReportingPermanentOperationFai
         }, acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in }, poll: {
             polls += 1
             return connectedOffer
-        }, run: { _, _, _ in
+        }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in
             throw RunnerSessionError.operationAndCleanupFailed(operation: TestFailure.runnerJob,
                 cleanup: [.init(step: .githubRunner, error: ConnectedRunnerError.transport)])
         }, wait: { _ in }, retrying: {})
@@ -506,7 +507,7 @@ func connectedCapacityReportFollowsActualRelease() throws {
 
 @Test
 func connectedOfferDecodingEnforcesConstructionInvariants() throws {
-    var fields = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(connectedOffer)) as? [String: String])
+    var fields = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(connectedOffer)) as? [String: Any])
     fields["architecture"] = "x64"
     #expect(throws: ConnectedRunnerError.invalidOffer) {
         try JSONDecoder().decode(ConnectedOffer.self, from: JSONSerialization.data(withJSONObject: fields))
@@ -567,14 +568,14 @@ func connectedRunnerRejectsWrongPlatformBeforeAcceptance() throws {
     #expect(try fixture.store.load() == nil)
 }
 
-@Test(arguments: [false, true])
-func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal(badNetworkDirectory: Bool) throws {
+@Test(arguments: [false, true], [0, 1, 15])
+func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal(badNetworkDirectory: Bool, slot: Int) throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     let mac = try ConnectedOffer(owner: connectedOffer.owner,
         runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: connectedOffer.repository,
-        platform: "macos", architecture: "arm64")
-    let macStore = ConnectedRunnerStore(directory: fixture.directory, platform: .macOS)
+        platform: "macos", architecture: "arm64", slot: slot)
+    let macStore = ConnectedRunnerStore(directory: fixture.directory, platform: .macOS, slot: slot)
     try macStore.save(ConnectedLease(server: "https://example.com", deviceID: mac.owner, offer: mac))
     try fixture.store.save(ConnectedLease(server: "https://example.com", deviceID: mac.owner, offer: connectedOffer))
     let clones = testCloneStores(in: fixture.directory)(.runners)
@@ -619,6 +620,7 @@ func standaloneCommandsCannotSweepOutstandingMacOSConnectedClone() throws {
 func connectedClientDoesNotAcceptWithoutCapacity(available: Bool) throws {
     var polls = 0
     var acquisitions = 0
+    var declined = 0
     #expect(throws: CancellationError.self) {
         try runConnectedClient(checkCancellation: {}, recover: {}, acquire: {
             #expect(polls == 1)
@@ -627,6 +629,9 @@ func connectedClientDoesNotAcceptWithoutCapacity(available: Bool) throws {
         }, release: { _ in Issue.record("No reservation to release") }, poll: {
             polls += 1
             return connectedOffer
+        }, decline: { offer in
+            #expect(offer == connectedOffer)
+            declined += 1
         }, run: { _, _, _ in Issue.record("No capacity was reserved") }, wait: { delay in
             #expect(delay == 1)
             throw CancellationError()
@@ -634,6 +639,7 @@ func connectedClientDoesNotAcceptWithoutCapacity(available: Bool) throws {
     }
     #expect(polls == (available ? 1 : 0))
     #expect(acquisitions == polls)
+    #expect(declined == polls)
 }
 
 @Test(arguments: [RunnerPlatform.linux, .macOS])
@@ -647,7 +653,7 @@ func connectedIdlePollingDoesNotConsumeEitherPlatformsMemory(_ platform: RunnerP
             let all = try #require(try memory.tryAcquire(reserving: 18 * gib))
             memory.release(all)
             return nil
-        }, run: { _, _, _ in Issue.record("No offer") }, wait: { _ in throw CancellationError() },
+        }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in Issue.record("No offer") }, wait: { _ in throw CancellationError() },
         retrying: {}, available: { memory.isAvailable(reserving: platform.memoryReservationBytes) })
     }
 }
@@ -690,6 +696,183 @@ func connectedCLIRequiresExplicitPlatformsAndAbsoluteTemplate() throws {
             Issue.record("Expected platform validation failure")
         } catch {
             #expect(ConnectCommand.message(for: error) == message)
+        }
+    }
+}
+
+@Test(arguments: [RunnerPlatform.linux, .macOS])
+func connectedWorkersOverlapWithinSharedMemoryAndKeepIndependentJournals(_ platform: RunnerPlatform) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let gib: UInt64 = 1_024 * 1_024 * 1_024
+    let memory = RunnerMemoryAdmission(physicalMemoryBytes: (platform == .linux ? 48 : 24) * gib,
+                                       readMemoryPressure: { .normal })
+    let count = memory.connectedWorkerCount(for: platform)
+    #expect(count == (platform == .linux ? 3 : 2))
+    let overlap = ConnectedWorkerOverlap(expected: count)
+    let directory = fixture.directory
+    let offers = try (0..<count).map { slot in
+        try ConnectedOffer(owner: connectedOffer.owner, runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
+                           repository: connectedOffer.repository, platform: platform == .linux ? "linux" : "macos",
+                           architecture: "arm64", slot: slot)
+    }
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: offers) { offer, _ in
+        let store = ConnectedRunnerStore(directory: directory, platform: platform, slot: offer.slot)
+        let backend = ConnectedBackend()
+        backend.platform = platform
+        var reachedBarrier = false
+        backend.onOperation = { [unowned backend] in
+            if backend.creates == 1 && !reachedBarrier {
+                reachedBarrier = true
+                try overlap.arrive { () throws -> Void in
+                    #expect(!memory.isAvailable(reserving: platform.memoryReservationBytes))
+                    for other in offers {
+                        let journal = ConnectedRunnerStore(directory: directory, platform: platform, slot: other.slot)
+                        #expect(try journal.load()?.offer == other)
+                    }
+                }
+            }
+        }
+        let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/",
+            deviceID: offer.owner, accept: { accepted in
+                try connectedJIT(settings: ["AgentName": accepted.runner, "WorkFolder": "_work", "Ephemeral": true])
+            }, complete: { completed in
+                #expect(backend.destroyed)
+                #expect(completed == offer)
+            }, authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
+        var polled = false
+        do {
+            try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() }, acquire: {
+                try memory.tryAcquire(reserving: platform.memoryReservationBytes)
+            }, release: memory.release, poll: {
+                if polled { throw CancellationError() }
+                polled = true
+                return offer
+            }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { offer, allocation, release in
+                try runner.run(offer, memory: allocation, releaseCapacity: release)
+            }, wait: { _ in throw TestFailure.runnerJob }, retrying: {
+                Issue.record("No retry expected")
+            })
+        } catch is CancellationError {}
+        #expect(backend.creates == 1 && backend.destroyed && reachedBarrier)
+        #expect(try store.load() == nil)
+    }
+    let all = try #require(try memory.tryAcquire(reserving: UInt64(count) * platform.memoryReservationBytes))
+    memory.release(all)
+    #expect(!ConnectedRunnerStore.hasRecovery(in: directory))
+}
+
+@Test(arguments: [RunnerPlatform.linux, .macOS])
+func connectedWorkerJournalsRejectCrossSlotWritesAndBlockStandaloneRecovery(_ platform: RunnerPlatform) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let offer = try ConnectedOffer(owner: connectedOffer.owner, runner: connectedOffer.runner,
+        repository: connectedOffer.repository, platform: platform == .linux ? "linux" : "macos",
+        architecture: "arm64", slot: 15)
+    let lease = ConnectedLease(server: "https://example.com/", deviceID: connectedOffer.owner, offer: offer)
+    let wrong = ConnectedRunnerStore(directory: fixture.directory, platform: platform)
+    #expect(throws: ConnectedRunnerError.invalidState) { try wrong.save(lease) }
+    let store = ConnectedRunnerStore(directory: fixture.directory, platform: platform, slot: 15)
+    try store.save(lease)
+    #expect(ConnectedRunnerStore.hasRecovery(in: fixture.directory))
+    #expect(throws: ConnectedRunnerError.recoveryRequired) {
+        try withRunnerOwnership(in: fixture.directory) { _ in Issue.record("High slot bypassed recovery") }
+    }
+    // A renamed journal cannot be loaded as another worker's assignment.
+    try FileManager.default.copyItem(at: store.file, to: wrong.file)
+    #expect(throws: ConnectedRunnerError.invalidState) { try wrong.load() }
+    #expect(try store.load() == lease)
+}
+
+@Test(arguments: [-1, 16])
+func connectedOffersRejectOutOfRangeWorkerSlots(_ slot: Int) {
+    #expect(throws: ConnectedRunnerError.invalidOffer) {
+        try ConnectedOffer(owner: connectedOffer.owner, runner: connectedOffer.runner,
+                           repository: connectedOffer.repository, platform: "linux", architecture: "arm64", slot: slot)
+    }
+}
+
+@Test
+func connectedWorkerPlanUsesMemoryBudgetAndStablePlatformSlots() {
+    let gib: UInt64 = 1_024 * 1_024 * 1_024
+    for (physical, linux, mac) in [(16, 1, 1), (24, 1, 2), (48, 3, 2), (1024, 16, 2)] {
+        let memory = RunnerMemoryAdmission(physicalMemoryBytes: UInt64(physical) * gib, readMemoryPressure: { .normal })
+        #expect(memory.connectedWorkerCount(for: .linux) == linux)
+        #expect(memory.connectedWorkerCount(for: .macOS) == mac)
+        var reports: [(RunnerPlatform, Int)] = []
+        let workers = connectedWorkers(backends: [.linux(containerURL: URL(fileURLWithPath: "/container")),
+                                                   .macOS(templateURL: URL(fileURLWithPath: "/template"))], memory: memory) {
+            reports.append(($0, $1))
+        }
+        #expect(workers.filter { $0.backend.platform == .linux }.map(\.slot) == Array(0..<linux))
+        #expect(workers.filter { $0.backend.platform == .macOS }.map(\.slot) == Array(0..<mac))
+        #expect(reports.map(\.0) == [.linux, .macOS])
+        #expect(reports.map(\.1) == [linux, mac])
+    }
+}
+
+@Test
+func connectedJournalWithoutWorkerSlotRequiresPreviousVersionRecovery() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    try fixture.store.save(ConnectedLease(server: "https://example.com/", deviceID: connectedOffer.owner, offer: connectedOffer))
+    let data = try Data(contentsOf: fixture.store.file)
+    var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    var offer = try #require(json["offer"] as? [String: Any])
+    offer.removeValue(forKey: "slot")
+    json["offer"] = offer
+    let old = try JSONSerialization.data(withJSONObject: json)
+    try old.write(to: fixture.store.file)
+    #expect(throws: ConnectedRunnerError.previousVersionState) { try fixture.store.load() }
+    #expect(try Data(contentsOf: fixture.store.file) == old)
+    #expect(ConnectedRunnerStore.hasRecovery(in: fixture.directory))
+}
+
+@Test
+func connectedMixedPlatformWorkersCannotOvercommitOneMemoryBudget() throws {
+    let gib: UInt64 = 1_024 * 1_024 * 1_024
+    let memory = RunnerMemoryAdmission(physicalMemoryBytes: 48 * gib, readMemoryPressure: { .normal })
+    let contenders = [RunnerPlatform.linux, .linux, .linux, .macOS, .macOS]
+    let snapshot = ConnectedWorkerOverlap(expected: contenders.count)
+    let acquired = ConnectedWorkerOverlap(expected: contenders.count)
+    let held = Mutex<[RunnerMemoryReservation]>([])
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: contenders) { platform, _ in
+        #expect(memory.isAvailable(reserving: platform.memoryReservationBytes))
+        try snapshot.arrive(check: {})
+        let reservation = try memory.tryAcquire(reserving: platform.memoryReservationBytes)
+        if let reservation { held.withLock { $0.append(reservation) } }
+        defer { if let reservation { memory.release(reservation) } }
+        // Nobody releases capacity until all five racing workers tried admission.
+        try acquired.arrive {
+            let reservations = held.withLock { $0 }
+            let total = reservations.reduce(UInt64(0)) { $0 + $1.bytes }
+            #expect(reservations.count == 3)
+            try #require(total <= 36 * gib)
+            #expect(try memory.tryAcquire(reserving: 36 * gib - total + 1) == nil)
+        }
+    }
+    let all = try #require(try memory.tryAcquire(reserving: 36 * gib))
+    memory.release(all)
+}
+
+// A bounded barrier proves all simulated guests exist before any can finish.
+private final class ConnectedWorkerOverlap: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let expected: Int
+    private var arrived = 0
+    init(expected: Int) { self.expected = expected }
+    func arrive(check: () throws -> Void) throws {
+        condition.lock()
+        defer { condition.unlock() }
+        arrived += 1
+        if arrived == expected {
+            defer { condition.broadcast() }
+            try check()
+        } else {
+            let deadline = Date(timeIntervalSinceNow: 5)
+            while arrived < expected {
+                guard condition.wait(until: deadline) else { throw TestFailure.runnerJob }
+            }
         }
     }
 }

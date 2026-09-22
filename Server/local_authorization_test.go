@@ -28,7 +28,7 @@ func TestLocalAuthorizationRequiresIssuedIdentity(t *testing.T) {
 	if _, err := c.renewDevice(t.Context(), wrong); err == nil {
 		t.Fatal("wrong identity renewed")
 	}
-	c.state.Lease.Local.Expires = time.Now().Add(-time.Second)
+	singleLease(c.state).Local.Expires = time.Now().Add(-time.Second)
 	check(false)
 	w.busy = true
 	check(true)
@@ -48,7 +48,7 @@ func TestLocalCompletionRevokesDurablyAndLateStartCannotRenew(t *testing.T) {
 	if _, err := c.acceptDevice(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	id := c.state.Lease.RunnerID
+	id := singleLease(c.state).RunnerID
 	if err := c.HandleJobCompleted(t.Context(), &scaleset.JobCompleted{RunnerName: request.Runner, RunnerID: id}); err != nil {
 		t.Fatal(err)
 	}
@@ -76,14 +76,14 @@ func TestLocalAuthorizationProgressRequiresMatchingRunnerAndDurableSave(t *testi
 		t.Fatal(err)
 	}
 	for _, job := range []*scaleset.JobCompleted{
-		{RunnerName: "another", RunnerID: c.state.Lease.RunnerID},
-		{RunnerName: request.Runner, RunnerID: c.state.Lease.RunnerID + 1},
+		{RunnerName: "another", RunnerID: singleLease(c.state).RunnerID},
+		{RunnerName: request.Runner, RunnerID: singleLease(c.state).RunnerID + 1},
 	} {
 		if err := c.HandleJobCompleted(t.Context(), job); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if c.state.Lease.Local.JobStarted || c.state.Lease.Local.JobCompleted {
+	if singleLease(c.state).Local.JobStarted || singleLease(c.state).Local.JobCompleted {
 		t.Fatal("unrelated job changed authorization")
 	}
 	w.busy = true
@@ -91,11 +91,11 @@ func TestLocalAuthorizationProgressRequiresMatchingRunnerAndDurableSave(t *testi
 	if _, err := c.renewDevice(t.Context(), request); err == nil {
 		t.Fatal("granted authorization after failed save")
 	}
-	if c.state.Lease.Local.JobStarted {
+	if singleLease(c.state).Local.JobStarted {
 		t.Fatal("mutated before saving")
 	}
 	c.save = store.save
-	if err := c.beginCleanup(""); err != nil {
+	if err := c.assigned(singleLease(c.state).Name).beginCleanup(""); err != nil {
 		t.Fatal(err)
 	}
 	authorization, err := c.renewDevice(t.Context(), request)

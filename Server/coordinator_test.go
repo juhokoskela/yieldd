@@ -150,13 +150,13 @@ func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
 	}
 	w.beforeGenerate = func() {
 		s, err := store.load(testConfig)
-		if err != nil || s.Lease == nil || s.Lease.RunnerID != 0 {
+		if err != nil || singleLease(s) == nil || singleLease(s).RunnerID != 0 {
 			t.Fatal("registration intent not durable", err)
 		}
 	}
 	w.beforeDispatch = func() {
 		s, err := store.load(testConfig)
-		if err != nil || !s.Lease.DispatchIntent || s.Lease.JIT != "" {
+		if err != nil || !singleLease(s).DispatchIntent || singleLease(s).JIT != "" {
 			t.Fatal("dispatch intent not durable", err)
 		}
 	}
@@ -178,7 +178,7 @@ func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
 		t.Fatal("duplicate dispatch", w.dispatched)
 	}
 	saved, err := store.load(testConfig)
-	if err != nil || saved.Lease.RunID != 99 || w.findCalls != 0 || w.getCalls != 3 {
+	if err != nil || singleLease(saved).RunID != 99 || w.findCalls != 0 || w.getCalls != 3 {
 		t.Fatal("ordinary dispatch did not use its persisted run ID", err, w.findCalls, w.getCalls)
 	}
 }
@@ -197,7 +197,7 @@ func TestRestartAfterLostDispatchResponseReconcilesWithoutRedispatch(t *testing.
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if c.state.Lease.RunID != 99 || w.dispatched != 1 {
+	if singleLease(c.state).RunID != 99 || w.dispatched != 1 {
 		t.Fatal("lost response caused redispatch")
 	}
 	if w.findCalls != 1 {
@@ -221,7 +221,7 @@ func TestUnknownDispatchNeverRedispatchesOrDropsObligation(t *testing.T) {
 		t.Fatal("redispatched unknown outcome")
 	}
 	saved, err := store.load(testConfig)
-	if err != nil || saved.Lease == nil || !saved.Lease.DispatchIntent {
+	if err != nil || singleLease(saved) == nil || !singleLease(saved).DispatchIntent {
 		t.Fatal("lost obligation", err)
 	}
 }
@@ -236,7 +236,7 @@ func TestRestartResumesSecretDeliveryBeforeFirstDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Lease.JIT != "private-jit" || saved.Lease.DispatchIntent {
+	if singleLease(saved).JIT != "private-jit" || singleLease(saved).DispatchIntent {
 		t.Fatal("cannot resume secret delivery")
 	}
 	c.state = saved
@@ -267,11 +267,11 @@ func TestUncertainRegistrationRequiresRecovery(t *testing.T) {
 		t.Fatal(w.events)
 	}
 	// The original request created a runner even though its response was lost.
-	w.runner = &scaleset.RunnerReference{ID: 7, Name: c.state.Lease.Name, RunnerScaleSetID: 3}
+	w.runner = &scaleset.RunnerReference{ID: 7, Name: singleLease(c.state).Name, RunnerScaleSetID: 3}
 	if done, err := c.reconcile(t.Context(), true); err != nil || !done {
 		t.Fatal(done, err)
 	}
-	if c.state.Lease != nil || w.runner != nil {
+	if singleLease(c.state) != nil || w.runner != nil {
 		t.Fatal("registration not recovered")
 	}
 }
@@ -288,7 +288,7 @@ func TestCleanupFailuresRetainLeaseAndRetryOnlyCleanup(t *testing.T) {
 		t.Fatal("expected cleanup failure")
 	}
 	saved, err := store.load(testConfig)
-	if err != nil || saved.Lease == nil {
+	if err != nil || singleLease(saved) == nil {
 		t.Fatal("cleanup obligation lost", err)
 	}
 	c.state = saved
@@ -296,7 +296,7 @@ func TestCleanupFailuresRetainLeaseAndRetryOnlyCleanup(t *testing.T) {
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 {
 		t.Fatal(n, err)
 	}
-	if c.state.Lease != nil || w.dispatched != 1 {
+	if singleLease(c.state) != nil || w.dispatched != 1 {
 		t.Fatal("cleanup re-provisioned against stale demand")
 	}
 }
@@ -318,7 +318,7 @@ func TestBusyAndForeignRunnersAreNotDeleted(t *testing.T) {
 			if _, err := c.HandleDesiredRunnerCount(t.Context(), 0); err == nil {
 				t.Fatal("unsafe cleanup allowed")
 			}
-			if w.runner == nil || c.state.Lease == nil {
+			if w.runner == nil || singleLease(c.state) == nil {
 				t.Fatal("deleted active or foreign runner")
 			}
 		})
@@ -335,7 +335,7 @@ func TestFailedBootstrapCleansUpAndStopsRatherThanRerunning(t *testing.T) {
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
 		t.Fatal("bootstrap failure ignored")
 	}
-	if c.state.Lease != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
+	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
 		t.Fatal("failure cleanup or dispatch count")
 	}
 }
@@ -397,19 +397,19 @@ func TestEveryPreDispatchPersistenceBarrierPreventsDispatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if failAt > 1 && saved.Lease == nil {
+			if failAt > 1 && singleLease(saved) == nil {
 				t.Fatal("lost prior durable intent")
 			}
 			c.state = saved
 			c.save = store.save
 			if failAt == 3 {
-				if !saved.Lease.CleanupIntent {
+				if !singleLease(saved).CleanupIntent {
 					t.Fatal("failed dispatch intent was not moved to cleanup")
 				}
 				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 					t.Fatal(err)
 				}
-				if c.state.Lease != nil || w.dispatched != 0 || w.runner != nil || w.secret != "" {
+				if singleLease(c.state) != nil || w.dispatched != 0 || w.runner != nil || w.secret != "" {
 					t.Fatal("failed intent resumed provisioning")
 				}
 				return
@@ -440,7 +440,7 @@ func TestCancellationBeforeProvisioningHasNoSideEffects(t *testing.T) {
 	if _, err := c.HandleDesiredRunnerCount(ctx, 1); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if c.state.Lease != nil || len(w.events) != 0 {
+	if singleLease(c.state) != nil || len(w.events) != 0 {
 		t.Fatal("provisioned after cancellation")
 	}
 }
@@ -453,7 +453,7 @@ func TestShutdownStillPreventsProvisioningWithDetachedCallbackContext(t *testing
 	if _, err := loop.HandleDesiredRunnerCount(context.WithoutCancel(ctx), 1); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if c.state.Lease != nil || len(w.events) != 0 {
+	if singleLease(c.state) != nil || len(w.events) != 0 {
 		t.Fatal("provisioned during shutdown")
 	}
 }
@@ -466,7 +466,7 @@ func TestExplicitRecoveryCancelsBootstrapAndRetainsLeaseUntilTermination(t *test
 	if done, err := c.reconcile(t.Context(), true); err != nil || done {
 		t.Fatal(err)
 	}
-	if c.state.Lease == nil || w.secret == "" || w.events[len(w.events)-1] != "cancel" || w.dispatched != 1 {
+	if singleLease(c.state) == nil || w.secret == "" || w.events[len(w.events)-1] != "cancel" || w.dispatched != 1 {
 		t.Fatal("unsafe recovery cleanup", w.events)
 	}
 }
@@ -493,7 +493,8 @@ func TestPrivateStateAndExclusiveOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	saved.Lease = &lease{Name: "yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef", Created: time.Now(), RunnerID: 7, JIT: "private-jit"}
+	l := &lease{Name: "yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef", Created: time.Now(), RunnerID: 7, JIT: "private-jit"}
+	saved.Leases = map[string]*lease{l.Name: l}
 	saved.ScaleSetID = 3
 	if err := store.save(saved); err != nil {
 		t.Fatal(err)
@@ -516,7 +517,7 @@ func TestPrivateStateAndExclusiveOwnership(t *testing.T) {
 	}
 	defer reopened.Close()
 	loaded, err := reopened.load(testConfig)
-	if err != nil || loaded.Lease.JIT != "private-jit" {
+	if err != nil || singleLease(loaded).JIT != "private-jit" {
 		t.Fatal("state did not survive reopen", err)
 	}
 	data, err := json.Marshal(loaded)

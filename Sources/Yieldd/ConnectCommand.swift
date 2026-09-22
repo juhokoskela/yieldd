@@ -79,7 +79,7 @@ struct ConnectCommand: ParsableCommand {
                     try VirtualizationEntitlement.requireCurrentProcess()
                     try MacOSRunnerNetwork.requireRelay()
                 }
-                let slots = try platforms.map { platform -> RunnerSlotBackend in
+                let backends = try platforms.map { platform -> RunnerSlotBackend in
                     switch platform {
                     case .linux:
                         let container = try ExecutableLocator().locate("container")
@@ -91,14 +91,17 @@ struct ConnectCommand: ParsableCommand {
                         return .macOS(templateURL: template)
                     }
                 }
-                try RunnerPool(stop: stop).run(slots: slots) { slot, stop in
-                    let platform = slot.platform
+                let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
+                    print("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
+                }
+                try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
+                    let platform = worker.backend.platform
                     let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
-                                                     platform: platform, checkCancellation: stop.check)
+                                                     platform: platform, slot: worker.slot, checkCancellation: stop.check)
                     let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
                     let executor = ProcessExecutor(checkCancellation: authorization.check)
                     let backend: any RunnerBackend
-                    switch slot {
+                    switch worker.backend {
                     case let .linux(containerURL):
                         backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
                             stateDirectory: directory,
@@ -108,16 +111,16 @@ struct ConnectCommand: ParsableCommand {
                             cloneRootURL: RunnerStorage.cloneRoot(in: directory),
                             executor: executor, checkCancellation: authorization.check, wait: stop.wait)
                     }
-                    let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform),
+                    let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
                         server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
                         authorization: authorization, wait: stop.wait,
                         stateChanged: { reportRunnerServiceState($0, platform: platform, output: .terminal) })
                     try runConnectedClient(checkCancellation: stop.check, recover: {
                         try runner.recover()
-                        print("Connected \(platform.rawValue) ARM64 slot ready. Idle polling reserves no RAM and starts no guest.")
+                        print("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
                     }, acquire: {
                         try memory.tryAcquire(reserving: platform.memoryReservationBytes)
-                    }, release: memory.release, poll: client.poll, run: { offer, allocation, release in
+                    }, release: memory.release, poll: client.poll, decline: client.decline, run: { offer, allocation, release in
                         print("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                         try runner.run(offer, memory: allocation, releaseCapacity: release)
                     }, wait: stop.wait, retrying: {
@@ -132,5 +135,19 @@ struct ConnectCommand: ParsableCommand {
         } catch where isCancellation(error) {
             print("Stopped. Any unfinished connected assignment remains recorded for recovery.")
         }
+    }
+}
+
+struct ConnectedWorker: Sendable {
+    let backend: RunnerSlotBackend
+    let slot: Int
+}
+
+func connectedWorkers(backends: [RunnerSlotBackend], memory: RunnerMemoryAdmission,
+                      report: (RunnerPlatform, Int) -> Void) -> [ConnectedWorker] {
+    backends.flatMap { backend in
+        let count = memory.connectedWorkerCount(for: backend.platform)
+        report(backend.platform, count)
+        return (0..<count).map { ConnectedWorker(backend: backend, slot: $0) }
     }
 }

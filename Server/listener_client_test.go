@@ -51,7 +51,7 @@ func (s *controlledMessages) AcquireJobs(ctx context.Context, ids []int64) ([]in
 func testPlatform(t *testing.T, ctx context.Context, c *coordinator, stream *controlledMessages) *platformCoordinator {
 	t.Helper()
 	ctx, cancel := context.WithCancel(ctx)
-	messages, err := listener.New(shutdownAwareListenerClient{Client: stream, lifetime: ctx}, listener.Config{ScaleSetID: c.state.ScaleSetID, MaxRunners: 1})
+	messages, err := listener.New(shutdownAwareListenerClient{Client: stream, lifetime: ctx}, listener.Config{ScaleSetID: c.state.ScaleSetID, MaxRunners: maximumAssignments})
 	if err != nil {
 		cancel()
 		t.Fatal(err)

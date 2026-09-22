@@ -21,7 +21,7 @@ struct ConnectedRunner {
     func run(_ offer: ConnectedOffer, memory: RunnerMemoryAllocation, releaseCapacity: () -> Void = {}) throws {
         var releaseOnExit = true
         defer { if releaseOnExit { releaseCapacity() } }
-        guard offer.runnerPlatform == backend.platform else { throw ConnectedRunnerError.invalidOffer }
+        guard offer.runnerPlatform == backend.platform, offer.slot == store.slot else { throw ConnectedRunnerError.invalidOffer }
         guard try store.load() == nil else { throw ConnectedRunnerError.recoveryRequired }
         try backend.prepare()
         let id = RunnerID(value: offer.runner)

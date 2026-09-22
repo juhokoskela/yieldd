@@ -262,11 +262,11 @@ func TestPlatformDeviceRoutingAndRecoveryStayIndependent(t *testing.T) {
 	}
 	// Read persisted snapshots rather than the event-loop-owned objects.
 	saved, err := macStore.load(mac.state.Config)
-	if err != nil || saved.Lease != nil {
+	if err != nil || singleLease(saved) != nil {
 		t.Fatal(saved, err)
 	}
 	saved, err = linuxStore.load(linux.state.Config)
-	if err != nil || saved.Lease == nil || saved.Lease.Local.Phase != localIssued {
+	if err != nil || singleLease(saved) == nil || singleLease(saved).Local.Phase != localIssued {
 		t.Fatal(saved, err)
 	}
 	if linuxWorld.dispatched != 0 || macWorld.dispatched != 0 {
@@ -277,7 +277,7 @@ func TestPlatformDeviceRoutingAndRecoveryStayIndependent(t *testing.T) {
 func TestMacOSOfferExpiryUsesOnlyItsConfiguredFallback(t *testing.T) {
 	mac, w, _, _ := localFixture(t)
 	mac.state.Config.Platform, mac.state.Config.Fallback = "macos", `["self-hosted","my-mac"]`
-	mac.state.Lease.Local.Expires = time.Now().Add(-time.Second)
+	singleLease(mac.state).Local.Expires = time.Now().Add(-time.Second)
 	if _, err := mac.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}

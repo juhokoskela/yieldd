@@ -18,21 +18,21 @@ func localFixture(t *testing.T) (*coordinator, *fakeWorld, *stateStore, deviceRe
 	t.Helper()
 	c, w, store := newFixture(t)
 	c.state.Config.DeviceID = testDevice
-	c.device.pollNow()
+	c.device.pollNow(0)
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 {
 		t.Fatalf("offer: %d %v", n, err)
 	}
-	return c, w, store, deviceRequest{DeviceID: testDevice, Owner: c.state.Owner, Runner: c.state.Lease.Name}
+	return c, w, store, deviceRequest{DeviceID: testDevice, Owner: c.state.Owner, Runner: singleLease(c.state).Name}
 }
 
 func TestLocalOfferDoesNotRegisterUntilAccepted(t *testing.T) {
 	c, w, store, request := localFixture(t)
-	if len(w.events) != 0 || c.state.Lease.Local.Phase != localOffered {
+	if len(w.events) != 0 || singleLease(c.state).Local.Phase != localOffered {
 		t.Fatal("offer caused external provisioning")
 	}
 	w.beforeGenerate = func() {
 		saved, err := store.load(c.state.Config)
-		if err != nil || saved.Lease.Local.Phase != localAccepted {
+		if err != nil || singleLease(saved).Local.Phase != localAccepted {
 			t.Fatalf("acceptance not durable: %v", err)
 		}
 	}
@@ -41,7 +41,7 @@ func TestLocalOfferDoesNotRegisterUntilAccepted(t *testing.T) {
 		t.Fatalf("accept: %v %v", credential, err)
 	}
 	saved, err := store.load(c.state.Config)
-	if err != nil || saved.Lease.Local.Phase != localIssued || saved.Lease.JIT != "" {
+	if err != nil || singleLease(saved).Local.Phase != localIssued || singleLease(saved).JIT != "" {
 		t.Fatalf("delivery not durable: %v", err)
 	}
 	if _, err := c.acceptDevice(t.Context(), request); err == nil {
@@ -62,9 +62,9 @@ func TestIssuedLocalLeaseSurvivesRestartAndDisconnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.state = saved
-	c.device.availableUntil = time.Time{}
-	c.state.Lease.Local.Expires = time.Now().Add(-time.Hour)
-	for _, demand := range []int{0, 1, 10} {
+	c.device.slots[0].availableUntil = time.Time{}
+	singleLease(c.state).Local.Expires = time.Now().Add(-time.Hour)
+	for _, demand := range []int{0, 1} {
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), demand); err != nil || n != 1 {
 			t.Fatalf("lost local capacity: %d %v", n, err)
 		}
@@ -78,7 +78,7 @@ func TestIssuedLocalLeaseSurvivesRestartAndDisconnection(t *testing.T) {
 	if err := c.completeDevice(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if c.state.Lease != nil || w.runner != nil {
+	if singleLease(c.state) != nil || w.runner != nil {
 		t.Fatal("local completion did not clean up")
 	}
 	if err := c.completeDevice(t.Context(), request); err != nil {
@@ -88,20 +88,20 @@ func TestIssuedLocalLeaseSurvivesRestartAndDisconnection(t *testing.T) {
 
 func TestExpiredOfferFallsBackWithoutIssuingLocalCredentials(t *testing.T) {
 	c, w, _, request := localFixture(t)
-	c.state.Lease.Local.Expires = time.Now().Add(-time.Second)
+	singleLease(c.state).Local.Expires = time.Now().Add(-time.Second)
 	if _, err := c.acceptDevice(t.Context(), request); err == nil {
 		t.Fatal("expired offer accepted")
 	}
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if w.dispatched != 1 || c.state.Lease.Local != nil {
+	if w.dispatched != 1 || singleLease(c.state).Local != nil {
 		t.Fatal("no hosted fallback")
 	}
 	if err := c.completeDevice(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if c.state.Lease == nil || w.runner == nil {
+	if singleLease(c.state) == nil || w.runner == nil {
 		t.Fatal("late local acknowledgement deleted hosted execution")
 	}
 }
@@ -111,7 +111,7 @@ func TestLocalCapacityExpiresAndZeroDemandRetractsUnacceptedOffer(t *testing.T) 
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 0); err != nil || n != 0 {
 		t.Fatalf("retract: %d %v", n, err)
 	}
-	c.device.availableUntil = time.Now().Add(-time.Second)
+	c.device.slots[0].availableUntil = time.Now().Add(-time.Second)
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestLocalCleanupMustConfirmRegistrationIsIdle(t *testing.T) {
 		t.Fatal("busy registration removed")
 	}
 	saved, err := store.load(c.state.Config)
-	if err != nil || !saved.Lease.CleanupIntent || w.runner == nil {
+	if err != nil || !singleLease(saved).CleanupIntent || w.runner == nil {
 		t.Fatalf("cleanup intent lost: %v", err)
 	}
 	c.state = saved
@@ -145,7 +145,7 @@ func TestLocalFailureBeforeCredentialDeliveryIsRecoverable(t *testing.T) {
 		t.Run(string(phase), func(t *testing.T) {
 			c, w, store, request := localFixture(t)
 			c.save = func(s *state) error {
-				if s.Lease != nil && s.Lease.Local.Phase == phase {
+				if singleLease(s) != nil && singleLease(s).Local.Phase == phase {
 					return errors.New("disk failure")
 				}
 				return store.save(s)
@@ -162,7 +162,7 @@ func TestLocalFailureBeforeCredentialDeliveryIsRecoverable(t *testing.T) {
 			if err := c.completeDevice(t.Context(), request); err != nil {
 				t.Fatal(err)
 			}
-			if w.runner != nil || c.state.Lease != nil {
+			if w.runner != nil || singleLease(c.state) != nil {
 				t.Fatal("failed acceptance was not cleaned up")
 			}
 		})
@@ -362,7 +362,7 @@ func TestLocalStateRejectsMixedHostedAndLocalIdentities(t *testing.T) {
 	for _, invalid := range []string{"device", "phase", "run", "issued", "credentials"} {
 		t.Run(invalid, func(t *testing.T) {
 			c, _, store, _ := localFixture(t)
-			l := c.state.Lease
+			l := singleLease(c.state)
 			switch invalid {
 			case "device":
 				l.Local.DeviceID = "another-device"

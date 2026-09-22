@@ -70,7 +70,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if err != nil {
 		return nil, &sdkError{"open message session", err}
 	}
-	p.messages, err = listener.New(shutdownAwareListenerClient{Client: p.session, lifetime: loopContext}, listener.Config{ScaleSetID: id, MaxRunners: 1})
+	p.messages, err = listener.New(shutdownAwareListenerClient{Client: p.session, lifetime: loopContext}, listener.Config{ScaleSetID: id, MaxRunners: maximumAssignments})
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (p *platformCoordinator) run(ctx context.Context, recoverOnly bool) error {
 	worker := p.loop.worker
 	// Remove a failed waiter's FIFO entry, never its issued capacity reservation.
 	defer worker.device.forget(worker.state.Owner)
-	worker.logger.Info("Serving scale set", "scale_set", worker.state.ScaleSetID, "capacity", 1, "local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
+	worker.logger.Info("Serving scale set", "scale_set", worker.state.ScaleSetID, "capacity", maximumAssignments, "local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
 	done := make(chan error, 1)
 	go func() { done <- p.loop.run(); p.cancel() }()
 	err := p.messages.Run(p.loop.ctx, p.loop)

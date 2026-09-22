@@ -33,7 +33,7 @@ func (s *messageStream) DeleteMessage(_ context.Context, id int) error {
 	return nil
 }
 func (s *messageStream) GetMessage(ctx context.Context, _, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
-	if capacity != 1 {
+	if capacity != maximumAssignments {
 		s.t.Error("unexpected advertised capacity", capacity)
 	}
 	s.calls++
@@ -75,7 +75,7 @@ func TestUpstreamListenerDrivesDemandAndReconciliation(t *testing.T) {
 	}()
 	defer func() { cancel(); <-done }()
 	stream := &messageStream{t: t, world: world, cancel: cancel}
-	l, err := listener.New(stream, listener.Config{ScaleSetID: 3, MaxRunners: 1})
+	l, err := listener.New(stream, listener.Config{ScaleSetID: 3, MaxRunners: maximumAssignments})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestUpstreamListenerDrivesDemandAndReconciliation(t *testing.T) {
 	if !reflect.DeepEqual(stream.acquired, []int64{42}) || !reflect.DeepEqual(stream.deleted, []int{1, 2, 3}) {
 		t.Fatal(stream.acquired, stream.deleted)
 	}
-	if world.dispatched != 1 || world.runner != nil || world.secret != "" || c.state.Lease != nil {
+	if world.dispatched != 1 || world.runner != nil || world.secret != "" || singleLease(c.state) != nil {
 		t.Fatal("listener did not complete one provisioning lifecycle")
 	}
 }

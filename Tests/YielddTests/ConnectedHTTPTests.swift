@@ -3,24 +3,51 @@ import Network
 import Testing
 @testable import Yieldd
 
-@Test
-func connectedHTTPUsesBearerAuthenticationAndWireIdentity() throws {
-    let body = #"{"owner":"01234567-89ab-4def-8123-456789abcdef","runner":"yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef","repository":"owner/repo","platform":"linux","architecture":"arm64"}"#
+@Test(arguments: [0, 2, 15])
+func connectedHTTPUsesBearerAuthenticationAndWireIdentity(slot: Int) throws {
+    let body = """
+        {"slot":\(slot),"owner":"01234567-89ab-4def-8123-456789abcdef","runner":"yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef","repository":"owner/repo","platform":"linux","architecture":"arm64"}
+        """
     let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
     defer { server.close() }
-    let offer = try #require(try server.client.poll())
+    let original = server.client
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID, token: original.token,
+                                     slot: slot, checkCancellation: {})
+    let offer = try #require(try client.poll())
     #expect(offer.repository == "owner/repo")
+    #expect(offer.slot == slot)
     let request = server.request
     #expect(request.lowercased().contains("authorization: bearer " + server.token))
     #expect(request.contains("POST /v1/poll HTTP/1.1"))
     #expect(request.contains(#""device_id":"01234567-89ab-4def-8123-456789abcdef""#))
+    #expect(request.contains("\"slot\":\(slot)"))
+}
+
+@Test
+func connectedHTTPRejectsAnotherWorkersOfferBeforeSendingCredentialsOrCleanup() throws {
+    let body = #"{"slot":1,"owner":"01234567-89ab-4def-8123-456789abcdef","runner":"yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef","repository":"owner/repo","platform":"linux","architecture":"arm64"}"#
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    let client = server.client
+    #expect(throws: ConnectedRunnerError.invalidOffer) { try client.poll() }
+    let offer = try JSONDecoder().decode(ConnectedOffer.self, from: Data(body.utf8))
+    for action in ["accept", "renew", "complete"] {
+        #expect(throws: ConnectedRunnerError.invalidOffer) {
+            switch action {
+            case "accept": _ = try client.accept(offer)
+            case "renew": _ = try client.renew(offer, checkDeadline: {})
+            default: try client.complete(offer)
+            }
+        }
+        #expect(server.request.contains("POST /v1/poll HTTP/1.1"))
+    }
 }
 
 @Test(arguments: [false, true])
 func connectedHTTPRoutesMacOSAndRejectsLinuxOffers(wrongPlatform: Bool) throws {
     let platform = wrongPlatform ? "linux" : "macos"
     let body = """
-        {"owner":"01234567-89ab-4def-8123-456789abcdef","runner":"yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef","repository":"owner/repo","platform":"\(platform)","architecture":"arm64"}
+        {"slot":0,"owner":"01234567-89ab-4def-8123-456789abcdef","runner":"yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef","repository":"owner/repo","platform":"\(platform)","architecture":"arm64"}
         """
     let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
     defer { server.close() }
@@ -80,28 +107,33 @@ func connectedHTTPStopsLongPollOnCancellation() throws {
     #expect(throws: CancellationError.self) { try client.poll() }
 }
 
-@Test(arguments: [RunnerPlatform.linux, .macOS])
-func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatform) throws {
+@Test(arguments: [RunnerPlatform.linux, .macOS], [0, 2, 15])
+func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatform, slot: Int) throws {
     let body = #"{"jit":"fixture","continue":true}"#
     let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
     defer { server.close() }
     let original = server.client
     let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID,
-        token: original.token, platform: platform, checkCancellation: {})
+        token: original.token, platform: platform, slot: slot, checkCancellation: {})
     for repository in ["owner/first", "owner/second"] {
         let offer = try ConnectedOffer(owner: UUID().uuidString.lowercased(),
             runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: repository,
-            platform: platform == .linux ? "linux" : "macos", architecture: "arm64")
-        for action in ["accept", "renew", "complete"] {
+            platform: platform == .linux ? "linux" : "macos", architecture: "arm64", slot: slot)
+        for action in ["accept", "renew", "complete", "decline"] {
             switch action {
             case "accept": #expect(try client.accept(offer) == "fixture")
             case "renew": #expect(try client.renew(offer, checkDeadline: {}))
+            case "decline": try client.decline(offer)
             default: try client.complete(offer)
             }
             let request = server.request
             let separator = try #require(request.range(of: "\r\n\r\n"))
-            let identity = try JSONDecoder().decode([String: String].self, from: Data(request[separator.upperBound...].utf8))
-            #expect(identity == ["device_id": client.deviceID, "owner": offer.owner, "runner": offer.runner])
+            let identity = try #require(JSONSerialization.jsonObject(with: Data(request[separator.upperBound...].utf8)) as? [String: Any])
+            #expect(Set(identity.keys) == ["device_id", "slot", "owner", "runner"])
+            #expect(identity["device_id"] as? String == client.deviceID)
+            #expect(identity["owner"] as? String == offer.owner)
+            #expect(identity["runner"] as? String == offer.runner)
+            #expect(identity["slot"] as? Int == client.slot)
             let prefix = platform == .linux ? "/v1/" : "/v1/macos/"
             #expect(request.contains("POST \(prefix)\(action) HTTP/1.1"))
         }

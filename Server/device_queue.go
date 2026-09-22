@@ -9,21 +9,34 @@ import (
 	"time"
 )
 
-// One Mac slot is shared by all repositories for a platform. Queue owners keep
-// their durable state; this lock protects only availability and offer snapshots.
-type deviceQueue struct {
-	mu             sync.Mutex
+type deviceSlot struct {
 	availableUntil time.Time
 	owner          string
+	releasedOwner  string
+	runner         string
 	offer          *deviceOffer
 	lease          localLease
-	waiting        []string
-	wake           map[string]chan struct{}
 	changed        chan struct{}
 }
 
+func (s *deviceSlot) idle(now time.Time) bool {
+	return s.owner == "" && now.Before(s.availableUntil)
+}
+
+// Capacity is advertised by idle Mac workers, not inferred from repository demand.
+type deviceQueue struct {
+	mu      sync.Mutex
+	slots   [maximumAssignments]deviceSlot
+	waiting []string
+	wake    map[string]chan struct{}
+}
+
 func newDeviceQueue(wake map[string]chan struct{}) *deviceQueue {
-	return &deviceQueue{wake: wake, changed: make(chan struct{}, 1)}
+	q := &deviceQueue{wake: wake}
+	for i := range q.slots {
+		q.slots[i].changed = make(chan struct{}, 1)
+	}
+	return q
 }
 
 func (q *deviceQueue) wait(owner string) {
@@ -35,18 +48,26 @@ func (q *deviceQueue) wait(owner string) {
 	q.wakeNext()
 }
 
-func (q *deviceQueue) claim(owner string) bool {
+func (q *deviceQueue) claim(owner, runner string) (int, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.owner != "" || !time.Now().Before(q.availableUntil) || (len(q.waiting) != 0 && q.waiting[0] != owner) {
-		return false
+	if len(q.waiting) != 0 && q.waiting[0] != owner {
+		return 0, false
 	}
-	if len(q.waiting) != 0 {
-		q.waiting = q.waiting[1:]
+	now := time.Now()
+	for i := range q.slots {
+		slot := &q.slots[i]
+		if !slot.idle(now) {
+			continue
+		}
+		if len(q.waiting) != 0 {
+			q.waiting = q.waiting[1:]
+		}
+		slot.owner, slot.runner, slot.availableUntil = owner, runner, time.Time{}
+		q.wakeNext()
+		return i, true
 	}
-	q.owner = owner
-	q.availableUntil = time.Time{}
-	return true
+	return 0, false
 }
 
 func (q *deviceQueue) forget(owner string) {
@@ -56,11 +77,22 @@ func (q *deviceQueue) forget(owner string) {
 	q.wakeNext()
 }
 
+func (q *deviceQueue) redrive(owner string) {
+	select {
+	case q.wake[owner] <- struct{}{}:
+	default:
+	}
+}
+
 func (q *deviceQueue) wakeNext() {
-	if q.owner == "" && time.Now().Before(q.availableUntil) && len(q.waiting) != 0 {
-		select {
-		case q.wake[q.waiting[0]] <- struct{}{}:
-		default:
+	if len(q.waiting) == 0 {
+		return
+	}
+	now := time.Now()
+	for i := range q.slots {
+		if q.slots[i].idle(now) {
+			q.redrive(q.waiting[0])
+			return
 		}
 	}
 }
@@ -68,13 +100,16 @@ func (q *deviceQueue) wakeNext() {
 func (q *deviceQueue) restore(s *state) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if s.Lease == nil || s.Lease.Local == nil {
-		return nil
+	for _, l := range s.Leases {
+		if l.Local == nil {
+			continue
+		}
+		slot := &q.slots[l.Local.Slot]
+		if slot.owner != "" {
+			return errors.New("multiple local assignments occupy one Mac slot; recover their original coordinators before combining repositories")
+		}
+		slot.owner, slot.runner = s.Owner, l.Name
 	}
-	if q.owner != "" && q.owner != s.Owner {
-		return errors.New("multiple local assignments occupy one Mac platform; recover their original coordinators before combining repositories")
-	}
-	q.owner = s.Owner
 	q.publish(s)
 	return nil
 }
@@ -82,40 +117,49 @@ func (q *deviceQueue) restore(s *state) error {
 func (q *deviceQueue) update(s *state) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.owner != s.Owner {
-		return
-	}
 	q.publish(s)
 }
 
 func (q *deviceQueue) publish(s *state) {
-	q.offer = nil
-	l := s.Lease
-	if l == nil || l.Local == nil {
-		q.owner = ""
-		// Require a new capacity advertisement after guest cleanup.
-		q.availableUntil = time.Time{}
-	} else if !l.CleanupIntent && l.Local.Phase == localOffered {
-		q.offer = &deviceOffer{Owner: s.Owner, Runner: l.Name, Repository: s.Config.Repository, Platform: s.Config.platform(), Architecture: "arm64"}
-		q.lease = *l.Local
-	}
-	select {
-	case q.changed <- struct{}{}:
-	default:
+	for i := range q.slots {
+		slot := &q.slots[i]
+		if slot.owner != s.Owner {
+			continue
+		}
+		previousOffer, previousLease := slot.offer, slot.lease
+		slot.offer = nil
+		l := s.Leases[slot.runner]
+		if l == nil || l.Local == nil {
+			slot.releasedOwner = slot.owner
+			slot.owner, slot.runner, slot.availableUntil = "", "", time.Time{}
+		} else if !l.CleanupIntent && l.Local.Phase == localOffered {
+			slot.offer = &deviceOffer{Slot: i, Owner: s.Owner, Runner: l.Name, Repository: s.Config.Repository, Platform: s.Config.platform(), Architecture: "arm64"}
+			slot.lease = *l.Local
+		}
+		if (previousOffer == nil) != (slot.offer == nil) || (previousOffer != nil && slot.offer != nil && (*previousOffer != *slot.offer || previousLease != slot.lease)) {
+			select {
+			case slot.changed <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 
-func (q *deviceQueue) pollNow() *deviceOffer {
+func (q *deviceQueue) pollNow(index int) *deviceOffer {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.owner == "" {
-		q.availableUntil = time.Now().Add(availabilityLifetime)
+	slot := &q.slots[index]
+	if slot.owner == "" {
+		slot.availableUntil = time.Now().Add(availabilityLifetime)
 		q.wakeNext()
+		// Refresh completed demand only once the Mac advertises new capacity.
+		q.redrive(slot.releasedOwner)
+		slot.releasedOwner = ""
 	}
-	if q.offer == nil || q.lease.expired() {
+	if slot.offer == nil || slot.lease.expired() {
 		return nil
 	}
-	offer := *q.offer
+	offer := *slot.offer
 	return &offer
 }
 
@@ -156,7 +200,7 @@ func (d *deviceRouter) poll(ctx context.Context, request deviceRequest) (*device
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if offer := d.queue.pollNow(); offer != nil {
+		if offer := d.queue.pollNow(request.Slot); offer != nil {
 			return offer, nil
 		}
 		select {
@@ -164,7 +208,7 @@ func (d *deviceRouter) poll(ctx context.Context, request deviceRequest) (*device
 			return nil, ctx.Err()
 		case <-timer.C:
 			return nil, nil
-		case <-d.queue.changed:
+		case <-d.queue.slots[request.Slot].changed:
 		}
 	}
 }
