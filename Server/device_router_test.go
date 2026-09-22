@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -191,46 +192,78 @@ func TestLocalOnlyExpiryReleasesOfferWithoutHostedSideEffects(t *testing.T) {
 }
 
 func TestRestoredExpiredLocalOnlyOfferRequeuesOutstandingDemand(t *testing.T) {
-	for _, demand := range []int{0, 1} {
-		t.Run(fmt.Sprint(demand), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				c, world, store, _ := localFixture(t)
-				c.state.Config.LocalOnly, c.state.Config.Fallback = true, ""
-				if err := c.save(c.state); err != nil {
-					t.Fatal(err)
-				}
-				time.Sleep(offerLifetime + time.Second)
-				saved, err := store.load(c.state.Config)
-				if err != nil {
-					t.Fatal(err)
-				}
-				c.state = saved
-				ctx, cancel := context.WithCancel(t.Context())
-				loop := newCoordinatorLoop(ctx, c)
-				router, err := newDeviceRouter(testDevice, ctx.Done(), []*coordinatorLoop{loop})
-				if err != nil {
-					cancel()
-					t.Fatal(err)
-				}
-				done := make(chan error, 1)
-				go func() { done <- loop.run() }()
-				defer func() {
-					cancel()
-					if err := <-done; err != nil {
-						t.Error(err)
+	for _, failure := range []string{"unaccepted", "registration", "issuance"} {
+		for _, demand := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/demand=%d", failure, demand), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					c, world, store, request := localFixture(t)
+					c.state.Config.LocalOnly, c.state.Config.Fallback = true, ""
+					if err := c.save(c.state); err != nil {
+						t.Fatal(err)
 					}
-				}()
-				if _, err := loop.HandleDesiredRunnerCount(t.Context(), demand); err != nil {
-					t.Fatal(err)
-				}
-				router.queue.pollNow()
-				synctest.Wait()
-				offer := router.queue.pollNow()
-				if (offer != nil) != (demand > 0) || len(world.events) != 0 {
-					t.Fatal("incorrect demand after expired offer recovery", demand, offer, world.events)
-				}
+					var wantEvents []string
+					switch failure {
+					case "registration":
+						world.generateErr = io.ErrUnexpectedEOF
+						wantEvents = []string{"register"}
+					case "issuance":
+						c.save = func(s *state) error {
+							if s.Lease != nil && s.Lease.Local.Phase == localIssued {
+								return io.ErrUnexpectedEOF
+							}
+							return store.save(s)
+						}
+						wantEvents = []string{"register", "remove-runner"}
+					}
+					if failure != "unaccepted" {
+						if credential, err := c.acceptDevice(t.Context(), request); err == nil || credential != nil {
+							t.Fatal("acceptance did not fail before credential delivery", err)
+						}
+						if c.state.Lease.Local.Phase != localAccepted {
+							t.Fatal("failed acceptance did not retain its phase")
+						}
+						c.save, world.generateErr = store.save, nil
+					}
+					time.Sleep(time.Until(c.state.Lease.Local.Expires) + time.Second)
+					saved, err := store.load(c.state.Config)
+					if err != nil {
+						t.Fatal(err)
+					}
+					c.state = saved
+					ctx, cancel := context.WithCancel(t.Context())
+					loop := newCoordinatorLoop(ctx, c)
+					router, err := newDeviceRouter(testDevice, ctx.Done(), []*coordinatorLoop{loop})
+					if err != nil {
+						cancel()
+						t.Fatal(err)
+					}
+					done := make(chan error, 1)
+					go func() { done <- loop.run() }()
+					defer func() {
+						cancel()
+						if err := <-done; err != nil {
+							t.Error(err)
+						}
+					}()
+					if _, err := loop.HandleDesiredRunnerCount(t.Context(), demand); err != nil {
+						t.Fatal(err)
+					}
+					cleared, err := store.load(c.state.Config)
+					if err != nil || cleared.Lease != nil || world.runner != nil {
+						t.Fatal("expired assignment was not cleaned up before polling", err)
+					}
+					router.queue.pollNow()
+					synctest.Wait()
+					offer := router.queue.pollNow()
+					if (offer != nil) != (demand > 0) || !slices.Equal(world.events, wantEvents) {
+						t.Fatal("incorrect demand after expired offer recovery", demand, offer, world.events)
+					}
+					if offer != nil && offer.Runner == request.Runner {
+						t.Fatal("expired assignment was reused")
+					}
+				})
 			})
-		})
+		}
 	}
 }
 

@@ -63,8 +63,8 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		return 0, err
 	}
 	if c.state.Lease != nil {
-		// An unaccepted offer cannot have consumed the reported demand.
-		reoffer := c.state.Config.LocalOnly && c.state.Lease.Local != nil && c.state.Lease.Local.Phase == localOffered
+		// Without issued credentials, an offer cannot have consumed the reported demand.
+		reoffer := c.state.Config.LocalOnly && c.state.Lease.Local != nil && c.state.Lease.Local.Phase != localIssued
 		recoverOnly := count <= 0 && !c.state.Lease.DispatchIntent && (c.state.Lease.Local == nil || c.state.Lease.Local.Phase != localIssued)
 		done, err := c.reconcile(ctx, recoverOnly)
 		if err != nil && c.state.Lease != nil && c.state.Lease.Local != nil && c.state.Lease.CleanupIntent && transientFailure(err) {
