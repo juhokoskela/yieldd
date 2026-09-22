@@ -133,7 +133,7 @@ func backendStorageFailurePreventsGuestCreation() throws {
     defer { fixture.remove() }
     let mac = try MacOSVirtualizationBackend(stateDirectory: unconfiguredContainerStateDirectory, templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
         executor: executor, requireEntitlement: {},
-        makeMachine: { _, _ in Issue.record("No VM may be created without a quota"); throw TestFailure.create })
+        makeMachine: { _, _, _ in Issue.record("No VM may be created without a quota"); throw TestFailure.create })
     #expect(throws: RunnerStorageError.notConfigured) { try mac.create(id: RunnerID(value: "yieldd-test"), memory: .full) }
     #expect(!FileManager.default.fileExists(atPath: fixture.cloneRootURL.path))
 }

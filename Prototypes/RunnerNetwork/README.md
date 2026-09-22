@@ -1,6 +1,6 @@
 # Runner network prototype
 
-Experimental only. Normal yieldd commands still use their existing networking. Do not run hostile workloads through this prototype or treat it as a finished sandbox.
+This directory contains the relay and experimental VM probes. Normal macOS runner commands now use the same relay and socket adapter; Linux commands and the manual template probe still use their existing networking. The macOS integration awaits live validation. Do not treat this as a finished sandbox.
 
 Each guest gets one `VZFileHandleNetworkDeviceAttachment`, connected to its own host-side relay through a private Unix datagram socket. The relay uses gVisor's TCP/IP stack via `gvisor-tap-vsock`. A small upstream patch lets yieldd check the numeric destination immediately before opening a host TCP or UDP socket. There is no vmnet interface, host-address translation, or guest-accessible HTTP management service.
 
@@ -31,7 +31,7 @@ Public-network and fuzz checks are separate:
 (cd Prototypes/RunnerNetwork && go test -run '^$' -fuzz FuzzFrameBoundary -fuzztime 10s -parallel 2)
 ```
 
-The preparation script creates pinned source checkouts under `.build/`, applies the two checked-in patches, builds the relay and both probes, and ad-hoc signs the probes with the existing virtualization entitlement. It refreshes generated copies of `PacketSocket.swift`, `LinuxProbe.swift`, `PacketSocketTests.swift`, `MacProbeLifecycle.swift`, and `MacProbeLifecycleTests.swift` from this directory, plus `RunnerNetworkRelay.swift` from `Sources/Yieldd/`. Edit those originals, not their `.build/` copies. It does not install, stop, or reconfigure Apple Container. Go dependencies belong to this separate prototype module, not the coordinator.
+The preparation script creates pinned source checkouts under `.build/`, applies the two checked-in patches, builds the relay and both probes, and ad-hoc signs the probes with the existing virtualization entitlement. It refreshes generated copies of `LinuxProbe.swift`, `PacketSocketTests.swift`, `MacProbeLifecycle.swift`, and `MacProbeLifecycleTests.swift` from this directory, plus `PacketSocket.swift` and `RunnerNetworkRelay.swift` from `Sources/Yieldd/`. Edit those originals, not their `.build/` copies. It does not install, stop, or reconfigure Apple Container. Go dependencies belong to this separate module, not the coordinator. `Scripts/build-network-relay.sh` builds only the relay for the signed app, without building the Container fork or probes.
 
 The socket-level tests use a second gVisor stack as the guest and exchange real Ethernet datagrams. They cover denied TCP/UDP traffic, host-to-guest connections, malformed frames, private socket directories, occupied socket paths, and cancellation both before connection and with a guest and SSH client connected. The TCP denial test uses a simulated public host address and a real loopback listener behind the checked dial boundary; it also checks a private destination. It does not require a LAN interface or skip when one is absent. Separate live VM evidence appears below. DNS tests exercise both guest transports against a controlled upstream and assert the public destination. Policy tests verify that new connections use updated host addresses. Swift tests exercise the actual socket adapter's datagram exchange, permissions, failure cleanup, and path rejection without a VM. The opt-in live test resolves `github.com` through the guest DNS service and makes a certificate-verified HTTPS request through the relay.
 
@@ -126,8 +126,8 @@ On 2026-09-22, the shared supervisor passed nine Swift tests, including a handsh
 Still unverified or deliberately incomplete:
 
 - The full modified Linux machine CLI/service path, including first-boot setup and persisted machine cleanup. The live harness bypasses those layers, not the runtime itself.
-- Normal backend integration, continuous relay health monitoring during Linux operations, durable cleanup, memory/CPU/connection budgets, and performance under load. The shared process supervisor is used by the probes only. Upstream network services live for the helper process; this design uses one helper per guest.
-- An owner crash closes the relay but can leave its temporary directory or guest-side socket path. There is no durable relay-directory sweep yet. Process-level lifecycle checks do not establish VM or runner recovery.
+- Linux backend integration, continuous relay health monitoring during Linux operations, memory/CPU/connection budgets, and performance under load. Upstream network services live for the helper process; this design uses one helper per guest.
+- An owner crash closes the relay but can leave its temporary directory or guest-side socket path. Normal macOS runner recovery now sweeps its own socket directories; the standalone probes still require manual socket-directory cleanup after a crash. Process-level lifecycle checks do not establish VM or runner recovery.
 - Denial totals are process-local and best effort, including during normal shutdown. There is no durable metric collection or alerting yet.
 - Public DNS and permitted Internet endpoints remain possible data channels. Rejecting unneeded record types in the built-in service does not restrict jobs from using another public DNS or HTTPS service.
 - IPv6 Internet support and a complete review of the third-party packet stack.

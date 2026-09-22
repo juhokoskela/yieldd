@@ -74,6 +74,7 @@ struct Doctor {
         let checks: [(String, () throws -> Void)] = [
             ("macOS virtualization", { try MacOSVirtualMachineLifecycle.requireSupportedHost() }),
             ("Virtualization entitlement", { try VirtualizationEntitlement.requireCurrentProcess() }),
+            ("macOS network relay", { try MacOSRunnerNetwork(stateDirectory: stateDirectory).prepare() }),
             ("macOS template", {
                 try validateRunnerServiceTemplate(
                     templateURL, stateDirectory: stateDirectory

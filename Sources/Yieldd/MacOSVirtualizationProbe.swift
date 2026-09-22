@@ -616,6 +616,22 @@ enum MacOSVirtualMachineLifecycle {
         throw MacOSVirtualizationProbeError.requiresAppleSilicon
 #endif
     }
+
+    static func makeIsolatedMachine(
+        bundleURL: URL,
+        memoryBytes: UInt64,
+        networkSocketURL: URL
+    ) throws -> any MacOSVirtualMachineControlling {
+#if arch(arm64)
+        try requireSupportedHost()
+        return try VirtualizationFrameworkMachine(
+            bundleURL: bundleURL, memoryBytes: memoryBytes,
+            packetSocket: PacketSocket(path: networkSocketURL.path)
+        )
+#else
+        throw MacOSVirtualizationProbeError.requiresAppleSilicon
+#endif
+    }
 }
 
 #if arch(arm64)
@@ -626,12 +642,15 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
 
     private let queue: DispatchQueue
     private let machine: VZVirtualMachine
+    private let packetSocket: PacketSocket?
     private var failure: (any Error)?
 
-    init(bundleURL: URL, memoryBytes: UInt64) throws {
+    init(bundleURL: URL, memoryBytes: UInt64, packetSocket: PacketSocket? = nil) throws {
+        self.packetSocket = packetSocket
         let configuration = try Self.configuration(
             bundleURL: bundleURL,
-            memoryBytes: memoryBytes
+            memoryBytes: memoryBytes,
+            packetSocket: packetSocket
         )
         try configuration.validate()
 
@@ -711,7 +730,8 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
 
     private static func configuration(
         bundleURL: URL,
-        memoryBytes: UInt64
+        memoryBytes: UInt64,
+        packetSocket: PacketSocket?
     ) throws -> VZVirtualMachineConfiguration {
         let hardwareModelURL = bundleURL.appendingPathComponent("HardwareModel")
         let machineIdentifierURL = bundleURL.appendingPathComponent("MachineIdentifier")
@@ -764,9 +784,15 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
             pixelsPerInch: 80
         )]
 
-        let network = VZVirtioNetworkDeviceConfiguration()
-        network.attachment = VZNATNetworkDeviceAttachment()
-        network.macAddress = macAddress
+        let network: VZVirtioNetworkDeviceConfiguration
+        if let packetSocket {
+            network = try packetSocket.device()
+        } else {
+            // Only the manual template probe uses NAT. Runner creation requires a relay socket.
+            network = VZVirtioNetworkDeviceConfiguration()
+            network.attachment = VZNATNetworkDeviceAttachment()
+            network.macAddress = macAddress
+        }
 
         let configuration = VZVirtualMachineConfiguration()
         configuration.bootLoader = VZMacOSBootLoader()

@@ -86,6 +86,7 @@ func runRunnerService(
     }
     if let template = configuration.macOSTemplateURL {
         try storage.validateMacOS(template: template, clones: storage.clonesURL)
+        try MacOSRunnerNetwork(stateDirectory: leaseStore.directory).prepare()
     }
     let slots = try configuration.slots.map { slot in
         let backend: RunnerSlotBackend

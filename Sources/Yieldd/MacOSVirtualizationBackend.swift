@@ -4,17 +4,19 @@ import Foundation
 final class MacOSVirtualizationBackend: RunnerBackend {
     let platform = RunnerPlatform.macOS
     private struct Guest {
-        let machine: any MacOSVirtualMachineControlling
-        let address: String?
+        let relay: any RunnerNetworkRelaying
+        let ssh: MacOSGuestSSH
+        let machine: (any MacOSVirtualMachineControlling)?
+        let ready: Bool
     }
 
     private let templateURL: URL
     private let clones: MacOSRunnerCloneStore
-    private let ssh: MacOSGuestSSH
-    private let connection: MacOSGuestConnection
+    private let executor: any ProcessExecuting
+    private let network: any MacOSRunnerNetworking
     private let requireEntitlement: () throws -> Void
     private let loadStorage: () throws -> RunnerStorage?
-    private let makeMachine: (URL, UInt64) throws -> any MacOSVirtualMachineControlling
+    private let makeMachine: (URL, UInt64, URL) throws -> any MacOSVirtualMachineControlling
     private let checkCancellation: () throws -> Void
     private let wait: (TimeInterval) throws -> Void
     private let maximumExecutionDeadline: () -> DispatchTime?
@@ -30,7 +32,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         templateURL: URL,
         cloneRootURL: URL,
         executor: any ProcessExecuting,
-        resolver: any MacOSGuestAddressResolving = MacOSGuestAddressResolver(),
+        network: (any MacOSRunnerNetworking)? = nil,
         checkCancellation: @escaping () throws -> Void = {},
         wait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil },
@@ -38,15 +40,14 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         stopTimeout: TimeInterval = MacOSVirtualMachineLifecycle.stopTimeout,
         requireEntitlement: @escaping () throws -> Void = VirtualizationEntitlement.requireCurrentProcess,
         loadStorage: (() throws -> RunnerStorage?)? = nil,
-        makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
-            MacOSVirtualMachineLifecycle.makeMachine
+        makeMachine: @escaping (URL, UInt64, URL) throws -> any MacOSVirtualMachineControlling =
+            MacOSVirtualMachineLifecycle.makeIsolatedMachine
     ) throws {
         self.templateURL = templateURL.resolvingSymlinksInPath()
         clones = MacOSRunnerCloneStore(rootURL: cloneRootURL.resolvingSymlinksInPath())
         try Self.validateTemplateLocation(self.templateURL, cloneRootURL: clones.rootURL)
-        let ssh = MacOSGuestSSH(templateURL: self.templateURL, executor: executor)
-        self.ssh = ssh
-        connection = MacOSGuestConnection(resolver: resolver, ssh: ssh)
+        self.executor = executor
+        self.network = network ?? MacOSRunnerNetwork(stateDirectory: stateDirectory)
         self.checkCancellation = checkCancellation
         self.wait = wait
         self.maximumExecutionDeadline = maximumExecutionDeadline
@@ -72,6 +73,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
 
     func prepare() throws {
         try loadStorage()?.validateMacOS(template: templateURL, clones: clones.rootURL)
+        try network.prepare()
     }
 
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
@@ -84,8 +86,9 @@ final class MacOSVirtualizationBackend: RunnerBackend {
             try checkCancellation()
             try prepare()
             try validateStorage(id)
-            if let guest = guests[id], guest.address != nil,
-               case .running = guest.machine.state {
+            if let guest = guests[id], guest.ready, let machine = guest.machine,
+               case .running = machine.state {
+                try guest.relay.check()
                 return
             }
             try recordIntent()
@@ -97,29 +100,37 @@ final class MacOSVirtualizationBackend: RunnerBackend {
                     id: id
                 )
                 try checkCancellation()
+                let relay = try network.start(for: id, checkCancellation: checkCancellation)
+                let ssh = MacOSGuestSSH(templateURL: templateURL, port: relay.sshPort, executor: executor)
+                guests[id] = Guest(relay: relay, ssh: ssh, machine: nil, ready: false)
                 let machine = try makeMachine(
                     clone.url,
-                    MacOSVirtualMachineLifecycle.memoryBytes(for: memory)
+                    MacOSVirtualMachineLifecycle.memoryBytes(for: memory),
+                    relay.socketURL
                 )
-                guests[id] = Guest(machine: machine, address: nil)
+                guests[id] = Guest(relay: relay, ssh: ssh, machine: machine, ready: false)
+                let checkGuest = {
+                    try self.checkCancellation()
+                    try relay.check()
+                }
                 let completion = VirtualMachineCompletion<Void>()
                 machine.start(completion: completion.complete)
                 try completion.wait(
                     operation: "starting the macOS virtual machine",
                     deadline: ProcessInfo.processInfo.systemUptime + bootTimeout,
-                    checkCancellation: checkCancellation
+                    checkCancellation: checkGuest
                 )
-                let checkGuest = {
-                    try self.checkCancellation()
+                let checkRunningGuest = {
+                    try checkGuest()
                     try MacOSVirtualMachineLifecycle.requireRunning(machine)
                 }
-                let address = try connection.waitUntilReady(
-                    macAddress: clone.macAddress,
-                    checkCancellation: checkGuest,
+                try MacOSGuestConnection(ssh: ssh).waitUntilReady(
+                    address: "127.0.0.1",
+                    checkCancellation: checkRunningGuest,
                     wait: wait
                 )
-                try checkGuest()
-                guests[id] = Guest(machine: machine, address: address)
+                try checkRunningGuest()
+                guests[id] = Guest(relay: relay, ssh: ssh, machine: machine, ready: true)
             } catch {
                 do {
                     try destroyLocked(id)
@@ -142,12 +153,13 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         on id: RunnerID
     ) throws -> ProcessResult {
         try checkCancellation()
-        let address = try lock.withLock { () throws -> String in
-            guard let guest = guests[id], let address = guest.address else {
+        let ssh = try lock.withLock { () throws -> MacOSGuestSSH in
+            guard let guest = guests[id], guest.ready, let machine = guest.machine else {
                 throw MacOSVirtualizationBackendError.notReady(id)
             }
-            try MacOSVirtualMachineLifecycle.requireRunning(guest.machine)
-            return address
+            try guest.relay.check()
+            try MacOSVirtualMachineLifecycle.requireRunning(machine)
+            return guest.ssh
         }
         let command: [String]
         if let executable = arguments.first,
@@ -158,22 +170,23 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         }
         // macOS executes every command as runner, including callers' requests for root.
         return try ssh.execute(
-            command, address: address, standardInput: standardInput,
+            command, address: "127.0.0.1", standardInput: standardInput,
             timeout: timeout, outputCapture: outputCapture
         )
     }
 
     func stopRunner(on id: RunnerID) throws {
         try lock.withLock {
-            guard let guest = guests[id] else { return }
-            switch guest.machine.state {
+            guard let guest = guests[id], let machine = guest.machine else { return }
+            switch machine.state {
             case .stopped, .failed: return
             case .running, .stoppable, .transitioning: break
             }
-            guard let address = guest.address else { return }
-            try ssh.execute(
+            guard guest.ready else { return }
+            try guest.relay.check()
+            try guest.ssh.execute(
                 ["/Users/runner/bin/yieldd-runner-control", "stop"],
-                address: address,
+                address: "127.0.0.1",
                 timeout: try runnerStopTimeout(),
                 outputCapture: .tail(maxBytes: MacOSGuestSSH.outputTailBytes),
                 cancellable: false
@@ -191,13 +204,22 @@ final class MacOSVirtualizationBackend: RunnerBackend {
 
     private func destroyLocked(_ id: RunnerID) throws {
         if let guest = guests[id] {
-            try MacOSVirtualMachineLifecycle.forceStop(
-                guest.machine,
-                timeout: stopTimeout,
-                checkDeadline: checkCleanupDeadline
-            )
+            var failures: [RunnerSessionCleanupFailure] = []
+            // Revoke networking even when the VM cannot stop. Still attempt both
+            // operations; retain ownership and capacity until both have succeeded.
+            do { try guest.relay.stop() } catch { failures.append(.init(step: .machine, error: error)) }
+            if let machine = guest.machine {
+                do {
+                    try MacOSVirtualMachineLifecycle.forceStop(
+                        machine, timeout: stopTimeout, checkDeadline: checkCleanupDeadline
+                    )
+                } catch { failures.append(.init(step: .machine, error: error)) }
+            }
+            if failures.count == 1 { throw failures[0].error }
+            if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
             guests.removeValue(forKey: id)
         }
+        try network.remove(id)
         try loadStorage()?.validatePath(clones.rootURL)
         try clones.remove(id)
     }

@@ -75,6 +75,7 @@ struct ConnectCommand: ParsableCommand {
                     try storage.validateMacOS(template: template, clones: storage.clonesURL)
                     try MacOSVirtualizationBackend.validateTemplate(at: template)
                     try VirtualizationEntitlement.requireCurrentProcess()
+                    try MacOSRunnerNetwork(stateDirectory: directory).prepare()
                 }
                 let slots = try platforms.map { platform -> RunnerSlotBackend in
                     switch platform {

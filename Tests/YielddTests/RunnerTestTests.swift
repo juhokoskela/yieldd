@@ -437,6 +437,10 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
     let macID = RunnerID(value: "yieldd-aaa-macos")
+    let network = RunnerNetworkDirectories(stateDirectory: stateDirectory)
+    defer { try? FileManager.default.removeItem(at: network.rootURL) }
+    let leasedSocketDirectory = try network.create(for: macID)
+    let orphanSocketDirectory = try network.create(for: RunnerID(value: "yieldd-network-orphan"))
     let macLease = RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS)
     try leaseStore.save(macLease)
     try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
@@ -451,6 +455,8 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
     let recovery = RunnerRecovery(
         linuxBackend: { RunnerTestBackend(events: events) }, github: github, leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
         recoveryWait: { _ in
+            #expect(!FileManager.default.fileExists(atPath: leasedSocketDirectory.path))
+            #expect(!FileManager.default.fileExists(atPath: orphanSocketDirectory.path))
             let contents = try FileManager.default.contentsOfDirectory(atPath: clones.rootURL.path)
             #expect(contents.isEmpty)
             let remaining = try leaseStore.load()
