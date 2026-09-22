@@ -6,13 +6,15 @@ final class ConnectedHTTPClient {
     let token: String
     let checkCancellation: () throws -> Void
     let platform: RunnerPlatform
+    let slot: Int
     private let session: URLSession
 
-    init(server: URL, deviceID: String, token: String, platform: RunnerPlatform = .linux, checkCancellation: @escaping () throws -> Void) {
+    init(server: URL, deviceID: String, token: String, platform: RunnerPlatform = .linux, slot: Int = 0, checkCancellation: @escaping () throws -> Void) {
         self.server = server
         self.deviceID = deviceID
         self.token = token
         self.platform = platform
+        self.slot = slot
         self.checkCancellation = checkCancellation
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 65
@@ -49,7 +51,7 @@ final class ConnectedHTTPClient {
         let (status, data) = try request("poll", offer: nil, checkCancellation: checkCancellation)
         if status == 204 { return nil }
         let offer = try JSONDecoder().decode(ConnectedOffer.self, from: data)
-        guard offer.runnerPlatform == platform else { throw ConnectedRunnerError.invalidOffer }
+        guard offer.runnerPlatform == platform, offer.slot == slot else { throw ConnectedRunnerError.invalidOffer }
         return offer
     }
 
@@ -63,6 +65,10 @@ final class ConnectedHTTPClient {
         _ = try request("complete", offer: offer, checkCancellation: {})
     }
 
+    func decline(_ offer: ConnectedOffer) throws {
+        _ = try request("decline", offer: offer, checkCancellation: checkCancellation)
+    }
+
     func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> Bool {
         struct Authorization: Decodable { let `continue`: Bool }
         let (_, data) = try request("renew", offer: offer, checkCancellation: {
@@ -74,9 +80,19 @@ final class ConnectedHTTPClient {
 
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {
         try check()
-        if let offer, offer.runnerPlatform != platform { throw ConnectedRunnerError.invalidOffer }
-        var body = ["device_id": deviceID]
-        if let offer { body["owner"] = offer.owner; body["runner"] = offer.runner }
+        if let offer, offer.runnerPlatform != platform || offer.slot != slot { throw ConnectedRunnerError.invalidOffer }
+        struct Body: Encodable {
+            let deviceID: String
+            let slot: Int
+            let owner: String?
+            let runner: String?
+
+            enum CodingKeys: String, CodingKey {
+                case deviceID = "device_id"
+                case slot, owner, runner
+            }
+        }
+        let body = Body(deviceID: deviceID, slot: slot, owner: offer?.owner, runner: offer?.runner)
         let path = platform == .linux ? "v1/\(action)" : "v1/macos/\(action)"
         var request = URLRequest(url: server.appendingPathComponent(path))
         request.httpMethod = "POST"

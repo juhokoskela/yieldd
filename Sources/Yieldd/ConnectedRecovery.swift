@@ -6,12 +6,12 @@ func recoverConnectedPlatforms(
     makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil
 ) throws {
     var confirmed = false
-    for platform in [RunnerPlatform.macOS, .linux] {
-        let store = ConnectedRunnerStore(directory: directory, platform: platform)
+    for store in ConnectedRunnerStore.all(in: directory) {
+        let platform = store.platform
         guard let lease = try store.load() else { continue }
         if let confirmation, lease.offer.runner != confirmation { continue }
         let client = ConnectedHTTPClient(server: server, deviceID: deviceID, token: token,
-                                         platform: platform, checkCancellation: stop.check)
+                                         platform: platform, slot: store.slot, checkCancellation: stop.check)
         while true {
             try stop.check()
             do {

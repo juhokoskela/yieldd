@@ -1,22 +1,24 @@
 import Darwin
 import Foundation
 
-struct ConnectedOffer: Codable, Equatable {
+struct ConnectedOffer: Codable, Equatable, Sendable {
+    let slot: Int
     let owner: String
     let runner: String
     let repository: String
     let platform: String
     let architecture: String
 
-    init(owner: String, runner: String, repository: String, platform: String, architecture: String) throws {
+    init(owner: String, runner: String, repository: String, platform: String, architecture: String, slot: Int = 0) throws {
         let suffix = String(runner.dropFirst("yieldd-bootstrap-".count))
-        guard UUID(uuidString: owner)?.uuidString.lowercased() == owner,
+        guard (0..<RunnerPool.maximumSlots).contains(slot), UUID(uuidString: owner)?.uuidString.lowercased() == owner,
               runner.hasPrefix("yieldd-bootstrap-"),
               UUID(uuidString: suffix)?.uuidString.lowercased() == suffix,
               ["linux", "macos"].contains(platform), architecture == "arm64" else {
             throw ConnectedRunnerError.invalidOffer
         }
         _ = try GitHubRepository(repository)
+        self.slot = slot
         self.owner = owner
         self.runner = runner
         self.repository = repository
@@ -30,7 +32,7 @@ struct ConnectedOffer: Codable, Equatable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(owner: values.decode(String.self, forKey: .owner), runner: values.decode(String.self, forKey: .runner),
                       repository: values.decode(String.self, forKey: .repository), platform: values.decode(String.self, forKey: .platform),
-                      architecture: values.decode(String.self, forKey: .architecture))
+                      architecture: values.decode(String.self, forKey: .architecture), slot: values.decode(Int.self, forKey: .slot))
     }
 }
 
@@ -43,12 +45,26 @@ struct ConnectedLease: Codable, Equatable {
 struct ConnectedRunnerStore {
     let directory: URL
     var platform: RunnerPlatform = .linux
+    var slot: Int = 0
     var publish: (URL, URL) throws -> Void = { source, destination in
         guard Darwin.rename(source.path, destination.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
-    var file: URL { directory.appendingPathComponent(platform == .linux ? "connected-runner.json" : "connected-macos-runner.json") }
+    var file: URL {
+        let name = platform == .linux ? "connected-runner" : "connected-macos-runner"
+        return directory.appendingPathComponent(slot == 0 ? "\(name).json" : "\(name)-\(slot).json")
+    }
+
+    static func all(in directory: URL) -> [ConnectedRunnerStore] {
+        [RunnerPlatform.macOS, .linux].flatMap { platform in
+            (0..<RunnerPool.maximumSlots).map { ConnectedRunnerStore(directory: directory, platform: platform, slot: $0) }
+        }
+    }
+
+    static func hasRecovery(in directory: URL) -> Bool {
+        all(in: directory).contains { FileManager.default.fileExists(atPath: $0.file.path) }
+    }
 
     func load() throws -> ConnectedLease? {
         let fd = Darwin.open(file.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
@@ -63,16 +79,24 @@ struct ConnectedRunnerStore {
             throw ConnectedRunnerError.invalidState
         }
         let data = try handle.read(upToCount: 8193) ?? Data()
-        guard data.count <= 8192,
-              let lease = try? JSONDecoder().decode(ConnectedLease.self, from: data),
-              lease.offer.runnerPlatform == platform else {
+        guard data.count <= 8192 else { throw ConnectedRunnerError.invalidState }
+        let lease: ConnectedLease
+        do {
+            lease = try JSONDecoder().decode(ConnectedLease.self, from: data)
+        } catch let DecodingError.keyNotFound(key, context)
+            where key.stringValue == "slot" && context.codingPath.map(\.stringValue) == ["offer"] {
+            throw ConnectedRunnerError.previousVersionState
+        } catch {
+            throw ConnectedRunnerError.invalidState
+        }
+        guard lease.offer.runnerPlatform == platform, lease.offer.slot == slot else {
             throw ConnectedRunnerError.invalidState
         }
         return lease
     }
 
     func save(_ lease: ConnectedLease) throws {
-        guard lease.offer.runnerPlatform == platform else { throw ConnectedRunnerError.invalidState }
+        guard lease.offer.runnerPlatform == platform, lease.offer.slot == slot else { throw ConnectedRunnerError.invalidState }
         let data = try JSONEncoder().encode(lease)
         guard data.count <= 8192 else { throw ConnectedRunnerError.invalidState }
         let temporary = directory.appendingPathComponent(".connected-runner-\(UUID().uuidString).tmp")
@@ -95,12 +119,14 @@ struct ConnectedRunnerStore {
 }
 
 enum ConnectedRunnerError: Error, Equatable, LocalizedError {
+    case previousVersionState
     case invalidOffer, invalidState, invalidJIT, invalidServer, invalidToken, recoveryRequired, identityChanged
     case responseTooLarge, transport, http(Int)
     case registrationReconciliationRequired(String), confirmationMismatch
 
     var errorDescription: String? {
         switch self {
+        case .previousVersionState: "The connected journal belongs to the previous single-worker version. Finish recovery with the previous yieldd version before upgrading. Do not delete unresolved recovery state."
         case .invalidOffer: "The coordinator offer must identify one supported Linux or macOS ARM64 runner."
         case .invalidState: "The connected runner journal is invalid or not private. Do not delete unresolved recovery state."
         case .invalidJIT: "JIT credentials do not identify the offered ephemeral runner and _work directory."
