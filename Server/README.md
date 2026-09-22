@@ -10,6 +10,8 @@ The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scales
 
 Use a Linux or macOS coordinator with Go 1.27.1 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same repository's label during the experiment.
 
+When upgrading from the single-repository version, finish its jobs and recovery with the previous binary and original configuration first. Stop it, keep its state intact, and choose a fresh `--state-dir` for this version. Old `state.json` and `macos/state.json` layouts are rejected, not migrated. Existing GitHub scale sets are discovered by name.
+
 The infrastructure repository must contain the `runner-bootstrap.yml` workflow and the per-bootstrap credential selector on `main`. The coordinator generates names such as `yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef`; the workflow reads the corresponding `YIELDD_JIT_0123456789ABCDEF0123456789ABCDEF` secret. The old shared `YIELDD_BOOTSTRAP_JIT` secret is not used.
 
 Provide `GH_TOKEN` through the coordinator's environment. The token needs runner administration access to every application repository, plus workflow dispatch, cancellation, and repository-secret write access in the infrastructure repository. Keep it on the server. GitHub App enrollment and token rotation are not implemented in this prototype.
@@ -37,7 +39,7 @@ Use trusted workloads and private repositories. The outer bootstrap and nested j
 
 The state directory is created with mode `0700`; existing permissive directories are rejected. Each queue stores its identity and lease at `queues/owner/repository/linux/state.json` or `queues/owner/repository/macos/state.json`, using lowercase repository names. Reordering the repository list does not change those identities. Files are atomically replaced with mode `0600` and synced to disk. They temporarily contain JIT credentials until delivery or encrypted upload succeeds. Keep the directory private, outside version control, on persistent local storage. A deployment-wide ownership lock excludes another process using that root; queue locks also protect individual journals. The locks do not coordinate separate hosts or different state directories.
 
-Startup refuses to omit any saved queue. Before removing a repository or platform, finish its work, stop the Mac and coordinator, run recovery with the original configuration, then archive that queue's directory. Changing a queue's fallback or local-only policy also requires completed recovery and a fresh queue directory. Never remove a journal to bypass an unresolved assignment.
+Startup refuses to omit any saved queue. Before removing a repository or platform, finish its work, stop the Mac and coordinator, run recovery with the original configuration, then archive that queue's directory. Changing a queue's fallback or local-only policy also requires completed recovery and a fresh queue directory. Changing `--device-id` changes every queue's configuration, so recover all queues with the old device ID before choosing a fresh state directory. Never remove a journal to bypass an unresolved assignment.
 
 ## Container deployment on Linux
 
@@ -93,7 +95,7 @@ Use your actual domain with a publicly trusted certificate. Then start the Mac c
 
 Compose keeps state in `YIELDD_STATE_VOLUME` (default `yieldd-coordinator-state`), with a private directory owned by UID `65532`. The root filesystem is read-only; only the state volume is writable. It limits the service to one CPU, 512 MiB RAM, and 128 processes/threads. Recreating the container preserves the volume and queue identities. Back it up as sensitive data. Never use `docker compose down --volumes` or prune this volume while recovery obligations remain. Bridge networking removes direct access to the host's loopback namespace; it is not an outbound LAN firewall. Existing host-proxy configurations can keep forwarding to `127.0.0.1:8787` after recreation.
 
-Compose restarts the coordinator unless explicitly stopped and allows 90 seconds for shutdown. Queue sessions close concurrently within one shared 15-second budget after the workers stop and device HTTP drains. Repeated errors still require operator attention; restarting does not make an ambiguous dispatch safe to repeat. To stop without deleting state:
+Compose restarts the coordinator unless explicitly stopped and allows 90 seconds for shutdown. Shutdown cancels worker requests, including the upstream listener's message acknowledgements and job acquisition, and cancels device long polls. Device HTTP then drains for up to ten seconds, followed by concurrent session closure within one shared 15-second budget. These network deadlines do not bound stalled filesystem operations. Repeated errors still require operator attention; restarting does not make an ambiguous dispatch safe to repeat. To stop without deleting state:
 
 ```sh
 docker compose --env-file /etc/yieldd/coordinator.env stop coordinator
@@ -133,11 +135,13 @@ SIGINT, SIGTERM, and SIGHUP stop the coordinator without canceling a running boo
 
 If demand has fallen to zero on restart, a lease that has not reached dispatch intent enters cleanup instead of starting fallback compute. A dispatched or uncertain attempt still follows reconciliation; zero demand alone does not establish that its workload stopped.
 
+After cleaning up a registered assignment, the coordinator refreshes GitHub's scale-set statistics before acting on a positive listener count. This avoids allocating another runner from a cached count for the job that just finished. GitHub statistics can still lag; they are not a job-specific reservation. A zero count also ends startup authorization for an idle issued local runner. A runner GitHub reports as busy can still renew, and the shared Mac slot stays reserved until destruction is acknowledged and registration cleanup succeeds.
+
 The bootstrap listener has a five-minute pickup deadline, but yieldd imposes no execution deadline after its job-start hook has fired. Configure the workload's `timeout-minutes` as needed. The outer infrastructure workflow uses [GitHub's default six-hour job timeout](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes); provider limits still apply. The coordinator does not cancel queued or running bootstraps based on age. A stuck bootstrap retains its lease until GitHub ends it or an operator cancels it, including through `--recover`.
 
 After an accepted or ambiguous dispatch, the coordinator waits for terminal workflow state before deleting credentials or an idle registration. A cancellation conflict triggers a fresh status read. Before any deletion, it persists cleanup intent and the known conclusion; every restart resumes cleanup, never provisioning, for that lease. Cleanup failures retain the lease. The infrastructure workflow supplies host disposal; the coordinator cannot verify a third-party provider's disposal guarantees.
 
-An API or bootstrap failure generally stops this first version for operator attention. Local cleanup with durable intent retries recognized transient failures on subsequent reconciliation. It does not rerun the application workflow. A missing registration response requires explicit recovery. Confirmed dispatch rejections (HTTP 400, 401, 403, 404, 422, or 429) enter cleanup without searching for a nonexistent workflow. Timeouts, server errors, and malformed success responses remain ambiguous. If discovery finds no matching run, reconciliation stops with the intent retained; retry reconciliation later without redispatching. If GitHub never exposes a matching run, even recovery retains that obligation: investigate the dispatch before making any manual state change.
+An API or bootstrap failure stops the affected repository/platform worker for operator attention, not its siblings. Its journal and any unresolved Mac reservation remain held; it leaves the local waiting list so it cannot block admission without an assignment. Restart with the same configuration to reconcile, or use explicit recovery when required. Startup configuration, journal-validation, and session-creation failures still abort startup. Local cleanup with durable intent retries recognized transient failures after five seconds without needing another demand message or Mac request. It does not rerun the application workflow. A missing registration response requires explicit recovery. Confirmed dispatch rejections (HTTP 400, 401, 403, 404, 422, or 429) enter cleanup without searching for a nonexistent workflow. Timeouts, server errors, and malformed success responses remain ambiguous. If discovery finds no matching run, that queue stops with the intent retained; retry reconciliation later without redispatching. If GitHub never exposes a matching run, even recovery retains that obligation: investigate the dispatch before making any manual state change.
 
 If a recorded workflow returns 404, the coordinator first verifies Actions access with a successful workflow-run listing, because 404 can also mask lost repository access. Cleanup also requires the registration API to independently confirm that its runner is absent. The coordinator retains an unknown conclusion rather than claiming success. If the runner still exists, restore workflow access or verify termination and remove that registration before retrying recovery. A missing workflow alone does not prove that execution stopped.
 
@@ -151,12 +155,16 @@ To cancel and clean up a recorded bootstrap without provisioning another, stop t
 
 ```sh
 go run . \
-  --repositories juhokoskela/yieldd \
+  --repositories juhokoskela/GlassEQ,juhokoskela/yieldd,juhokoskela/yieldd-infra,juhokoskela/GlassEQServer \
+  --local-only-repositories juhokoskela/yieldd-infra \
   --infrastructure juhokoskela/yieldd-infra \
   --fallback-runner '"ubuntu-24.04"' \
+  --device-id "$YIELDD_DEVICE_ID" \
   --state-dir /absolute/private/yieldd-state \
   --recover
 ```
+
+If setup included `--macos-fallback-runner '"macos-26"'`, include it in this recovery command too. Keep the complete repository list, local-only policy, device ID, fallback targets, and state directory unchanged. `--client-listen` is not needed during recovery.
 
 Recovery visits every configured queue independently. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. Changing a queue's configuration requires recovering its old state with the original arguments and choosing a fresh queue directory. Never delete an active lease to force a retry.
 
@@ -164,7 +172,7 @@ Recovery visits every configured queue independently. It does not delete scale s
 
 Local tests exercise the upstream listener callback integration, encrypted HTTP credential delivery, dispatch identity, interrupted provisioning, exclusive state ownership, and cleanup failures. CI runs the Go race detector and vet. These checks do not establish live provider behavior for new configurations.
 
-Multi-repository tests cover shared local admission, independent fallback, queue-specific acceptance and cleanup, local-only waiting, restart identities, and rejected state omissions. The Mac's existing owner/runner protocol is unchanged. Multi-repository execution on EC2 and the connected Mac still requires live acceptance.
+Multi-repository tests cover shared local admission, independent fallback and runtime failures, queue-specific acceptance and cleanup, autonomous cleanup retries, cached-demand refresh, local-only waiting, restart identities, and rejected state omissions. Listener tests cover shutdown during detached acknowledgement and acquisition calls. The Mac's existing owner/runner protocol is unchanged. Multi-repository execution and demand-statistics freshness on EC2 and the connected Mac still require live acceptance.
 
 Manual cross-repository pickup already succeeded with a repository JIT runner: [application run](https://github.com/juhokoskela/yieldd/actions/runs/34688921974) and [infrastructure run](https://github.com/juhokoskela/yieldd-infra/actions/runs/34688923785). That was not a coordinator or Scale Set test.
 
