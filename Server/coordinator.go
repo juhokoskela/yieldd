@@ -95,6 +95,43 @@ func (c *coordinator) names() []string {
 	return slices.Sorted(maps.Keys(c.state.Leases))
 }
 
+func (c *coordinator) surplusAssignments(count int) map[string]bool {
+	count = max(count, 0)
+	var idle, pending []string
+	for _, name := range c.names() {
+		l := c.state.Leases[name]
+		if l.CleanupIntent {
+			continue
+		}
+		if local := l.Local; local != nil && local.Phase == localIssued {
+			// Retired workers still hold their slots, but no longer satisfy demand.
+			if local.JobCompleted || (!local.JobStarted && local.expired()) {
+				continue
+			}
+			if !local.JobStarted {
+				idle = append(idle, name)
+				continue
+			}
+		} else if !l.DispatchIntent {
+			pending = append(pending, name)
+			continue
+		}
+		// Started jobs and dispatched or uncertain bootstraps must be reconciled,
+		// not stopped solely because the aggregate demand count decreased.
+		count--
+	}
+	retire := make(map[string]bool)
+	// Keep issued idle workers before offers or undispatched provisioning.
+	for _, name := range append(idle, pending...) {
+		if count > 0 {
+			count--
+		} else {
+			retire[name] = true
+		}
+	}
+	return retire
+}
+
 // Publish the complete journal before changing the event loop's view.
 func (a *assignment) replace(nextLease *lease) error {
 	next := *a.state
@@ -176,6 +213,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	completed := false
 	var failures []error
+	surplus := c.surplusAssignments(count)
 	for _, name := range c.names() {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(failures, err)...)
@@ -183,14 +221,14 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		a := c.assigned(name)
 		l := a.lease
 		local := l.Local
-		if count <= 0 && local != nil && local.Phase == localIssued && !local.JobStarted && !local.expired() {
+		if surplus[name] && local != nil && local.Phase == localIssued {
 			next := *local
 			next.Expires = time.Now().UTC()
 			if err := a.saveLocal(&next, ""); err != nil {
 				return err
 			}
 		}
-		recoverOnly := (count <= 0 || c.paused != nil) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
+		recoverOnly := (surplus[name] || c.paused != nil) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
 		done, err := a.reconcile(ctx, recoverOnly)
 		if err != nil && !isJournalWrite(err) && a.lease != nil && a.lease.Local != nil && a.lease.CleanupIntent && transientFailure(err) {
 			c.logger.Warn("Local cleanup retained for retry", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
