@@ -2,10 +2,12 @@ import Darwin
 import Foundation
 import Virtualization
 
-// One host-owned endpoint per guest. No TCP listener and no vmnet attachment.
+// One host-owned endpoint per guest, without a vmnet attachment.
 final class PacketSocket: Sendable {
     let handle: FileHandle
     private let localPath: String
+    private let deviceID: dev_t
+    private let inode: ino_t
 
     init(path: String) throws {
         guard path.hasPrefix("/"), !path.utf8.contains(0) else { throw POSIXError(.EINVAL) }
@@ -22,6 +24,9 @@ final class PacketSocket: Sendable {
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         var bound = false
         do {
+            guard fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
             var sendBuffer: Int32 = 1 << 20
             var receiveBuffer: Int32 = 4 << 20
             guard setsockopt(descriptor, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size)) == 0,
@@ -35,6 +40,9 @@ final class PacketSocket: Sendable {
                 }
             }
             bound = true
+            guard lstat(localPath, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            deviceID = info.st_dev
+            inode = info.st_ino
             guard chmod(localPath, 0o600) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             try Self.address(path) { address, length in
                 guard Darwin.connect(descriptor, address, length) == 0 else {
@@ -49,9 +57,14 @@ final class PacketSocket: Sendable {
         self.handle = handle
     }
 
-    deinit { unlink(localPath) }
+    deinit {
+        var info = stat()
+        if lstat(localPath, &info) == 0, info.st_dev == deviceID, info.st_ino == inode {
+            unlink(localPath)
+        }
+    }
 
-    func device() throws -> VZVirtioNetworkDeviceConfiguration {
+    func device() -> VZVirtioNetworkDeviceConfiguration {
         let device = VZVirtioNetworkDeviceConfiguration()
         device.macAddress = VZMACAddress(string: "02:00:00:00:00:02")!
         device.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: handle)

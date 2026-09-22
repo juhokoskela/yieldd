@@ -284,7 +284,8 @@ func agentPreflightValidatesCombinedReservations(hostGiB: Int, mixed: Bool) thro
             resolvedTools.append(name)
             return URL(fileURLWithPath: "/usr/bin/true")
         }, stateDirectory: fixture.rootURL,
-        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: UInt64(hostGiB) * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil })
+        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: UInt64(hostGiB) * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil },
+        relayURL: URL(fileURLWithPath: "/usr/bin/true"))
     }
     if mixed && hostGiB == 24 {
         #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(

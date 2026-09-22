@@ -1,18 +1,32 @@
-@testable import ContainerRuntimeLinuxServer
+@testable import Yieldd
 import Darwin
 import Foundation
 import Testing
 import Virtualization
 
 struct PacketSocketTests {
+    @Test func delayedDestructionPreservesReplacementEndpoint() throws {
+        let fixture = try SocketFixture()
+        try fixture.bindRelay()
+        var previous: PacketSocket? = try PacketSocket(path: fixture.path)
+        try #require(previous).handle.write(contentsOf: Data([1]))
+        #expect(unlink(fixture.path + ".vm") == 0)
+        let replacement = try PacketSocket(path: fixture.path)
+        previous = nil
+        withExtendedLifetime(replacement) {
+            #expect(FileManager.default.fileExists(atPath: fixture.path + ".vm"))
+        }
+    }
+
     @Test func connectsAndRemovesOnlyItsOwnEndpoint() throws {
         let fixture = try SocketFixture()
         try fixture.bindRelay()
         do {
             let socket = try PacketSocket(path: fixture.path)
+            #expect(fcntl(socket.handle.fileDescriptor, F_GETFD) & FD_CLOEXEC != 0)
             let attributes = try FileManager.default.attributesOfItem(atPath: fixture.path + ".vm")
             #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
-            let device = try socket.device()
+            let device = socket.device()
             #expect(device.macAddress.string == "02:00:00:00:00:02")
             #expect(device.attachment is VZFileHandleNetworkDeviceAttachment)
             try socket.handle.write(contentsOf: Data([1, 2, 3, 4]))

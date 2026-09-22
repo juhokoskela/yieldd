@@ -1,10 +1,29 @@
 import Darwin
 import Foundation
 
+func removeMacOSRunnerFiles(_ id: RunnerID, in directory: URL,
+                           makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
+    var failures: [RunnerSessionCleanupFailure] = []
+    do { try RunnerNetworkDirectories(stateDirectory: directory).remove(id) }
+    catch { failures.append(.init(step: .network, error: error)) }
+    do {
+        let clones = try (makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) })(.runners)
+        try clones.remove(id)
+    } catch { failures.append(.init(step: .machine, error: error)) }
+    if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
+}
+
 func removeUnleasedMacOSClones(in directory: URL, keeping ids: Set<RunnerID>, checkCancellation: () throws -> Void = {},
                                makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) }
     var failures: [RunnerSessionCleanupFailure] = []
+    try checkCancellation()
+    do { try RunnerNetworkDirectories(stateDirectory: directory).removeUnleased(keeping: ids) }
+    catch {
+        if isCancellation(error) { throw error }
+        if case let RunnerSessionError.cleanupFailed(entries) = error { failures.append(contentsOf: entries) }
+        else { failures.append(.init(step: .network, error: error)) }
+    }
     for kind in RunnerCloneKind.allCases {
         do {
             try makeCloneStore(kind)

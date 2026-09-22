@@ -567,8 +567,8 @@ func connectedRunnerRejectsWrongPlatformBeforeAcceptance() throws {
     #expect(try fixture.store.load() == nil)
 }
 
-@Test
-func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal() throws {
+@Test(arguments: [false, true])
+func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal(badNetworkDirectory: Bool) throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     let mac = try ConnectedOffer(owner: connectedOffer.owner,
@@ -579,10 +579,25 @@ func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal() throws {
     try fixture.store.save(ConnectedLease(server: "https://example.com", deviceID: mac.owner, offer: connectedOffer))
     let clones = testCloneStores(in: fixture.directory)(.runners)
     let bundle = try clones.bundleURL(for: RunnerID(value: mac.runner))
+    let networks = try RunnerNetworkDirectories(stateDirectory: fixture.directory)
+    defer { try? FileManager.default.removeItem(at: networks.rootURL) }
+    let socketDirectory = try networks.create(for: RunnerID(value: mac.runner))
+    try Data("stale socket".utf8).write(to: socketDirectory.appendingPathComponent("n"))
     try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+    if badNetworkDirectory {
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: socketDirectory.path)
+        #expect(throws: RunnerSessionError.self) {
+            try recoverConnectedPlatforms(directory: fixture.directory, server: URL(string: "https://example.com/")!,
+                deviceID: mac.owner, token: "", confirmation: mac.runner, stop: RunnerPoolStop(), makeCloneStore: testCloneStores(in: fixture.directory))
+        }
+        #expect(!FileManager.default.fileExists(atPath: bundle.path))
+        #expect(try macStore.load()?.offer == mac)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: socketDirectory.path)
+    }
     try recoverConnectedPlatforms(directory: fixture.directory, server: URL(string: "https://example.com/")!,
         deviceID: mac.owner, token: "", confirmation: mac.runner, stop: RunnerPoolStop(), makeCloneStore: testCloneStores(in: fixture.directory))
     #expect(!FileManager.default.fileExists(atPath: bundle.path))
+    #expect(!FileManager.default.fileExists(atPath: socketDirectory.path))
     #expect(try macStore.load() == nil)
     #expect(try fixture.store.load()?.offer == connectedOffer)
 }

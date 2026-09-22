@@ -66,7 +66,9 @@ struct ConnectCommand: ParsableCommand {
                     print("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
                     return
                 }
-                try removeUnleasedMacOSClones(in: directory, keeping: [], checkCancellation: stop.check)
+                if template != nil {
+                    try removeUnleasedMacOSClones(in: directory, keeping: [], checkCancellation: stop.check)
+                }
                 let storage = try RunnerStorage.required(in: directory)
                 try storage.validate(stateDirectory: directory)
                 let memory = RunnerMemoryAdmission()
@@ -75,6 +77,7 @@ struct ConnectCommand: ParsableCommand {
                     try storage.validateMacOS(template: template, clones: storage.clonesURL)
                     try MacOSVirtualizationBackend.validateTemplate(at: template)
                     try VirtualizationEntitlement.requireCurrentProcess()
+                    try MacOSRunnerNetwork.requireRelay()
                 }
                 let slots = try platforms.map { platform -> RunnerSlotBackend in
                     switch platform {

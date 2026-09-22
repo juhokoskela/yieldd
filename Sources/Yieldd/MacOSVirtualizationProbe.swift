@@ -40,7 +40,6 @@ struct MacOSVirtualizationProbeClone {
     private static let requiredFiles = clonedFiles + ["MachineIdentifier"]
 
     let url: URL
-    let macAddress: String
 
     static func validateTemplate(at templateURL: URL) throws {
         let templateURL = templateURL.resolvingSymlinksInPath()
@@ -59,14 +58,14 @@ struct MacOSVirtualizationProbeClone {
     static func create(
         templateURL: URL,
         cloneRootURL: URL,
-        id: RunnerID = RunnerID(value: "yieldd-virtualization-probe-\(UUID().uuidString.lowercased())")
+        id: RunnerID = RunnerID(value: "yieldd-virtualization-probe-\(UUID().uuidString.lowercased())"),
+        macAddress: String? = nil
     ) throws -> Self {
         let store = MacOSRunnerCloneStore(rootURL: cloneRootURL)
         let creatingURL = try store.creatingURL(for: id)
         let publishedURL = try store.bundleURL(for: id)
         let fileManager = FileManager.default
         let machineIdentifier = try machineIdentifierData()
-        let macAddress = try macAddressString()
         let templateURL = templateURL.resolvingSymlinksInPath()
         let templateDescriptor = try openDirectory(
             at: templateURL,
@@ -120,14 +119,12 @@ struct MacOSVirtualizationProbeClone {
                 named: "MachineIdentifier",
                 to: cloneURL
             )
-            try writePrivateFile(
-                Data("\(macAddress)\n".utf8),
-                named: "MACAddress",
-                to: cloneURL
-            )
+            if let macAddress {
+                try writePrivateFile(Data("\(macAddress)\n".utf8), named: "MACAddress", to: cloneURL)
+            }
             // moveItem refuses an existing destination; publish only a complete clone.
             try fileManager.moveItem(at: cloneURL, to: publishedURL)
-            return Self(url: publishedURL, macAddress: macAddress)
+            return Self(url: publishedURL)
         } catch {
             do {
                 try fileManager.removeItem(at: cloneURL)
@@ -345,7 +342,7 @@ struct MacOSVirtualizationProbeClone {
 #endif
     }
 
-    private static func macAddressString() throws -> String {
+    static func macAddressString() throws -> String {
 #if arch(arm64)
         VZMACAddress.randomLocallyAdministered().string
 #else
@@ -396,7 +393,7 @@ struct MacOSVirtualizationProbe {
             VirtualizationEntitlement.requireCurrentProcess,
         loadStorage: (() throws -> RunnerStorage?)? = nil,
         makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
-            MacOSVirtualMachineLifecycle.makeMachine
+            { try MacOSVirtualMachineLifecycle.makeMachine(bundleURL: $0, memoryBytes: $1, networkSocketURL: nil) }
     ) {
         self.requireEntitlement = requireEntitlement
         self.loadStorage = loadStorage ?? { try RunnerStorage.validated(in: stateDirectory) }
@@ -418,9 +415,11 @@ struct MacOSVirtualizationProbe {
         try requireEntitlement()
         try checkCancellation()
         try loadStorage()?.validateMacOS(template: templateURL, clones: cloneRootURL)
+        let macAddress = try MacOSVirtualizationProbeClone.macAddressString()
         let clone = try MacOSVirtualizationProbeClone.create(
             templateURL: templateURL,
-            cloneRootURL: cloneRootURL
+            cloneRootURL: cloneRootURL,
+            macAddress: macAddress
         )
         var machine: (any MacOSVirtualMachineControlling)?
         let operation = Result<Void, any Error> {
@@ -440,7 +439,7 @@ struct MacOSVirtualizationProbe {
             started()
             try waitUntilGuestIsReady(
                 machine: createdMachine,
-                macAddress: clone.macAddress,
+                macAddress: macAddress,
                 hold: hold,
                 checkCancellation: checkCancellation,
                 attempt: waitUntilGuestReady
@@ -604,13 +603,14 @@ enum MacOSVirtualMachineLifecycle {
 
     static func makeMachine(
         bundleURL: URL,
-        memoryBytes: UInt64
+        memoryBytes: UInt64,
+        networkSocketURL: URL?
     ) throws -> any MacOSVirtualMachineControlling {
 #if arch(arm64)
         try requireSupportedHost()
         return try VirtualizationFrameworkMachine(
-            bundleURL: bundleURL,
-            memoryBytes: memoryBytes
+            bundleURL: bundleURL, memoryBytes: memoryBytes,
+            packetSocket: networkSocketURL.map { try PacketSocket(path: $0.path) }
         )
 #else
         throw MacOSVirtualizationProbeError.requiresAppleSilicon
@@ -626,12 +626,15 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
 
     private let queue: DispatchQueue
     private let machine: VZVirtualMachine
+    private let packetSocket: PacketSocket?
     private var failure: (any Error)?
 
-    init(bundleURL: URL, memoryBytes: UInt64) throws {
+    init(bundleURL: URL, memoryBytes: UInt64, packetSocket: PacketSocket?) throws {
+        self.packetSocket = packetSocket
         let configuration = try Self.configuration(
             bundleURL: bundleURL,
-            memoryBytes: memoryBytes
+            memoryBytes: memoryBytes,
+            packetSocket: packetSocket
         )
         try configuration.validate()
 
@@ -711,13 +714,13 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
 
     private static func configuration(
         bundleURL: URL,
-        memoryBytes: UInt64
+        memoryBytes: UInt64,
+        packetSocket: PacketSocket?
     ) throws -> VZVirtualMachineConfiguration {
         let hardwareModelURL = bundleURL.appendingPathComponent("HardwareModel")
         let machineIdentifierURL = bundleURL.appendingPathComponent("MachineIdentifier")
         let auxiliaryStorageURL = bundleURL.appendingPathComponent("AuxiliaryStorage")
         let diskURL = bundleURL.appendingPathComponent("Disk.img")
-        let macAddressURL = bundleURL.appendingPathComponent("MACAddress")
 
         guard let hardwareModel = VZMacHardwareModel(
             dataRepresentation: try Data(contentsOf: hardwareModelURL)
@@ -736,12 +739,6 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
                 path: machineIdentifierURL.path
             )
         }
-        let macAddressString = try String(contentsOf: macAddressURL, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let macAddress = VZMACAddress(string: macAddressString) else {
-            throw MacOSVirtualizationProbeError.invalidMACAddress(path: macAddressURL.path)
-        }
-
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = hardwareModel
         platform.machineIdentifier = machineIdentifier
@@ -764,9 +761,21 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
             pixelsPerInch: 80
         )]
 
-        let network = VZVirtioNetworkDeviceConfiguration()
-        network.attachment = VZNATNetworkDeviceAttachment()
-        network.macAddress = macAddress
+        let network: VZVirtioNetworkDeviceConfiguration
+        if let packetSocket {
+            network = packetSocket.device()
+        } else {
+            let macAddressURL = bundleURL.appendingPathComponent("MACAddress")
+            let macAddressString = try String(contentsOf: macAddressURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let macAddress = VZMACAddress(string: macAddressString) else {
+                throw MacOSVirtualizationProbeError.invalidMACAddress(path: macAddressURL.path)
+            }
+            // Only the manual template probe uses NAT. Runner creation requires a relay socket.
+            network = VZVirtioNetworkDeviceConfiguration()
+            network.attachment = VZNATNetworkDeviceAttachment()
+            network.macAddress = macAddress
+        }
 
         let configuration = VZVirtualMachineConfiguration()
         configuration.bootLoader = VZMacOSBootLoader()

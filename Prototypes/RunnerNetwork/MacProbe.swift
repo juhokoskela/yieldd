@@ -30,8 +30,11 @@ enum MacProbe {
             throw POSIXError(.EXDEV)
         }
         let executable = URL(fileURLWithPath: CommandLine.arguments[3])
-        let relay = try await Task.detached { try RunnerNetworkRelay.start(executableURL: executable) }.value
-        print("Packet relay SSH endpoint: 127.0.0.1:\(relay.sshPort)")
+        var socketPath = Array(try RunnerNetworkRelay.userTemporaryDirectory().appendingPathComponent("yn-XXXXXX").path.utf8CString)
+        guard mkdtemp(&socketPath) != nil else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let socketDirectory = URL(fileURLWithPath: String(decoding: socketPath.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        let relay = try await Task.detached { try RunnerNetworkRelay.start(executableURL: executable, directory: socketDirectory) }.value
+        print("Packet relay SSH socket: \(relay.sshSocketURL.path)")
         do {
             try await runGuest(template: template, root: root, relay: relay)
         } catch {
@@ -68,7 +71,7 @@ enum MacProbe {
         config.bootLoader = VZMacOSBootLoader()
         config.cpuCount = 4
         config.memorySize = 8 * 1024 * 1024 * 1024
-        config.networkDevices = [try socket.device()]
+        config.networkDevices = [socket.device()]
         config.storageDevices = [
             VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: clone.appendingPathComponent("Disk.img"), readOnly: false))
         ]

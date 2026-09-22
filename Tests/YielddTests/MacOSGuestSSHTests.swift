@@ -1,6 +1,19 @@
 import Darwin
 import Foundation
 import Testing
+
+@Test
+func guestSSHRequiresAnAddressWithoutARelay() throws {
+    let executor = RecordingProcessExecutor(outcomes: [])
+    let ssh = MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), executor: executor)
+    #expect(throws: MacOSGuestSSHError.missingAddress) {
+        try ssh.execute(["true"], timeout: 5, outputCapture: .all)
+    }
+    #expect(throws: MacOSGuestSSHError.missingAddress) {
+        try MacOSGuestConnection(ssh: ssh).waitUntilReady()
+    }
+    #expect(executor.requests.isEmpty)
+}
 @testable import Yieldd
 
 private let sshURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -195,6 +208,49 @@ func guestConnectionWaitsForDHCPAndRetriesSSHTransport() throws {
     #expect(transportAttempts == 2)
     #expect(validationAttempts == 1)
     #expect(clock.waits == [0.5, 0.5])
+}
+
+@Test
+func guestConnectionUsesRelayEndpointWithoutDHCP() throws {
+    let resolver = StubGuestAddressResolver(addresses: [])
+    let clock = GuestConnectionClock()
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(status: 255)), .success(processResult()), .success(processResult()),
+    ])
+    let connection = MacOSGuestConnection(
+        resolver: resolver,
+        ssh: MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), socketURL: URL(fileURLWithPath: "/private/relay/n.ssh"), executor: executor),
+        currentTime: clock.read
+    )
+    try connection.waitUntilReady(wait: clock.wait)
+    #expect(resolver.calls == 0)
+    #expect(clock.waits == [0.5])
+    #expect(executor.requests.count == 3)
+    #expect(executor.requests.allSatisfy {
+        $0.arguments.contains("runner@yieldd-macos-template") &&
+        $0.arguments.contains("ProxyCommand=/usr/bin/nc -U '/private/relay/n.ssh'")
+    })
+}
+
+@Test
+func guestSSHQuotesUnixSocketForOpenSSHAndTheProxyShell() throws {
+    let path = "/private/socket ' \" %h $(printf injected) `printf injected` \\ end"
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
+    let ssh = MacOSGuestSSH(templateURL: URL(fileURLWithPath: "/unused"), socketURL: URL(fileURLWithPath: path), executor: executor)
+    try ssh.execute(["true"], timeout: 5, outputCapture: .tail(maxBytes: 1024))
+    let request = try #require(executor.requests.first)
+    let proxy = try #require(request.arguments.first { $0.hasPrefix("ProxyCommand=") })
+    #expect(proxy.contains("%%h"))
+    // OpenSSH expands %% to % before passing ProxyCommand to the shell.
+    let argument = String(proxy.dropFirst("ProxyCommand=/usr/bin/nc -U ".count))
+        .replacingOccurrences(of: "%%", with: "%")
+    let result = try ProcessExecutor().execute(ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf '%s' " + argument], timeout: 5
+    ))
+    #expect(result.terminationStatus == 0)
+    #expect(result.stdoutText == path)
+    #expect(request.arguments.contains("StrictHostKeyChecking=yes"))
+    #expect(request.arguments.contains("HostKeyAlias=yieldd-macos-template"))
 }
 
 @Test

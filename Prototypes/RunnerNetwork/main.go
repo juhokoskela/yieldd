@@ -114,11 +114,14 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 	if err != nil {
 		return err
 	}
-	ssh, err := net.Listen("tcp4", "127.0.0.1:0")
+	ssh, err := net.ListenUnix("unix", &net.UnixAddr{Name: path + ".ssh", Net: "unix"})
 	if err != nil {
 		return err
 	}
 	defer ssh.Close()
+	if err := os.Chmod(path+".ssh", 0600); err != nil {
+		return err
+	}
 	stopSSH := context.AfterFunc(ctx, func() { ssh.Close() })
 	defer stopSSH()
 	sshDone := make(chan struct{})
@@ -127,7 +130,7 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 	if err := json.NewEncoder(ready).Encode(struct {
 		Version int    `json:"version"`
 		SSH     string `json:"ssh"`
-	}{1, ssh.Addr().String()}); err != nil {
+	}{2, ssh.Addr().String()}); err != nil {
 		return err
 	}
 	peer, err := transport.AcceptVfkit(conn)

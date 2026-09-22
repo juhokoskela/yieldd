@@ -1,6 +1,6 @@
 # Guest network isolation: feasibility
 
-This records the baseline investigation and the subsequent [socket-relay prototype](../Prototypes/RunnerNetwork/README.md). Network isolation is not enabled in normal yieldd commands. The stock Linux runner-machine path can reach the Mac's services. Enforcing an Internet-only policy needs a packet path yieldd can control outside the guest.
+This records the baseline investigation and the subsequent [socket-relay prototype](../Prototypes/RunnerNetwork/README.md). Normal macOS runner commands now use that relay; live validation of the integration is still pending. The stock Linux runner-machine path can reach the Mac's services. Enforcing an Internet-only policy needs a packet path yieldd can control outside the guest.
 
 ## What was checked
 
@@ -30,7 +30,7 @@ A custom network plugin alone is insufficient. The [runtime registers two fixed 
 
 ### macOS
 
-yieldd currently uses `VZNATNetworkDeviceAttachment`. Apple also provides [VZFileHandleNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment), which exchanges Ethernet frames through a connected datagram socket. The subsequent prototype combines that attachment with a gVisor-based relay for DHCP, DNS, forwarding, destination checks, and host-to-guest SSH.
+macOS runners use [VZFileHandleNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment), which exchanges Ethernet frames through a connected datagram socket. It connects to a gVisor-based relay for DHCP, DNS, forwarding, destination checks, and host-to-guest SSH. The manual `agent vm-probe` still uses `VZNATNetworkDeviceAttachment`.
 
 The SDK describes `vmnet_enable_isolation_key` as isolation between VM interfaces. It does not promise to block host or LAN destinations. Container's `--internal` option describes a host-only network, not an Internet-only network. Neither satisfies this requirement on its own.
 
@@ -42,7 +42,7 @@ The prototype now lives under `Prototypes/RunnerNetwork/`. Disposable macOS and 
 
 Those VM runs used the host resolver, which was a separate path around the destination policy. The prototype now forwards only A lookups to a fixed public resolver through the checked dial, returns AAAA NODATA, and refuses local names and other record types. Controlled packet tests and a public DNS/HTTPS check cover this correction; the VM probes have not been repeated with it. Public DNS remains an Internet data channel, not a way to prevent exfiltration.
 
-The first integration step is a shared Swift relay supervisor, used by both probes. It validates bounded readiness, owns a lifetime pipe that closes on owner death, and confirms process exit before deleting its socket directory. Process tests cover this lifecycle; normal runner commands still use their existing networking. Backend integration, durable recovery, resource limits, and updated live VM checks remain separate work.
+The shared Swift relay supervisor is used by both probes and the macOS backend. It validates bounded readiness, owns a lifetime pipe that closes on owner death, and confirms process exit before deleting its socket directory. The signed app bundles the helper. The macOS backend uses a user-private Unix SSH socket instead of host DHCP discovery, checks relay health, and retains cleanup obligations until the relay and VM stop. Recovery sweeps per-runner socket directories under macOS's user-private temporary directory. Linux backend integration, relay resource limits, and updated live VM checks remain separate work.
 
 A working prototype must demonstrate all of the following before yieldd advertises network isolation:
 

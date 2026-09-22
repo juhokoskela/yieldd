@@ -207,7 +207,7 @@ index 0000000..3135703
 +
 +    init(path: String) throws { socket = try PacketSocket(path: path) }
 +
-+    func device() throws -> VZVirtioNetworkDeviceConfiguration { try socket.device() }
++    func device() throws -> VZVirtioNetworkDeviceConfiguration { socket.device() }
 +}
 diff --git a/Sources/Services/RuntimeLinux/Server/RuntimeService.swift b/Sources/Services/RuntimeLinux/Server/RuntimeService.swift
 index 948a656..c2f30c2 100644

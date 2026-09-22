@@ -120,6 +120,11 @@ func macOSDoctorDoesNotRequireOrInvokeContainer() throws {
 
     #expect(!report.succeeded)
     #expect(!report.checks.contains { $0.name.hasPrefix("container") })
+    let relay = try #require(report.checks.first { $0.name == "macOS network relay" })
+    guard case .failed = relay.status else {
+        Issue.record("An unpackaged test executable must report its missing relay")
+        return
+    }
     let template = try #require(report.checks.first { $0.name == "macOS template" })
     guard case .failed = template.status else {
         Issue.record("Expected missing template validation to fail")

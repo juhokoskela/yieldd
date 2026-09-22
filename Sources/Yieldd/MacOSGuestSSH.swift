@@ -11,16 +11,19 @@ struct MacOSGuestSSH {
     private let privateKeyURL: URL
     private let knownHostsURL: URL
     private let executor: any ProcessExecuting
+    private let socketURL: URL?
 
     init(
         templateURL: URL,
         executableURL: URL = URL(fileURLWithPath: "/usr/bin/ssh"),
+        socketURL: URL? = nil,
         executor: any ProcessExecuting
     ) {
         self.executableURL = executableURL
         privateKeyURL = templateURL.appendingPathComponent(Self.privateKeyFilename)
         knownHostsURL = templateURL.appendingPathComponent(Self.knownHostsFilename)
         self.executor = executor
+        self.socketURL = socketURL
     }
 
     static func validateTemplate(at templateURL: URL) throws {
@@ -56,7 +59,7 @@ struct MacOSGuestSSH {
 
     @discardableResult func execute(
         _ arguments: [String],
-        address: String,
+        address: String? = nil,
         standardInput: Data? = nil,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
@@ -83,15 +86,28 @@ struct MacOSGuestSSH {
 
     @discardableResult private func run(
         _ command: String,
-        address: String,
+        address: String?,
         timeout: TimeInterval?,
         standardInput: Data? = nil,
         outputCapture: ProcessOutputCapture = .tail(maxBytes: Self.outputTailBytes),
         cancellable: Bool = true
     ) throws -> ProcessResult {
+        let destination: String
+        if socketURL != nil {
+            destination = Self.hostKeyAlias
+        } else {
+            guard let address, !address.isEmpty, address != Self.hostKeyAlias else {
+                throw MacOSGuestSSHError.missingAddress
+            }
+            destination = address
+        }
         let request = ProcessRequest(
             executableURL: executableURL,
-            arguments: [
+            arguments: (socketURL.map {
+                ["-o", "ProxyCommand=/usr/bin/nc -U '" + $0.path
+                    .replacingOccurrences(of: "'", with: "'\\''")
+                    .replacingOccurrences(of: "%", with: "%%") + "'"]
+            } ?? []) + [
                 "-F", "/dev/null",
                 "-i", privateKeyURL.path,
                 "-o", "BatchMode=yes",
@@ -105,7 +121,7 @@ struct MacOSGuestSSH {
                 "-o", "PasswordAuthentication=no",
                 "-o", "StrictHostKeyChecking=yes",
                 "-o", "UserKnownHostsFile=\(Self.configurationValue(knownHostsURL.path))",
-                "runner@\(address)",
+                "runner@\(destination)",
                 // OpenSSH sends one command through the remote login shell.
                 command,
             ],
@@ -208,6 +224,25 @@ struct MacOSGuestConnection {
             checkCancellation: checkCancellation,
             wait: wait
         )
+        try waitUntilReady(address: address, deadline: deadline, checkCancellation: checkCancellation, wait: wait)
+        return address
+    }
+
+    func waitUntilReady(
+        timeout: TimeInterval = Self.readinessTimeout,
+        checkCancellation: () throws -> Void = {},
+        wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:)
+    ) throws {
+        precondition(timeout.isFinite && timeout > 0)
+        try waitUntilReady(address: MacOSGuestSSH.hostKeyAlias, deadline: currentTime() + timeout, checkCancellation: checkCancellation, wait: wait)
+    }
+
+    private func waitUntilReady(
+        address: String,
+        deadline: TimeInterval,
+        checkCancellation: () throws -> Void,
+        wait: (TimeInterval) throws -> Void
+    ) throws {
         try waitForSSH(
             address: address,
             deadline: deadline,
@@ -232,7 +267,6 @@ struct MacOSGuestConnection {
             checkCancellation: checkCancellation,
             wait: wait
         )
-        return address
     }
 
     private func waitForAddress(
@@ -307,6 +341,7 @@ struct MacOSGuestConnection {
 }
 
 enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
+    case missingAddress
     case invalidCommandArgument
     case insecurePrivateKey(path: String, permissions: mode_t)
     case insecureKnownHosts(path: String, permissions: mode_t)
@@ -315,6 +350,8 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .missingAddress:
+            "A direct macOS guest SSH connection requires an explicit address."
         case .invalidCommandArgument:
             "macOS guest command arguments must not contain NUL bytes."
         case let .insecurePrivateKey(path, permissions):

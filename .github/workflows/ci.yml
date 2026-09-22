@@ -6,14 +6,6 @@ on:
       - main
   pull_request:
   workflow_dispatch:
-    inputs:
-      runner:
-        description: Runner for this trusted manual run
-        type: choice
-        default: macos-26
-        options:
-          - macos-26
-          - yieldd-macos
 
 permissions:
   contents: read
@@ -21,7 +13,7 @@ permissions:
 jobs:
   swift:
     name: Swift build and tests
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner == 'yieldd-macos' && 'yieldd-macos' || 'macos-26' }}
+    runs-on: yieldd-macos
     timeout-minutes: 20
     steps:
       - name: Check out
@@ -35,31 +27,40 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Build
-        run: swift build
-
-      - name: Test
-        # Parallel execution currently hits timing failures in lifecycle tests.
-        run: swift test --no-parallel
+      - name: Set up Go for the network relay
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: Prototypes/RunnerNetwork/go.mod
+          cache-dependency-path: Prototypes/RunnerNetwork/go.sum
 
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
 
+      - name: Test with the bundled relay (no VM)
+        # Parallel execution currently hits timing failures in lifecycle tests.
+        env:
+          YIELDD_TEST_RELAY: ${{ github.workspace }}/.build/yieldd.app/Contents/Helpers/yieldd-network-relay
+        run: swift test --no-parallel
+
   bootstrap:
     name: Bootstrap contract
-    runs-on: ubuntu-24.04
+    runs-on: yieldd
     timeout-minutes: 5
     steps:
       - name: Check out
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
       - name: Test without GitHub credentials or runner registration
         run: node --test .github/actions/bootstrap-runner/index.test.cjs
 
   coordinator:
     name: Coordinator contract
-    runs-on: ubuntu-24.04
+    runs-on: yieldd
     timeout-minutes: 10
     defaults:
       run:
@@ -78,8 +79,10 @@ jobs:
         run: |
           go test -race ./...
           go vet ./...
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build and smoke-test coordinator image
         run: |
           bash test-compose.sh
-          docker build -t local/yieldd-coordinator:dev .
+          docker buildx build --load -t local/yieldd-coordinator:dev .
           bash test-image.sh

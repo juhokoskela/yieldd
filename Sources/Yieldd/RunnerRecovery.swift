@@ -32,14 +32,15 @@ struct RunnerRecovery {
             failures: [RunnerSessionCleanupFailure]
         )] = []
         var recoveryFailures: [RunnerSessionCleanupFailure] = []
-
-        for kind in RunnerCloneKind.allCases {
-            do {
-                try makeCloneStore(kind).removeUnleased(
-                    keeping: kind == .runners ? Set(leases.map(\.runnerID)) : [], checkCancellation: checkCancellation)
-            } catch {
-                if isCancellation(error) { throw error }
-                recoveryFailures.append(RunnerSessionCleanupFailure(step: .machine, error: error))
+        do {
+            try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: Set(leases.map(\.runnerID)),
+                                         checkCancellation: checkCancellation, makeCloneStore: makeCloneStore)
+        } catch {
+            if isCancellation(error) { throw error }
+            if case let RunnerSessionError.cleanupFailed(failures) = error {
+                recoveryFailures.append(contentsOf: failures)
+            } else {
+                recoveryFailures.append(.init(step: .machine, error: error))
             }
         }
 
@@ -61,7 +62,9 @@ struct RunnerRecovery {
             case .macOS:
                 failures = cleanup.removeRegistrationAndClone(
                     id: lease.runnerID, repository: lease.repository
-                ) { try makeCloneStore(.runners).remove(lease.runnerID) }
+                ) {
+                    try removeMacOSRunnerFiles(lease.runnerID, in: leaseStore.directory, makeCloneStore: makeCloneStore)
+                }
             }
 
             if failures.isEmpty {

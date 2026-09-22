@@ -437,6 +437,10 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
     let (leaseStore, stateDirectory) = try makeRunnerLeaseStore()
     defer { try? FileManager.default.removeItem(at: stateDirectory) }
     let macID = RunnerID(value: "yieldd-aaa-macos")
+    let network = try RunnerNetworkDirectories(stateDirectory: stateDirectory)
+    defer { try? FileManager.default.removeItem(at: network.rootURL) }
+    let leasedSocketDirectory = try network.create(for: macID)
+    let orphanSocketDirectory = try network.create(for: RunnerID(value: "yieldd-network-orphan"))
     let macLease = RunnerLease(runnerID: macID, repository: runnerTestRepository, platform: .macOS)
     try leaseStore.save(macLease)
     try leaseStore.save(RunnerLease(runnerID: runnerTestID, repository: runnerTestRepository))
@@ -451,6 +455,8 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
     let recovery = RunnerRecovery(
         linuxBackend: { RunnerTestBackend(events: events) }, github: github, leaseStore: leaseStore, makeCloneStore: testCloneStores(in: leaseStore.directory),
         recoveryWait: { _ in
+            #expect(!FileManager.default.fileExists(atPath: leasedSocketDirectory.path))
+            #expect(!FileManager.default.fileExists(atPath: orphanSocketDirectory.path))
             let contents = try FileManager.default.contentsOfDirectory(atPath: clones.rootURL.path)
             #expect(contents.isEmpty)
             let remaining = try leaseStore.load()
@@ -465,6 +471,37 @@ func recoveryRoutesMixedLeasesAndRemovesClonesBeforeBusyRetry() throws {
         .removeGitHubRunner(macID.value, runnerTestRepository),
     ])
     #expect(try leaseStore.load().isEmpty)
+}
+
+@Test
+func recoveryRemovesCloneWhenNetworkDirectoryIsInvalid() throws {
+    let (leases, directory) = try makeRunnerLeaseStore()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let id = RunnerID(value: "yieldd-bad-network")
+    let lease = RunnerLease(runnerID: id, repository: runnerTestRepository, platform: .macOS)
+    try leases.save(lease)
+    let network = try RunnerNetworkDirectories(stateDirectory: directory)
+    defer { try? FileManager.default.removeItem(at: network.rootURL) }
+    let socketDirectory = try network.create(for: id)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: socketDirectory.path)
+    let clones = testCloneStores(in: directory)(.runners)
+    let bundle = try clones.bundleURL(for: id)
+    try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+    let events = RunnerTestEventRecorder()
+    let recovery = RunnerRecovery(linuxBackend: { RunnerTestBackend(events: events) },
+        github: RunnerTestGitHub(events: events), leaseStore: leases, makeCloneStore: testCloneStores(in: directory))
+    do {
+        _ = try recovery.run()
+        Issue.record("Invalid network directory was ignored")
+    } catch let RunnerSessionError.cleanupFailed(failures) {
+        #expect(failures.map(\.step) == [.network])
+    }
+    #expect(!FileManager.default.fileExists(atPath: bundle.path))
+    #expect(try leases.load() == [lease])
+    #expect(events.values == [.removeGitHubRunner(id.value, runnerTestRepository)])
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: socketDirectory.path)
+    #expect(try recovery.run() == [id])
+    #expect(try leases.load().isEmpty)
 }
 
 @Test

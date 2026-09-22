@@ -6,6 +6,7 @@
 
 - An Apple Silicon Mac running macOS 26 or newer
 - Swift 6.2 or newer
+- Go matching `Prototypes/RunnerNetwork/go.mod` to build the bundled network relay
 - For Linux runners: Apple `container` with container machine support and a running container system
 - A configured [quota-limited APFS volume](Docs/runner-storage.md) for guest storage, separate from recovery records
 - For macOS runners: a user-prepared template bundle on that guest-storage volume
@@ -21,7 +22,9 @@ container system start --app-root /Volumes/YielddRunners/container
 
 `yieldd doctor` never starts or changes the container system.
 
-For macOS-only checks, use the signed application with `doctor --template /absolute/path/VM.bundle`. This checks virtualization support, signing entitlement, template files and location, memory capacity, and GitHub authentication without requiring Apple Container. It does not boot a guest; use `machine-test` for SSH, GUI, and simulator validation.
+For macOS-only checks, use the signed application with `doctor --template /absolute/path/VM.bundle`. This checks virtualization support, signing entitlement, the bundled network relay, template files and location, memory capacity, and GitHub authentication without requiring Apple Container. It does not boot a guest; use `machine-test` for SSH, GUI, and simulator validation.
+
+macOS runner commands use a separate network relay per VM, with pinned SSH through a user-private Unix socket and no NAT fallback. Build the signed app with `Scripts/build-local-app.sh`; a bare `swift build` does not package the helper. The relay permits public IPv4 TCP/UDP, filters host and private destinations, and uses a fixed public DNS resolver. IPv6, LAN/VPN DNS, and local service access are unavailable. This integration still needs live runner validation. Linux runner networking and the manual `agent vm-probe` remain unchanged. See [runner boundaries](Docs/runner-boundaries.md) for limitations.
 
 Authenticate the GitHub CLI if needed:
 
@@ -37,7 +40,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd doctor
 ```
 
-The `CI` workflow builds and tests yieldd and verifies the signed app on GitHub-hosted `macos-26` runners for pushes to `main` and pull requests. Tests run serially while parallel lifecycle-test timing failures remain unresolved. To exercise the same job on a trusted yieldd macOS guest, manually dispatch `ci.yml` with the `runner` input set to `yieldd-macos`. Automatic CI never selects a self-hosted runner.
+The `CI` workflow runs on yieldd for pushes to `main`, pull requests, and manual dispatches. Swift builds, tests, and signed-app checks use `yieldd-macos`; bootstrap and coordinator checks use `yieldd` (Linux). The `Network prototype` workflow also uses `yieldd-macos`. These checks do not start nested runner VMs or replace the host's running yieldd installation. Swift tests run serially while parallel lifecycle-test timing failures remain unresolved.
+
+Keep a Mac connected with both platforms enabled to run CI locally. When local capacity is unavailable, the coordinator can still dispatch its configured fallback, which may consume hosted-runner minutes. Fallback bootstrap workflows must target an external runner, not a yieldd queue.
 
 ## Guest image
 

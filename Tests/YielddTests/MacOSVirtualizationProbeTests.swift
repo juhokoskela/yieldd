@@ -31,9 +31,11 @@ func virtualizationProbeCloneIsPrivateAndUsesFreshIdentity() throws {
             ofItemAtPath: fileURL.path
         )
     }
+    let macAddress = try MacOSVirtualizationProbeClone.macAddressString()
     let clone = try MacOSVirtualizationProbeClone.create(
         templateURL: fixture.templateURL,
-        cloneRootURL: fixture.cloneRootURL
+        cloneRootURL: fixture.cloneRootURL,
+        macAddress: macAddress
     )
 
     #expect(clone.url != fixture.templateURL)
@@ -56,10 +58,10 @@ func virtualizationProbeCloneIsPrivateAndUsesFreshIdentity() throws {
     ] {
         #expect(try permissions(of: clone.url.appendingPathComponent(filename)) == 0o600)
     }
-    #expect(MacOSGuestAddressResolver.parseMACAddress(clone.macAddress) != nil)
+    #expect(MacOSGuestAddressResolver.parseMACAddress(macAddress) != nil)
     #expect(
         try String(contentsOf: clone.url.appendingPathComponent("MACAddress"), encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines) == clone.macAddress
+            .trimmingCharacters(in: .whitespacesAndNewlines) == macAddress
     )
 
     try Data("changed-disk".utf8).write(to: clone.url.appendingPathComponent("Disk.img"))

@@ -97,10 +97,10 @@ func TestRelayOwnership(t *testing.T) {
 			if err := decoder.Decode(&ready); err != nil {
 				t.Fatal("relay did not become ready", err)
 			}
-			if ready.Version != 1 {
+			if ready.Version != 2 {
 				t.Fatal("unsupported readiness version", ready.Version)
 			}
-			ssh, err := net.DialTimeout("tcp4", ready.SSH, time.Second)
+			ssh, err := net.DialTimeout("unix", ready.SSH, time.Second)
 			if err != nil {
 				t.Fatal(err)
 			}

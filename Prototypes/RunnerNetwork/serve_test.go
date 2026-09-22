@@ -56,9 +56,19 @@ func testServeCancellation(t *testing.T, connectGuest bool) {
 			t.Error("relay goroutine did not stop")
 		}
 	})
-	var ready struct{ SSH string }
+	var ready struct {
+		Version int
+		SSH     string
+	}
 	if err := json.NewDecoder(reader).Decode(&ready); err != nil {
 		t.Fatal("relay did not report readiness", err)
+	}
+	if ready.Version != 2 || ready.SSH != path+".ssh" {
+		t.Fatalf("unexpected private SSH endpoint: %+v", ready)
+	}
+	info, err := os.Lstat(ready.SSH)
+	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 {
+		t.Fatalf("SSH endpoint is not a private Unix socket: %v, %v", info, err)
 	}
 	var ssh net.Conn
 	if connectGuest {
@@ -70,7 +80,7 @@ func testServeCancellation(t *testing.T, connectGuest bool) {
 		if _, err := guest.Write(sampleFrame()); err != nil {
 			t.Fatal(err)
 		}
-		ssh, err = net.DialTimeout("tcp4", ready.SSH, time.Second)
+		ssh, err = net.DialTimeout("unix", ready.SSH, time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,6 +104,28 @@ func testServeCancellation(t *testing.T, connectGuest bool) {
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("socket retained", err)
+	}
+	if _, err := os.Lstat(ready.SSH); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("SSH socket retained", err)
+	}
+}
+
+func TestServeDoesNotRemoveExistingSSHEndpoint(t *testing.T) {
+	if runInRelayProcess(t) {
+		return
+	}
+	dir := socketTestDirectory(t)
+	path := filepath.Join(dir, "relay.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path + ".ssh", Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := serve(t.Context(), path, io.Discard, new(denialCounters)); err == nil {
+		t.Fatal("replaced existing SSH endpoint")
+	}
+	if _, err := os.Lstat(path + ".ssh"); err != nil {
+		t.Fatal("removed SSH endpoint owned by another helper", err)
 	}
 }
 

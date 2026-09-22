@@ -5,7 +5,10 @@ on:
     paths:
       - 'Prototypes/RunnerNetwork/**'
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
-      - 'Tests/YielddTests/RunnerNetworkRelayTests.swift'
+      - 'Sources/Yieldd/PacketSocket.swift'
+      - 'Scripts/build-network-relay.sh'
+      - 'Scripts/prepare-patched-source.sh'
+      - 'Scripts/test-prepare-patched-source.sh'
       - 'Packaging/yieldd.entitlements'
       - '.github/workflows/network-prototype.yml'
   push:
@@ -13,7 +16,10 @@ on:
     paths:
       - 'Prototypes/RunnerNetwork/**'
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
-      - 'Tests/YielddTests/RunnerNetworkRelayTests.swift'
+      - 'Sources/Yieldd/PacketSocket.swift'
+      - 'Scripts/build-network-relay.sh'
+      - 'Scripts/prepare-patched-source.sh'
+      - 'Scripts/test-prepare-patched-source.sh'
       - 'Packaging/yieldd.entitlements'
       - '.github/workflows/network-prototype.yml'
   workflow_dispatch:
@@ -24,7 +30,7 @@ permissions:
 jobs:
   check:
     name: Relay and Container fork checks
-    runs-on: macos-26
+    runs-on: yieldd-macos
     timeout-minutes: 30
     steps:
       - name: Check out
