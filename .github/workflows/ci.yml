@@ -6,14 +6,6 @@ on:
       - main
   pull_request:
   workflow_dispatch:
-    inputs:
-      runner:
-        description: Runner for this trusted manual run
-        type: choice
-        default: macos-26
-        options:
-          - macos-26
-          - yieldd-macos
 
 permissions:
   contents: read
@@ -21,7 +13,7 @@ permissions:
 jobs:
   swift:
     name: Swift build and tests
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner == 'yieldd-macos' && 'yieldd-macos' || 'macos-26' }}
+    runs-on: yieldd-macos
     timeout-minutes: 20
     steps:
       - name: Check out
@@ -52,19 +44,23 @@ jobs:
 
   bootstrap:
     name: Bootstrap contract
-    runs-on: ubuntu-24.04
+    runs-on: yieldd
     timeout-minutes: 5
     steps:
       - name: Check out
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
       - name: Test without GitHub credentials or runner registration
         run: node --test .github/actions/bootstrap-runner/index.test.cjs
 
   coordinator:
     name: Coordinator contract
-    runs-on: ubuntu-24.04
+    runs-on: yieldd
     timeout-minutes: 10
     defaults:
       run:
