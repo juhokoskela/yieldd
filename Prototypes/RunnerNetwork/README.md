@@ -22,7 +22,7 @@ Run from the yieldd checkout:
 bash Prototypes/RunnerNetwork/check.sh
 ```
 
-This macOS check builds and signs both probes, runs the relay tests with the race detector, runs `go vet`, builds the modified Container services, and runs the Swift configuration, socket, and relay-supervisor tests. The supervisor tests include the real Go relay. It does not boot a VM or change installed services. The prototype-only GitHub workflow runs the same command when the prototype or shared supervisor changes.
+This macOS check builds and signs both probes, runs the relay tests with the race detector, runs `go vet`, builds the modified Container services, and runs the Swift configuration, socket, VM-lifecycle, and relay-supervisor tests. The supervisor tests include the real Go relay. The macOS lifecycle tests use a controlled clock and callbacks to cover stalled startup, interruption, late startup, and bounded cleanup without a VM. The check does not boot a VM or change installed services. The prototype-only GitHub workflow runs the same command when the prototype or shared supervisor changes.
 
 Public-network and fuzz checks are separate:
 
@@ -31,7 +31,7 @@ Public-network and fuzz checks are separate:
 (cd Prototypes/RunnerNetwork && go test -run '^$' -fuzz FuzzFrameBoundary -fuzztime 10s -parallel 2)
 ```
 
-The preparation script creates pinned source checkouts under `.build/`, applies the two checked-in patches, builds the relay and both probes, and ad-hoc signs the probes with the existing virtualization entitlement. It refreshes generated copies of `PacketSocket.swift`, `LinuxProbe.swift`, and `PacketSocketTests.swift` from this directory, plus `RunnerNetworkRelay.swift` from `Sources/Yieldd/`. Edit those originals, not their `.build/` copies. It does not install, stop, or reconfigure Apple Container. Go dependencies belong to this separate prototype module, not the coordinator.
+The preparation script creates pinned source checkouts under `.build/`, applies the two checked-in patches, builds the relay and both probes, and ad-hoc signs the probes with the existing virtualization entitlement. It refreshes generated copies of `PacketSocket.swift`, `LinuxProbe.swift`, `PacketSocketTests.swift`, `MacProbeLifecycle.swift`, and `MacProbeLifecycleTests.swift` from this directory, plus `RunnerNetworkRelay.swift` from `Sources/Yieldd/`. Edit those originals, not their `.build/` copies. It does not install, stop, or reconfigure Apple Container. Go dependencies belong to this separate prototype module, not the coordinator.
 
 The socket-level tests use a second gVisor stack as the guest and exchange real Ethernet datagrams. They cover denied TCP/UDP traffic, host-to-guest connections, malformed frames, private socket directories, occupied socket paths, and cancellation both before connection and with a guest and SSH client connected. The TCP denial test uses a simulated public host address and a real loopback listener behind the checked dial boundary; it also checks a private destination. It does not require a LAN interface or skip when one is absent. Separate live VM evidence appears below. DNS tests exercise both guest transports against a controlled upstream and assert the public destination. Policy tests verify that new connections use updated host addresses. Swift tests exercise the actual socket adapter's datagram exchange, permissions, failure cleanup, and path rejection without a VM. The opt-in live test resolves `github.com` through the guest DNS service and makes a certificate-verified HTTPS request through the relay.
 
@@ -53,7 +53,7 @@ First confirm that configured runner storage is mounted and no job is active:
   "$PWD/.build/network-prototype"
 ```
 
-The probe holds yieldd's existing ownership lock, starts its relay, copies the template's disk and auxiliary storage using APFS clones, and starts an 8 GiB VM. It prints the loopback SSH port and uses only the relay interface. It stops after two minutes, SIGINT/SIGTERM/SIGHUP, or detected relay exit, and removes its clone after confirmed shutdown. The two-minute bound is for the experiment, not a proposed job execution limit. A crash can leave a `.bundle` in `macos-probes`; normal yieldd recovery sweeps that directory.
+The probe holds yieldd's existing ownership lock, starts its relay, copies the template's disk and auxiliary storage using APFS clones, and starts an 8 GiB VM. It prints the loopback SSH port and uses only the relay interface. VM startup and runtime share a two-minute budget. SIGINT/SIGTERM/SIGHUP and relay exit are checked while startup is pending as well as during execution. Cleanup gets a separate 15 seconds, including time waiting for the VM to become stoppable. If shutdown cannot be confirmed, the probe reports the failure and retains the clone; it still shuts down the relay and exits. It removes the clone only after confirmed shutdown or terminal VM failure. These bounds are for the experiment, not proposed job execution limits. A crash or failed shutdown can leave a `.bundle` in `macos-probes`; normal yieldd recovery sweeps that directory.
 
 In another terminal, connect using the printed port and the template's pinned key:
 

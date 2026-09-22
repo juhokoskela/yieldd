@@ -89,22 +89,25 @@ enum MacProbe {
             return source
         }
         defer { signals.forEach { $0.cancel() } }
-        mayBeRunning = true
-        do {
-            try await vm.start()
-            print("Disposable macOS guest started on packet relay only. Stopping in 120 seconds.")
-            let deadline = ContinuousClock.now.advanced(by: .seconds(120))
-            while !interrupted && ContinuousClock.now < deadline && vm.state == .running {
+        defer { mayBeRunning = vm.state != .stopped && vm.state != .error }
+        let lifecycle = MacProbeLifecycle(
+            start: { completion in
+                mayBeRunning = true
+                vm.start(completionHandler: completion)
+            },
+            state: { vm.state },
+            canStop: { vm.canStop },
+            stop: { vm.stop(completionHandler: $0) }
+        )
+        try await lifecycle.run(
+            checkCancellation: {
+                if interrupted { throw CancellationError() }
                 try relay.check()
-                try await Task.sleep(for: .milliseconds(200))
+            },
+            started: {
+                print("Disposable macOS guest started on packet relay only. Startup and runtime share a 120-second budget.")
             }
-        } catch {
-            if vm.canStop { try await vm.stop() }
-            mayBeRunning = vm.state != .stopped && vm.state != .error
-            throw error
-        }
-        if vm.canStop { try await vm.stop() }
-        mayBeRunning = vm.state != .stopped && vm.state != .error
+        )
         withExtendedLifetime(socket) {}
         print("Prototype VM stopped.")
     }

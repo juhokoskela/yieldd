@@ -46,11 +46,15 @@ copy_source "$repo_root/Sources/Yieldd/RunnerNetworkRelay.swift" \
     "$repo_root/.build/network-container/Sources/YielddNetworkProbe/RunnerNetworkRelay.swift"
 copy_source "$prototype_dir/PacketSocketTests.swift" \
     "$repo_root/.build/network-container/Tests/YielddNetworkPrototypeTests/PacketSocketTests.swift"
+copy_source "$prototype_dir/MacProbeLifecycle.swift" \
+    "$repo_root/.build/network-container/Tests/YielddNetworkPrototypeTests/MacProbeLifecycle.swift"
+copy_source "$prototype_dir/MacProbeLifecycleTests.swift" \
+    "$repo_root/.build/network-container/Tests/YielddNetworkPrototypeTests/MacProbeLifecycleTests.swift"
 
 cd "$prototype_dir"
 go build -o "$repo_root/.build/network-prototype" .
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-xcrun swiftc -swift-version 6 -parse-as-library PacketSocket.swift MacProbe.swift \
+xcrun swiftc -swift-version 6 -parse-as-library PacketSocket.swift MacProbe.swift MacProbeLifecycle.swift \
     "$repo_root/Sources/Yieldd/RunnerNetworkRelay.swift" \
     -o "$repo_root/.build/mac-network-probe"
 codesign --force --sign - --entitlements "$repo_root/Packaging/yieldd.entitlements" \
