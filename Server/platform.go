@@ -12,6 +12,7 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
+	"github.com/hashicorp/go-retryablehttp"
 )
 
 // Each repository/platform queue owns a journal, message session, and serialized lifecycle.
@@ -24,6 +25,11 @@ type platformCoordinator struct {
 }
 
 func openPlatformCoordinator(ctx context.Context, cfg config, directory, token string, recoverOnly bool) (_ *platformCoordinator, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("repository %s platform %s: %w", cfg.Repository, cfg.platform(), err)
+		}
+	}()
 	store, err := openStore(directory)
 	if err != nil {
 		return nil, err
@@ -39,10 +45,14 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 		return nil, err
 	}
 	// A lost registration POST must never be retried automatically.
+	logger := slog.Default().With("repository", cfg.Repository, "platform", cfg.platform(), "scale_set", saved.ScaleSetID)
+	httpClient := retryablehttp.NewClient()
+	httpClient.RetryMax = 0
+	httpClient.ResponseLogHook = scaleSetResponseDiagnostics(logger)
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
 		GitHubConfigURL: "https://github.com/" + cfg.Repository, PersonalAccessToken: token,
 		SystemInfo: scaleset.SystemInfo{System: "yieldd", Version: "prototype", Subsystem: "coordinator"},
-	}, scaleset.WithRetryMax(0), scaleset.WithTimeout(60*time.Second))
+	}, scaleset.WithRetryableHTTPClint(httpClient), scaleset.WithTimeout(60*time.Second))
 	if err != nil {
 		return nil, &sdkError{"initialize client", err}
 	}
@@ -75,6 +85,17 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 		return nil, err
 	}
 	return p, nil
+}
+
+func scaleSetResponseDiagnostics(logger *slog.Logger) retryablehttp.ResponseLogHook {
+	return func(_ retryablehttp.Logger, response *http.Response) {
+		// Do not log headers, URLs, bodies, or SDK error text. Even error bodies
+		// and request URLs can contain credentials.
+		if response.StatusCode >= 400 || (response.StatusCode == http.StatusOK && response.ContentLength == 0) {
+			logger.Warn("Scale Set HTTP response requires attention", "http_status", response.StatusCode,
+				"empty_response", response.ContentLength == 0)
+		}
+	}
 }
 
 func closeCoordinators(workers ...*platformCoordinator) {
@@ -159,7 +180,11 @@ func ensurePlatformScaleSet(ctx context.Context, client scaleSetAPI, cfg config,
 		set, err = client.GetRunnerScaleSet(ctx, 1, name)
 	}
 	if err != nil {
-		return 0, &sdkError{"find scale set", err}
+		diagnostic := &sdkError{"find scale set", err}
+		if savedID != 0 {
+			return 0, fmt.Errorf("saved scale set %d could not be verified; preserve its journal and reconcile outstanding assignments before resetting its ID: %w", savedID, diagnostic)
+		}
+		return 0, diagnostic
 	}
 	baseLabels := []scaleset.Label{{Name: name}}
 	if set == nil {

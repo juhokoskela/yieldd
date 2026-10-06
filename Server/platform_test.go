@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,67 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
+	"github.com/hashicorp/go-retryablehttp"
 )
+
+func TestSDKLookupDiagnosticsWithRealClient(t *testing.T) {
+	for _, status := range []int{200, 403, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logs, nil)).With("repository", "owner/repo", "platform", "macos", "scale_set", 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/owner/repo/actions/runners/registration-token":
+					w.WriteHeader(201)
+					io.WriteString(w, `{"token":"private-registration-token"}`)
+				case "/actions/runner-registration":
+					fmt.Fprintf(w, `{"url":"http://%s","token":"private-admin-token"}`, r.Host)
+				default:
+					w.WriteHeader(status)
+					if status != 200 {
+						io.WriteString(w, "private-jit secret-token")
+					}
+				}
+			}))
+			defer server.Close()
+			retry := retryablehttp.NewClient()
+			retry.RetryMax = 0
+			retry.ResponseLogHook = scaleSetResponseDiagnostics(logger)
+			client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
+				GitHubConfigURL: server.URL + "/owner/repo", PersonalAccessToken: "private-pat",
+			}, scaleset.WithRetryableHTTPClint(retry))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ensurePlatformScaleSet(t.Context(), client, config{Repository: "owner/repo", Platform: "macos"}, 2)
+			if err == nil {
+				t.Fatal("expected lookup failure")
+			}
+			for _, want := range []string{"repository=owner/repo", "platform=macos", "scale_set=2", fmt.Sprintf("http_status=%d", status)} {
+				if !strings.Contains(logs.String(), want) {
+					t.Fatal("missing diagnostic", want, logs.String())
+				}
+			}
+			if !strings.Contains(err.Error(), "saved scale set 2") {
+				t.Fatal("missing saved identity", err)
+			}
+			for _, output := range []string{logs.String(), err.Error()} {
+				if strings.Contains(output, "private-") || strings.Contains(output, "secret-token") {
+					t.Fatal("credential leaked")
+				}
+			}
+		})
+	}
+}
+
+func TestQueueStartupFailureIdentifiesRepositoryAndPlatform(t *testing.T) {
+	cfg := testConfig
+	cfg.Platform = "macos"
+	_, err := openPlatformCoordinator(t.Context(), cfg, "relative-state", "test-only", false)
+	if err == nil || !strings.Contains(err.Error(), "repository "+cfg.Repository+" platform macos") {
+		t.Fatal("missing queue identity", err)
+	}
+}
 
 type scaleSetWriteResponse struct {
 	*fakeScaleSets

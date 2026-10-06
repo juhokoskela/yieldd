@@ -131,6 +131,8 @@ bash test-image.sh
 
 ## Lifecycle and recovery
 
+Startup errors identify the repository and platform. Scale Set API diagnostics report cancellation, deadlines, network failures, and invalid or empty responses without printing SDK response bodies. HTTP warnings include the status and saved scale-set ID. An HTTP 200 with an empty response does not prove the saved set is missing; preserve its journal, check GitHub's scale-set identity, and resolve outstanding assignments before resetting an ID. The coordinator never replaces a saved identity automatically.
+
 The service records intent before registration and dispatch. It uploads an encrypted, uniquely named GitHub secret, then clears the local JIT value and records dispatch intent in one write. Dispatch inputs contain only the runner name and fallback labels. The request enables [`return_run_details`](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event), and the service persists the returned run ID. Title-based discovery is reserved for lost responses or a crash before that ID was saved. It never redispatches an uncertain request.
 
 SIGINT, SIGTERM, and SIGHUP stop the coordinator without canceling a running bootstrap. Restart with the same arguments and state directory to resume reconciliation. GitHub continues receiving the workload's logs and result independently of the coordinator.
