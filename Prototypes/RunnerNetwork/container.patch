@@ -25,6 +25,45 @@ index 93b93c4..85f5522 100644
          .executableTarget(
              name: "container",
              dependencies: [
+diff --git a/Sources/ContainerCommands/Machine/MachineCreate.swift b/Sources/ContainerCommands/Machine/MachineCreate.swift
+--- a/Sources/ContainerCommands/Machine/MachineCreate.swift
++++ b/Sources/ContainerCommands/Machine/MachineCreate.swift
+@@ -69,6 +69,9 @@ extension Application {
+         @Option(name: .long, help: "Path to a custom kernel binary (e.g. vmlinux).")
+         public var kernel: String?
+
++        @Option(name: .long, help: "Host-owned packet relay socket. Requires --home-mount none.")
++        public var networkSocket: String?
++
+         @Argument(help: "Container image reference (e.g., alpine:3.22)")
+         var image: String
+
+@@ -102,6 +105,7 @@ extension Application {
+                     "home-mount": homeMount,
+                     "virtualization": virtualization ? "true" : nil,
+                     "kernel": resolvedKernel?.string,
++                    "network-socket": networkSocket,
+                 ].compactMapValues { $0 }
+             )
+
+diff --git a/Sources/ContainerCommands/Machine/MachineInspect.swift b/Sources/ContainerCommands/Machine/MachineInspect.swift
+--- a/Sources/ContainerCommands/Machine/MachineInspect.swift
++++ b/Sources/ContainerCommands/Machine/MachineInspect.swift
+@@ -66,6 +66,7 @@ private struct InspectOutput: Codable {
+     let homeMount: MachineConfig.HomeMountOption
+     let diskSize: UInt64?
+     let ipAddress: String?
++    let networkSocket: String?
+
+     init(_ snapshot: MachineSnapshot) {
+         self.id = snapshot.id
+@@ -82,5 +83,6 @@ private struct InspectOutput: Codable {
+         self.homeMount = snapshot.bootConfig.homeMount
+         self.diskSize = snapshot.diskSize
+         self.ipAddress = snapshot.ipAddress
++        self.networkSocket = snapshot.bootConfig.networkSocket
+     }
+ }
 diff --git a/Sources/ContainerPersistence/MachineConfig.swift b/Sources/ContainerPersistence/MachineConfig.swift
 index 6c81612..aad4534 100644
 --- a/Sources/ContainerPersistence/MachineConfig.swift
