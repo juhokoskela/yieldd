@@ -238,7 +238,7 @@ func macOSBackendRunsThroughTheExistingSession() throws {
     admission.release(reservation)
 }
 
-private final class BackendNetwork: MacOSRunnerNetworking {
+private final class BackendNetwork: RunnerNetworking {
     var startError: (any Error)?
     var relays: [BackendRelay] = []
     var relayFailure: (any Error)?

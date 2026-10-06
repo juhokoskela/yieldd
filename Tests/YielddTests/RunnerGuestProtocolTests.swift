@@ -20,7 +20,7 @@ func guestProtocolRejectsOutdatedScriptsWithoutSendingCredentials(_ response: St
         ? .failure(ProcessExecutionError.nonZeroExit(request: request, result: processResult(stderr: "usage: yieldd-configure-runner OWNER/REPO NAME", status: 2)))
         : .success(processResult(stdout: response))
     let executor = RecordingProcessExecutor(outcomes: [outcome, outcome])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+    let backend = try readyLinuxBackend(executor: executor, containerURL: request.executableURL, id: RunnerID(value: "yieldd-test"))
     if response == "1\n" {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
         #expect(executor.requests.count == 2)
@@ -43,7 +43,7 @@ func guestProtocolTimeoutIdentifiesTheHelperAndPreservesDiagnostics(completedChe
             .failure(ProcessExecutionError.timedOut(request: request,
                 result: processResult(stderr: "SSH diagnostic tail"))),
         ])
-    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+    let backend = try readyLinuxBackend(executor: executor, containerURL: URL(fileURLWithPath: "/test/container"), id: RunnerID(value: "yieldd-test"))
 
     do {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
@@ -68,7 +68,7 @@ func guestProtocolPreservesProcessCancellation() throws {
         .failure(ProcessExecutionError.cancelled(request: request, result: processResult(),
             underlying: CancellationError())),
     ])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+    let backend = try readyLinuxBackend(executor: executor, containerURL: request.executableURL, id: RunnerID(value: "yieldd-test"))
 
     do {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
@@ -90,8 +90,7 @@ func guestProtocolPreservesTransportAndDaemonDiagnostics(status: Int32) throws {
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/container"), arguments: [])
     let result = processResult(stderr: "transport connection unavailable", status: status)
     let executor = RecordingProcessExecutor(outcomes: [.success(result)])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor,
-                                         stateDirectory: unconfiguredContainerStateDirectory)
+    let backend = try readyLinuxBackend(executor: executor, containerURL: request.executableURL, id: RunnerID(value: "yieldd-test"))
     let error = try #require(#expect(throws: ProcessExecutionError.self) {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
     })

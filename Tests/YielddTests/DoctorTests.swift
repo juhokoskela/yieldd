@@ -8,6 +8,7 @@ func doctorReportsSuccessfulChecks() throws {
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()),
+        .success(processResult(stdout: "--network-socket")),
         .success(processResult()),
         .success(processResult()),
     ])
@@ -15,7 +16,7 @@ func doctorReportsSuccessfulChecks() throws {
     let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        loadStorage: { nil }, supportsAppleSilicon: { true }
+        loadStorage: { nil }, relayURL: URL(fileURLWithPath: "/usr/bin/true"), supportsAppleSilicon: { true }
     ).run()
 
     #expect(report.succeeded)
@@ -30,6 +31,7 @@ func doctorReportsSuccessfulChecks() throws {
     ])
     #expect(executor.requests.map(\.arguments) == [
         ["system", "status", "--format", "json"],
+        ["machine", "create", "--help"],
         ["machine", "list", "--quiet"],
         ["auth", "status", "--active", "--hostname", "github.com"],
     ])

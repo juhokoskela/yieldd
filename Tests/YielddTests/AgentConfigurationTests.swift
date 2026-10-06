@@ -139,7 +139,7 @@ func agentInstallPreflightResolvesToolsWithoutAPackagedApplication() throws {
     try command.run(locateExecutable: { name in
         resolvedTools.append(name)
         return URL(fileURLWithPath: "/usr/bin/\(name)")
-    }, stateDirectory: fixture.directory, memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil })
+    }, stateDirectory: fixture.directory, memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil }, relayURL: URL(fileURLWithPath: "/usr/bin/true"))
 
     #expect(resolvedTools == ["container", "gh"])
 }

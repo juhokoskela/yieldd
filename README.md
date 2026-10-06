@@ -7,7 +7,7 @@
 - An Apple Silicon Mac running macOS 26 or newer
 - Swift 6.2 or newer
 - Go matching `Prototypes/RunnerNetwork/go.mod` to build the bundled network relay
-- For Linux runners: Apple `container` with container machine support and a running container system
+- For Linux runners: the [pinned Container fork](Docs/linux-runner-network.md) with relay-aware machine support and a running container system
 - A configured [quota-limited APFS volume](Docs/runner-storage.md) for guest storage, separate from recovery records
 - For macOS runners: a user-prepared template bundle on that guest-storage volume
 - For GitHub jobs or abandoned-runner recovery: GitHub CLI authenticated to `github.com` with administration access to the repository
@@ -24,7 +24,7 @@ container system start --app-root /Volumes/YielddRunners/container
 
 For macOS-only checks, use the signed application with `doctor --template /absolute/path/VM.bundle`. This checks virtualization support, signing entitlement, the bundled network relay, template files and location, memory capacity, and GitHub authentication without requiring Apple Container. It does not boot a guest; use `machine-test` for SSH, GUI, and simulator validation.
 
-macOS runner commands use a separate network relay per VM, with pinned SSH through a user-private Unix socket and no NAT fallback. Build the signed app with `Scripts/build-local-app.sh`; a bare `swift build` does not package the helper. The relay permits public IPv4 TCP/UDP, filters host and private destinations, and uses a fixed public DNS resolver. IPv6, LAN/VPN DNS, and local service access are unavailable. This integration still needs live runner validation. Linux runner networking and the manual `agent vm-probe` remain unchanged. See [runner boundaries](Docs/runner-boundaries.md) for limitations.
+Linux and macOS runner commands use a separate network relay per guest, with no NAT fallback. macOS uses pinned SSH through a user-private Unix socket; Linux control stays on Container's host control channel. Build the signed app with `Scripts/build-local-app.sh`; a bare `swift build` does not package the helper. Linux also requires the [pinned Container build](Docs/linux-runner-network.md). The relay permits public IPv4 TCP/UDP, filters host and private destinations, and uses a fixed public DNS resolver. IPv6, LAN/VPN DNS, and local service access are unavailable. The Linux machine CLI integration still needs live validation. The manual `agent vm-probe` retains NAT. See [runner boundaries](Docs/runner-boundaries.md) for limitations.
 
 Authenticate the GitHub CLI if needed:
 
@@ -37,7 +37,8 @@ gh auth login --hostname github.com
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd doctor
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app.sh
+.build/yieldd.app/Contents/MacOS/yieldd doctor
 ```
 
 The `CI` workflow runs on yieldd for pushes to `main`, pull requests, and manual dispatches. Swift builds, tests, and signed-app checks use `yieldd-macos`; bootstrap and coordinator checks use `yieldd` (Linux). The `Network prototype` workflow also uses `yieldd-macos`. These checks do not start nested runner VMs or replace the host's running yieldd installation. Swift tests run serially while parallel lifecycle-test timing failures remain unresolved.
@@ -61,7 +62,7 @@ Machines receive 4 virtual CPUs and a 12 GiB memory ceiling. Runner processes an
 After building the guest image, run:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run yieldd machine-test
+.build/yieldd.app/Contents/MacOS/yieldd machine-test
 ```
 
 The command shares the runner ownership lock and memory-admission policy with `runner-test`, `serve`, and the local agent. It creates a uniquely named machine with no host home mount, runs `docker info`, checks both guest helpers' protocol version, runs `docker run --rm hello-world`, and destroys the machine. It attempts cleanup after every creation attempt, including failed ones and commands interrupted with Ctrl+C or SIGTERM.

@@ -1,6 +1,6 @@
 # Guest network isolation: feasibility
 
-This records the baseline investigation and the subsequent [socket-relay prototype](../Prototypes/RunnerNetwork/README.md). Normal macOS runner commands now use that relay; live validation of the integration is still pending. The stock Linux runner-machine path can reach the Mac's services. Enforcing an Internet-only policy needs a packet path yieldd can control outside the guest.
+This records the baseline investigation and the subsequent [socket-relay prototype](../Prototypes/RunnerNetwork/README.md). Both runner backends now use that relay; Linux requires a pinned Container fork, and installed CLI validation is still pending. The stock Linux runner-machine path can reach the Mac's services. Enforcing an Internet-only policy needs a packet path yieldd can control outside the guest.
 
 ## What was checked
 
@@ -42,7 +42,7 @@ The prototype now lives under `Prototypes/RunnerNetwork/`. Disposable macOS and 
 
 Those VM runs used the host resolver, which was a separate path around the destination policy. The prototype now forwards only A lookups to a fixed public resolver through the checked dial, returns AAAA NODATA, and refuses local names and other record types. Controlled packet tests and a public DNS/HTTPS check cover this correction; the VM probes have not been repeated with it. Public DNS remains an Internet data channel, not a way to prevent exfiltration.
 
-The shared Swift relay supervisor is used by both probes and the macOS backend. It validates bounded readiness, owns a lifetime pipe that closes on owner death, and confirms process exit before deleting its socket directory. The signed app bundles the helper. The macOS backend uses a user-private Unix SSH socket instead of host DHCP discovery, checks relay health, and retains cleanup obligations until the relay and VM stop. Recovery sweeps per-runner socket directories under macOS's user-private temporary directory. Linux backend integration, relay resource limits, and updated live VM checks remain separate work.
+The shared Swift relay supervisor is used by both probes and both runner backends. It validates bounded readiness, owns a lifetime pipe that closes on owner death, and confirms process exit before deleting its socket directory. The signed app bundles the helper. The macOS backend uses a user-private Unix SSH socket instead of host DHCP discovery. Linux uses the [pinned Container fork](linux-runner-network.md), creating without boot and verifying the stored relay configuration before any guest command. Both paths check relay health and retain cleanup obligations on shutdown failure. Recovery sweeps per-runner socket directories under macOS's user-private temporary directory. Relay resource limits and updated live VM checks remain separate work.
 
 A working prototype must demonstrate all of the following before yieldd advertises network isolation:
 

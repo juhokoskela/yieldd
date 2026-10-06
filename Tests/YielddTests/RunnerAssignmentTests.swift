@@ -75,7 +75,7 @@ func reservedRunnerReportsFailedListenerOutput(_ replay: ProcessResult) throws {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()), .success(processResult(stdout: exited(true, status: 7))), .success(replay),
     ])
-    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+    let backend = try readyLinuxBackend(executor: executor, containerURL: URL(fileURLWithPath: "/test/container"), id: assignmentID)
     let output = [replay.stdoutText, replay.stderrText]
         .filter { !$0.isEmpty }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
     #expect(throws: RunnerAssignmentError.listenerFailed(7, output: output)) {
@@ -98,7 +98,7 @@ func reservedRunnerPreservesReplayTransportAndCancellationErrors(_ failure: Stri
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()), .success(processResult(stdout: exited(true, status: 7))), .failure(expected),
     ])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+    let backend = try readyLinuxBackend(executor: executor, containerURL: request.executableURL, id: assignmentID)
     do {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
             id: assignmentID, pickupTimeout: 300, executionTimeout: 10

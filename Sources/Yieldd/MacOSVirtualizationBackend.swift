@@ -29,7 +29,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     private let templateURL: URL
     private let clones: MacOSRunnerCloneStore
     private let executor: any ProcessExecuting
-    private let network: any MacOSRunnerNetworking
+    private let network: any RunnerNetworking
     private let requireEntitlement: () throws -> Void
     private let loadStorage: () throws -> RunnerStorage?
     private let makeMachine: (URL, UInt64, URL) throws -> any MacOSVirtualMachineControlling
@@ -48,7 +48,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         templateURL: URL,
         cloneRootURL: URL,
         executor: any ProcessExecuting,
-        network: (any MacOSRunnerNetworking)? = nil,
+        network: (any RunnerNetworking)? = nil,
         checkCancellation: @escaping () throws -> Void = {},
         wait: @escaping (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
         maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil },
@@ -63,7 +63,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         clones = MacOSRunnerCloneStore(rootURL: cloneRootURL.resolvingSymlinksInPath())
         try Self.validateTemplateLocation(self.templateURL, cloneRootURL: clones.rootURL)
         self.executor = executor
-        self.network = try network ?? MacOSRunnerNetwork(stateDirectory: stateDirectory)
+        self.network = try network ?? RunnerNetwork(stateDirectory: stateDirectory)
         self.checkCancellation = checkCancellation
         self.wait = wait
         self.maximumExecutionDeadline = maximumExecutionDeadline

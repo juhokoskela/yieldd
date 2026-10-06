@@ -62,6 +62,7 @@ struct ConnectCommand: ParsableCommand {
                 // macOS recovery removes abandoned clones without requiring the template.
                 try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
                                               token: token, confirmation: confirmation, stop: stop)
+                if confirmation == nil { try RunnerNetworkDirectories(stateDirectory: directory).removeUnleased(keeping: []) }
                 if confirmation != nil {
                     print("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
                     return
@@ -71,13 +72,13 @@ struct ConnectCommand: ParsableCommand {
                 }
                 let storage = try RunnerStorage.required(in: directory)
                 try storage.validate(stateDirectory: directory)
+                try RunnerNetwork.requireRelay()
                 let memory = RunnerMemoryAdmission()
                 for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
                 if let template {
                     try storage.validateMacOS(template: template, clones: storage.clonesURL)
                     try MacOSVirtualizationBackend.validateTemplate(at: template)
                     try VirtualizationEntitlement.requireCurrentProcess()
-                    try MacOSRunnerNetwork.requireRelay()
                 }
                 let backends = try platforms.map { platform -> RunnerSlotBackend in
                     switch platform {
@@ -105,6 +106,7 @@ struct ConnectCommand: ParsableCommand {
                     case let .linux(containerURL):
                         backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
                             stateDirectory: directory,
+                            checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                             dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
                     case let .macOS(templateURL):
                         backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,

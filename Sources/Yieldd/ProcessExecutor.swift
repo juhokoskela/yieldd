@@ -144,6 +144,16 @@ extension ProcessExecutionError: LocalizedError {
 
 protocol ProcessExecuting {
     func execute(_ request: ProcessRequest) throws -> ProcessResult
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult
+}
+
+extension ProcessExecuting {
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
+        try checking()
+        let result = try execute(request)
+        try checking()
+        return result
+    }
 }
 
 struct ProcessExecutor: ProcessExecuting {
@@ -164,6 +174,19 @@ struct ProcessExecutor: ProcessExecuting {
         self.cancellationPollInterval = cancellationPollInterval
         self.checkCancellation = checkCancellation
         self.maximumExecutionDeadline = maximumExecutionDeadline
+    }
+
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
+        try checking()
+        let monitored = ProcessExecutor(
+            terminationGracePeriod: terminationGracePeriod,
+            cancellationPollInterval: cancellationPollInterval,
+            checkCancellation: { try self.checkCancellation?(); try checking() },
+            maximumExecutionDeadline: maximumExecutionDeadline
+        )
+        let result = try monitored.execute(request)
+        try checking()
+        return result
     }
 
     func execute(_ request: ProcessRequest) throws -> ProcessResult {

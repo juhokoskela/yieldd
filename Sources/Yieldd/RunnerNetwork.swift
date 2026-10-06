@@ -12,11 +12,11 @@ protocol RunnerNetworkRelaying: AnyObject {
 
 extension RunnerNetworkRelay: RunnerNetworkRelaying {}
 
-protocol MacOSRunnerNetworking {
+protocol RunnerNetworking {
     func start(for id: RunnerID, checkCancellation: () throws -> Void) throws -> any RunnerNetworkRelaying
 }
 
-struct MacOSRunnerNetwork: MacOSRunnerNetworking {
+struct RunnerNetwork: RunnerNetworking {
     private let executableURL: URL
     private let directories: RunnerNetworkDirectories
 
@@ -31,7 +31,7 @@ struct MacOSRunnerNetwork: MacOSRunnerNetworking {
 
     static func requireRelay(at executableURL: URL = bundledRelayURL) throws {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
-            throw MacOSRunnerNetworkError.missingRelay(executableURL.path)
+            throw RunnerNetworkError.missingRelay(executableURL.path)
         }
     }
 
@@ -126,13 +126,13 @@ struct RunnerNetworkDirectories {
     }
 }
 
-enum MacOSRunnerNetworkError: Error, LocalizedError {
+enum RunnerNetworkError: Error, LocalizedError {
     case missingRelay(String)
 
     var errorDescription: String? {
         switch self {
         case let .missingRelay(path):
-            "The macOS runner network relay is missing at \(path). Build and use yieldd.app with Scripts/build-local-app.sh."
+            "The runner network relay is missing at \(path). Build and use yieldd.app with Scripts/build-local-app.sh."
         }
     }
 }

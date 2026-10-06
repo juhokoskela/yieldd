@@ -12,6 +12,7 @@ struct AppleContainerSystem {
     func start() throws {
         let storage = try (loadStorage ?? { try RunnerStorage.validated(in: stateDirectory, executor: executor) })()
         try storage.validatePath(storage.containerURL)
+        try AppleContainerBackend.requireNetworkSupport(containerURL: containerURL, executor: executor)
         let request = ProcessRequest(
             executableURL: containerURL,
             arguments: [

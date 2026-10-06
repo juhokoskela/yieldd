@@ -8,11 +8,9 @@ private let runnerID = RunnerID(value: "yieldd-test-123")
 
 @Test
 func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
-    let executor = RecordingProcessExecutor(outcomes: Array(
-        repeating: .success(processResult()),
-        count: 3
-    ))
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult()), .success(linuxInspection(id: runnerID)),
+                                                     .success(processResult()), .success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     try backend.create(id: runnerID, memory: .full)
 
@@ -22,6 +20,8 @@ func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
             arguments: [
                 "machine", "create",
                 "--name", runnerID.value,
+                "--no-boot",
+                "--network-socket", "/private/test-relay/n",
                 "--home-mount", "none",
                 "--cpus", "4",
                 "--memory", "12G",
@@ -29,6 +29,8 @@ func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
             ],
             timeout: AppleContainerBackend.creationTimeout
         ),
+        ProcessRequest(executableURL: containerURL, arguments: ["machine", "inspect", runnerID.value],
+                       timeout: 10, outputCapture: .tail(maxBytes: 64 * 1_024)),
         ProcessRequest(
             executableURL: containerURL,
             arguments: [
@@ -59,7 +61,7 @@ func createBuildsMachineWaitsForDockerAndConfiguresMemory() throws {
 @Test
 func constructsExecCommandWithoutInterpretingArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "ok"))])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = try readyLinuxBackend(executor: executor, containerURL: containerURL, id: runnerID)
     let arguments = ["printf", "%s", "value with spaces; $(whoami)"]
 
     try backend.exec(arguments, on: runnerID)
@@ -78,11 +80,9 @@ func constructsExecCommandWithoutInterpretingArguments() throws {
 
 @Test
 func createAppliesConstrainedMemoryAllocation() throws {
-    let executor = RecordingProcessExecutor(outcomes: Array(
-        repeating: .success(processResult()),
-        count: 3
-    ))
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult()), .success(linuxInspection(id: runnerID)),
+                                                     .success(processResult()), .success(processResult())])
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     try backend.create(id: runnerID, memory: .constrained)
 
@@ -95,6 +95,7 @@ func createAppliesConstrainedMemoryAllocation() throws {
 func createRetriesDockerReadinessBeforeApplyingMemory() throws {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()),
+        .success(linuxInspection(id: runnerID)),
         .failure(TestFailure.dockerInfo),
         .success(processResult()),
         .success(processResult()),
@@ -102,7 +103,7 @@ func createRetriesDockerReadinessBeforeApplyingMemory() throws {
     var waits: [TimeInterval] = []
     let backend = AppleContainerBackend(
         containerURL: containerURL,
-        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil },
+        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork(),
         dockerReadiness: DockerReadiness(
             attempts: 2,
             retryDelay: 0.25,
@@ -125,12 +126,13 @@ func createRetriesDockerReadinessBeforeApplyingMemory() throws {
 func createReportsFinalDockerReadinessFailureWithoutConfiguringMemory() {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()),
+        .success(linuxInspection(id: runnerID)),
         .failure(TestFailure.dockerInfo),
         .failure(TestFailure.cleanup),
     ])
     let backend = AppleContainerBackend(
         containerURL: containerURL,
-        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil },
+        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork(),
         dockerReadiness: DockerReadiness(
             attempts: 2,
             retryDelay: 0,
@@ -157,6 +159,7 @@ func createDoesNotRetryDockerLaunchFailure() {
     )
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()),
+        .success(linuxInspection(id: runnerID)),
         .failure(ProcessExecutionError.launchFailed(
             request: request,
             underlying: TestFailure.dockerInfo
@@ -165,7 +168,7 @@ func createDoesNotRetryDockerLaunchFailure() {
     var waits: [TimeInterval] = []
     let backend = AppleContainerBackend(
         containerURL: containerURL,
-        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil },
+        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork(),
         dockerReadiness: DockerReadiness(wait: { waits.append($0) })
     )
 
@@ -179,19 +182,20 @@ func createDoesNotRetryDockerLaunchFailure() {
     }
 
     #expect(waits.isEmpty)
-    #expect(executor.requests.count == 2)
+    #expect(executor.requests.count == 3)
 }
 
 @Test
 func cancellationDuringDockerReadinessStopsRetries() {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()),
+        .success(linuxInspection(id: runnerID)),
         .failure(TestFailure.dockerInfo),
     ])
     var cancellationChecks = 0
     let backend = AppleContainerBackend(
         containerURL: containerURL,
-        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil },
+        executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork(),
         dockerReadiness: DockerReadiness(
             wait: { _ in Issue.record("Cancelled readiness must not wait") },
             checkCancellation: {
@@ -206,7 +210,7 @@ func cancellationDuringDockerReadinessStopsRetries() {
     #expect(throws: SignalInterruption(signal: SIGINT)) {
         try backend.create(id: runnerID, memory: .full)
     }
-    #expect(executor.requests.count == 2)
+    #expect(executor.requests.count == 3)
 }
 
 @Test
@@ -247,7 +251,7 @@ func stopRunnerRejectsMissingStorageConfiguration() throws {
 @Test
 func stopRunnerUsesBoundedNoncancellableRootCommand() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     try backend.stopRunner(on: runnerID)
 
@@ -269,7 +273,7 @@ func stopRunnerUsesBoundedNoncancellableRootCommand() throws {
 @Test
 func guestCommandsDefaultToBoundedOutput() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = try readyLinuxBackend(executor: executor, containerURL: containerURL, id: runnerID)
     try backend.exec(["yieldd-configure-runner", "--jit"], on: runnerID)
     #expect(executor.requests.first?.outputCapture == .tail(maxBytes: 64 * 1_024))
 }
@@ -277,7 +281,7 @@ func guestCommandsDefaultToBoundedOutput() throws {
 @Test
 func rejectsEmptyGuestCommand() {
     let executor = RecordingProcessExecutor(outcomes: [])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     #expect(throws: RunnerBackendError.emptyCommand) {
         try backend.exec([], on: runnerID)
@@ -289,7 +293,7 @@ func rejectsEmptyGuestCommand() {
 func passesStandardInputWithoutPuttingItInArguments() throws {
     let standardInput = Data("registration-token".utf8)
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = try readyLinuxBackend(executor: executor, containerURL: containerURL, id: runnerID)
 
     try backend.exec(
         ["yieldd-configure-runner", "owner/repository", runnerID.value],
@@ -316,7 +320,7 @@ func passesStandardInputWithoutPuttingItInArguments() throws {
 @Test
 func passesTimeoutWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = try readyLinuxBackend(executor: executor, containerURL: containerURL, id: runnerID)
 
     try backend.exec(
         ["/opt/actions-runner/run.sh"],
@@ -341,7 +345,7 @@ func passesTimeoutWithoutPuttingItInArguments() throws {
 @Test
 func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = try readyLinuxBackend(executor: executor, containerURL: containerURL, id: runnerID)
 
     try backend.exec(
         ["yieldd-runner-control", "run"],
@@ -369,7 +373,7 @@ func destroyReturnsWhenMachineIsAbsent() throws {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult(stdout: "another-machine\n")),
     ])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     try backend.destroy(runnerID)
 
@@ -386,7 +390,7 @@ func destroyDeletesOnlyAnExactMachineID() throws {
         .success(processResult(stdout: "prefix-\(runnerID.value)\n\(runnerID.value)\n")),
         .success(processResult()),
     ])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     try backend.destroy(runnerID)
 
@@ -405,7 +409,7 @@ func destroyAcceptsDeleteFailureWhenMachineIsConfirmedAbsent() throws {
         .failure(TestFailure.machineCleanup),
         .success(processResult(stdout: "another-machine\n")),
     ])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     try backend.destroy(runnerID)
 
@@ -423,7 +427,7 @@ func destroyPreservesDeleteFailureWhenMachineStillExists() {
         .failure(TestFailure.machineCleanup),
         .success(processResult(stdout: "\(runnerID.value)\n")),
     ])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     #expect(throws: TestFailure.machineCleanup) {
         try backend.destroy(runnerID)
@@ -438,7 +442,7 @@ func destroyPreservesDeleteFailureWhenReconciliationFails() {
         .failure(TestFailure.machineCleanup),
         .failure(TestFailure.unexpectedProcessRequest),
     ])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     #expect(throws: TestFailure.machineCleanup) {
         try backend.destroy(runnerID)
@@ -450,7 +454,7 @@ func destroyPreservesDeleteFailureWhenReconciliationFails() {
 func backendPreservesProcessFailureResult() {
     let failure = processResult(stdout: "partial", stderr: "failed", status: 7)
     let executor = RecordingProcessExecutor(outcomes: [.success(failure)])
-    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil })
+    let backend = AppleContainerBackend(containerURL: containerURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: LinuxTestNetwork())
 
     do {
         try backend.create(id: runnerID, memory: .full)
