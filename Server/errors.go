@@ -67,27 +67,35 @@ type sdkError struct {
 }
 
 func (e *sdkError) Error() string {
-	kind := "unclassified error"
+	return fmt.Sprintf("Scale Set API %s failed: %s (response details withheld)", e.operation, failureKind(e.cause))
+}
+
+func failureKind(err error) string {
 	var syntax *json.SyntaxError
 	var shape *json.UnmarshalTypeError
 	var network net.Error
-	switch {
-	case errors.Is(e.cause, context.Canceled):
-		kind = "request canceled"
-	case errors.Is(e.cause, context.DeadlineExceeded):
-		kind = "request deadline exceeded"
-	case errors.Is(e.cause, io.EOF):
-		kind = "empty or incomplete response"
-	case errors.Is(e.cause, io.ErrUnexpectedEOF), errors.As(e.cause, &syntax), errors.As(e.cause, &shape):
-		kind = "invalid response JSON"
-	case errors.As(e.cause, &network):
-		if network.Timeout() {
-			kind = "network timeout"
-		} else {
-			kind = "network failure"
-		}
+	if errors.Is(err, context.Canceled) {
+		return "request canceled"
 	}
-	return fmt.Sprintf("Scale Set API %s failed: %s (response details withheld)", e.operation, kind)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timed out"
+	}
+	if errors.As(err, &network) {
+		if network.Timeout() {
+			return "request timed out"
+		}
+		return "request did not complete"
+	}
+	if errors.Is(err, io.EOF) {
+		return "empty response"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "incomplete response"
+	}
+	if errors.As(err, &syntax) || errors.As(err, &shape) {
+		return "invalid response"
+	}
+	return "unclassified error"
 }
 func (e *sdkError) Unwrap() error { return e.cause }
 

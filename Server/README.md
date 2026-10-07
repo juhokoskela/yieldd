@@ -131,8 +131,6 @@ bash test-image.sh
 
 ## Lifecycle and recovery
 
-Startup errors identify the repository and platform. Scale Set API diagnostics report cancellation, deadlines, network failures, and invalid or empty responses without printing SDK response bodies. HTTP warnings include the status and saved scale-set ID. An HTTP 200 with an empty response does not prove the saved set is missing; preserve its journal, check GitHub's scale-set identity, and resolve outstanding assignments before resetting an ID. The coordinator never replaces a saved identity automatically.
-
 The service records intent before registration and dispatch. It uploads an encrypted, uniquely named GitHub secret, then clears the local JIT value and records dispatch intent in one write. Dispatch inputs contain only the runner name and fallback labels. The request enables [`return_run_details`](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event), and the service persists the returned run ID. Title-based discovery is reserved for lost responses or a crash before that ID was saved. It never redispatches an uncertain request.
 
 SIGINT, SIGTERM, and SIGHUP stop the coordinator without canceling a running bootstrap. Restart with the same arguments and state directory to resume reconciliation. GitHub continues receiving the workload's logs and result independently of the coordinator.
@@ -150,6 +148,8 @@ An API or bootstrap failure pauses new work in the affected repository/platform 
 If a recorded workflow returns 404, the coordinator first verifies Actions access with a successful workflow-run listing, because 404 can also mask lost repository access. Cleanup also requires the registration API to independently confirm that its runner is absent. The coordinator retains an unknown conclusion rather than claiming success. If the runner still exists, restore workflow access or verify termination and remove that registration before retrying recovery. A missing workflow alone does not prove that execution stopped.
 
 If dispatch fails before the HTTP transport consumes any payload bytes, the coordinator closes the body against late reads and persists cleanup intent. Once the transport has consumed any bytes, a cancellation or connection error remains ambiguous, even if delivery may have failed. It never treats a context error alone as evidence that dispatch did not happen.
+
+Startup errors name the repository and platform. Scale Set API errors state a category but never include SDK response bodies. The SDK does not expose every HTTP failure as a distinct category. An empty HTTP 200 for a saved scale set does not prove the set is gone; the coordinator stops rather than replace a saved identity.
 
 A secret-deletion 404 does not clear the lease by itself. Cleanup verifies that the named secret is absent and that the Secrets API remains accessible. Lost access or inconsistent responses retain the cleanup obligation.
 

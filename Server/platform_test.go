@@ -9,40 +9,45 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
+	"github.com/golang-jwt/jwt/v4"
 )
 
-func TestSDKLookupDiagnosticsWithRealClient(t *testing.T) {
-	for _, status := range []int{200, 403, 500} {
+func TestSDKLookupAndTransientFailuresAfterTokenRefresh(t *testing.T) {
+	for _, status := range []int{200, 403, 429, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			var logs bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&logs, nil)).With("repository", "owner/repo", "platform", "macos", "scale_set", 2)
+			token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			}).SignedString([]byte("test-only"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var requests []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.Method+" "+r.URL.Path)
 				switch r.URL.Path {
-				case "/repos/owner/repo/actions/runners/registration-token":
+				case "/api/v3/repos/owner/repo/actions/runners/registration-token":
 					w.WriteHeader(201)
 					io.WriteString(w, `{"token":"private-registration-token"}`)
-				case "/actions/runner-registration":
-					fmt.Fprintf(w, `{"url":"http://%s","token":"private-admin-token"}`, r.Host)
-				default:
+				case "/api/v3/actions/runner-registration":
+					fmt.Fprintf(w, `{"url":"http://%s/","token":%q}`, r.Host, token)
+				case "/_apis/runtime/runnerscalesets/2":
 					w.WriteHeader(status)
 					if status != 200 {
-						io.WriteString(w, "private-jit secret-token")
+						io.WriteString(w, `{"message":"private-jit secret-token"}`)
 					}
+				default:
+					t.Error("unexpected request", r.Method, r.URL.Path)
+					w.WriteHeader(400)
 				}
 			}))
 			defer server.Close()
-			retry := retryablehttp.NewClient()
-			retry.RetryMax = 0
-			retry.ResponseLogHook = scaleSetResponseDiagnostics(logger)
-			client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
-				GitHubConfigURL: server.URL + "/owner/repo", PersonalAccessToken: "private-pat",
-			}, scaleset.WithRetryableHTTPClint(retry))
+			client, err := newScaleSetClient(server.URL+"/owner/repo", "private-pat")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,18 +55,21 @@ func TestSDKLookupDiagnosticsWithRealClient(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected lookup failure")
 			}
-			for _, want := range []string{"repository=owner/repo", "platform=macos", "scale_set=2", fmt.Sprintf("http_status=%d", status)} {
-				if !strings.Contains(logs.String(), want) {
-					t.Fatal("missing diagnostic", want, logs.String())
-				}
+			want := []string{"POST /api/v3/repos/owner/repo/actions/runners/registration-token", "POST /api/v3/actions/runner-registration", "GET /_apis/runtime/runnerscalesets/2"}
+			if !slices.Equal(requests, want) {
+				t.Fatalf("requests = %v, want %v", requests, want)
 			}
 			if !strings.Contains(err.Error(), "saved scale set 2") {
 				t.Fatal("missing saved identity", err)
 			}
-			for _, output := range []string{logs.String(), err.Error()} {
-				if strings.Contains(output, "private-") || strings.Contains(output, "secret-token") {
-					t.Fatal("credential leaked")
-				}
+			if strings.Contains(err.Error(), "private-") || strings.Contains(err.Error(), "secret-token") {
+				t.Fatal("credential leaked")
+			}
+			if transientFailure(err) != (status == 200 || status == 429 || status == 503) {
+				t.Fatal("incorrect cleanup retry classification", status, err)
+			}
+			if status == 200 && err.Error() != "Scale Set API get saved scale set 2 failed: empty response (response details withheld)" {
+				t.Fatal("incorrect empty-response diagnostic", err)
 			}
 		})
 	}
@@ -71,7 +79,7 @@ func TestQueueStartupFailureIdentifiesRepositoryAndPlatform(t *testing.T) {
 	cfg := testConfig
 	cfg.Platform = "macos"
 	_, err := openPlatformCoordinator(t.Context(), cfg, "relative-state", "test-only", false)
-	if err == nil || !strings.Contains(err.Error(), "repository "+cfg.Repository+" platform macos") {
+	if err == nil || err.Error() != "repository "+cfg.Repository+" platform macos: state directory must be absolute" {
 		t.Fatal("missing queue identity", err)
 	}
 }

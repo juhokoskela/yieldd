@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"strings"
+	"reflect"
 	"testing"
 )
 
@@ -18,17 +18,20 @@ func TestSDKDiagnosticPreservesIdentityWithoutErrorText(t *testing.T) {
 		kind string
 	}{
 		{"canceled", context.Canceled, "request canceled"},
-		{"deadline", context.DeadlineExceeded, "request deadline exceeded"},
-		{"empty", io.EOF, "empty or incomplete response"},
-		{"truncated", io.ErrUnexpectedEOF, "invalid response JSON"},
-		{"json", &json.SyntaxError{Offset: 7}, "invalid response JSON"},
-		{"network", &url.Error{Op: "GET", URL: "https://private-token", Err: io.ErrClosedPipe}, "network failure"},
+		{"deadline", context.DeadlineExceeded, "request timed out"},
+		{"empty", io.EOF, "empty response"},
+		{"truncated", io.ErrUnexpectedEOF, "incomplete response"},
+		{"json", &json.SyntaxError{Offset: 7}, "invalid response"},
+		{"shape", &json.UnmarshalTypeError{Value: "private-jit", Type: reflect.TypeFor[int]()}, "invalid response"},
+		{"network", &url.Error{Op: "GET", URL: "https://private-token", Err: io.ErrClosedPipe}, "request did not complete"},
+		{"network-eof", &url.Error{Op: "GET", URL: "https://private-token", Err: io.EOF}, "request did not complete"},
+		{"network-deadline", &url.Error{Op: "GET", URL: "https://private-token", Err: context.DeadlineExceeded}, "request timed out"},
 		{"unknown", errors.New("private-jit secret-token"), "unclassified error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cause := fmt.Errorf("private-jit secret-token: %w", tc.err)
 			err := &sdkError{"find scale set", cause}
-			if !strings.Contains(err.Error(), tc.kind) || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "secret-token") {
+			if err.Error() != "Scale Set API find scale set failed: "+tc.kind+" (response details withheld)" {
 				t.Fatal("unsafe or incomplete diagnostic", err)
 			}
 			if !errors.Is(err, tc.err) {
