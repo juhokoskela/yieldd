@@ -62,14 +62,11 @@ struct ConnectCommand: ParsableCommand {
                 // macOS recovery removes abandoned clones without requiring the template.
                 try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
                                               token: token, confirmation: confirmation, stop: stop)
-                if confirmation == nil { try RunnerNetworkDirectories(stateDirectory: directory).removeUnleased(keeping: []) }
                 if confirmation != nil {
                     print("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
                     return
                 }
-                if template != nil {
-                    try removeUnleasedMacOSClones(in: directory, keeping: [], checkCancellation: stop.check)
-                }
+                try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
                 let storage = try RunnerStorage.required(in: directory)
                 try storage.validate(stateDirectory: directory)
                 try RunnerNetwork.requireRelay()
@@ -84,6 +81,7 @@ struct ConnectCommand: ParsableCommand {
                     switch platform {
                     case .linux:
                         let container = try ExecutableLocator().locate("container")
+                        try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check))
                         try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check), stateDirectory: directory).start()
                         try storage.validateContainer(containerExecutable: container)
                         return .linux(containerURL: container)
@@ -104,7 +102,7 @@ struct ConnectCommand: ParsableCommand {
                     let backend: any RunnerBackend
                     switch worker.backend {
                     case let .linux(containerURL):
-                        backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
+                        backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
                             stateDirectory: directory,
                             checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                             dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))

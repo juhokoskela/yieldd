@@ -27,8 +27,11 @@ struct RunnerMachineOptions: ParsableArguments {
                 wait: wait
             )
         }
-        return AppleContainerBackend(
-            containerURL: try ExecutableLocator().locate("container"),
+        let container = try ExecutableLocator().locate("container")
+        try RunnerNetwork.requireRelay()
+        try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: executor)
+        return try AppleContainerBackend(
+            containerURL: container,
             executor: executor,
             stateDirectory: leaseStore.directory,
             checkCancellation: checkCancellation,

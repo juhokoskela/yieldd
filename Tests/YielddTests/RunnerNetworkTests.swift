@@ -183,7 +183,7 @@ func runnerNetworkOrphansAreRemovedEvenWhenCloneStorageIsMissing() throws {
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
     let orphan = try store.create(for: RunnerID(value: "yieldd-network-orphan"))
     #expect(throws: RunnerSessionError.self) {
-        try removeUnleasedMacOSClones(in: fixture.rootURL, keeping: [])
+        try removeUnleasedRunnerFiles(in: fixture.rootURL, keeping: [])
     }
     #expect(!FileManager.default.fileExists(atPath: orphan.path))
 }

@@ -72,10 +72,10 @@ func reservedRunnerDoesNotReportSuccessWhenNoJobRan() throws {
     processResult(status: 7),
 ])
 func reservedRunnerReportsFailedListenerOutput(_ replay: ProcessResult) throws {
-    let executor = RecordingProcessExecutor(outcomes: [
+    let outcomes: [Result<ProcessResult, any Error>] = [
         .success(processResult()), .success(processResult(stdout: exited(true, status: 7))), .success(replay),
-    ])
-    let backend = try readyLinuxBackend(executor: executor, containerURL: URL(fileURLWithPath: "/test/container"), id: assignmentID)
+    ]
+    let (backend, _) = try readyLinuxBackend(outcomes: outcomes, containerURL: URL(fileURLWithPath: "/test/container"), id: assignmentID)
     let output = [replay.stdoutText, replay.stderrText]
         .filter { !$0.isEmpty }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
     #expect(throws: RunnerAssignmentError.listenerFailed(7, output: output)) {
@@ -95,10 +95,10 @@ func reservedRunnerPreservesReplayTransportAndCancellationErrors(_ failure: Stri
     case "signal": .terminatedBySignal(request: request, result: result)
     default: .nonZeroExit(request: request, result: result)
     }
-    let executor = RecordingProcessExecutor(outcomes: [
+    let outcomes: [Result<ProcessResult, any Error>] = [
         .success(processResult()), .success(processResult(stdout: exited(true, status: 7))), .failure(expected),
-    ])
-    let backend = try readyLinuxBackend(executor: executor, containerURL: request.executableURL, id: assignmentID)
+    ]
+    let (backend, _) = try readyLinuxBackend(outcomes: outcomes, containerURL: request.executableURL, id: assignmentID)
     do {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
             id: assignmentID, pickupTimeout: 300, executionTimeout: 10

@@ -6,6 +6,8 @@ final class AppleContainerBackend: RunnerBackend {
     static let memoryConfigurationTimeout: TimeInterval = 30
     static let cleanupTimeout: TimeInterval = 90
     static let runnerStopTimeout: TimeInterval = 30
+    static let inspectionTimeout: TimeInterval = 10
+    static let preflightTimeout: TimeInterval = 5
     static let virtualCPUs = 4
     static let memoryGibibytes: UInt64 = 12
     static let memoryBytes = memoryGibibytes * 1_024 * 1_024 * 1_024
@@ -17,11 +19,15 @@ final class AppleContainerBackend: RunnerBackend {
     let dockerReadiness: DockerReadiness
     private let loadStorage: () throws -> RunnerStorage?
     private let stateDirectory: URL
-    private let network: (any RunnerNetworking)?
+    private let network: any RunnerNetworking
     private let checkCancellation: () throws -> Void
     private let maximumExecutionDeadline: () -> DispatchTime?
     private let lock = NSLock()
-    private var relays: [RunnerID: any RunnerNetworkRelaying] = [:]
+    private struct Guest {
+        let relay: any RunnerNetworkRelaying
+        var booted = false
+    }
+    private var guests: [RunnerID: Guest] = [:]
 
     init(
         containerURL: URL,
@@ -32,12 +38,12 @@ final class AppleContainerBackend: RunnerBackend {
         checkCancellation: @escaping () throws -> Void = {},
         maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil },
         dockerReadiness: DockerReadiness = DockerReadiness()
-    ) {
+    ) throws {
         self.containerURL = containerURL
         self.executor = executor
         self.dockerReadiness = dockerReadiness
         self.stateDirectory = stateDirectory
-        self.network = network
+        self.network = try network ?? RunnerNetwork(stateDirectory: stateDirectory)
         self.checkCancellation = checkCancellation
         self.maximumExecutionDeadline = maximumExecutionDeadline
         self.loadStorage = loadStorage ?? {
@@ -49,10 +55,6 @@ final class AppleContainerBackend: RunnerBackend {
 
     func prepare() throws {
         _ = try loadStorage()
-        if network == nil {
-            try RunnerNetwork.requireRelay()
-            try Self.requireNetworkSupport(containerURL: containerURL, executor: executor)
-        }
     }
 
     func create(id: RunnerID, memory allocation: RunnerMemoryAllocation) throws {
@@ -63,11 +65,10 @@ final class AppleContainerBackend: RunnerBackend {
         try lock.withLock {
             try checkCancellation()
             try prepare()
-            guard relays[id] == nil else { throw POSIXError(.EEXIST) }
+            guard guests[id] == nil else { throw POSIXError(.EEXIST) }
             try recordIntent()
-            let provider = try network ?? RunnerNetwork(stateDirectory: stateDirectory)
-            let relay = try provider.start(for: id, checkCancellation: checkCancellation)
-            relays[id] = relay
+            let relay = try network.start(for: id, checkCancellation: checkCancellation)
+            guests[id] = Guest(relay: relay)
             _ = try run([
                 "machine", "create",
                 "--name", id.value,
@@ -78,9 +79,11 @@ final class AppleContainerBackend: RunnerBackend {
                 "--memory", Self.memoryArgument,
                 Self.image,
             ], timeout: Self.creationTimeout, checking: relay.check)
-            let result = try run(["machine", "inspect", id.value], timeout: 10,
+            let result = try run(["machine", "inspect", id.value], timeout: Self.inspectionTimeout,
                                  outputCapture: .tail(maxBytes: 64 * 1_024), checking: relay.check)
             try Self.requireRelayConfiguration(result.stdout, id: id, socket: relay.socketURL)
+            _ = try run(["machine", "boot", id.value], timeout: Self.creationTimeout, checking: relay.check)
+            guests[id]?.booted = true
         }
         try dockerReadiness.wait {
             _ = try exec(
@@ -121,8 +124,8 @@ final class AppleContainerBackend: RunnerBackend {
         containerArguments.append("--")
         containerArguments.append(contentsOf: arguments)
         let relay = try lock.withLock {
-            guard let relay = relays[id] else { throw AppleContainerNetworkError.notReady(id) }
-            return relay
+            guard let guest = guests[id], guest.booted else { throw AppleContainerBackendError.notReady(id) }
+            return guest.relay
         }
         return try run(
             containerArguments,
@@ -136,17 +139,17 @@ final class AppleContainerBackend: RunnerBackend {
     func destroy(_ id: RunnerID) throws {
         try lock.withLock {
             var failures: [RunnerSessionCleanupFailure] = []
-            if let relay = relays[id] {
-                do { try relay.stop(deadline: maximumExecutionDeadline()) }
+            if let guest = guests[id] {
+                do { try guest.relay.stop(deadline: maximumExecutionDeadline()) }
                 catch { failures.append(.init(step: .network, error: error)) }
             }
             do { try deleteMachine(id, storage: loadStorage()) }
             catch { failures.append(.init(step: .machine, error: error)) }
-            if failures.count == 1 { throw failures[0].error }
+            if failures.count == 1 && failures[0].step == .machine { throw failures[0].error }
             guard failures.isEmpty else { throw RunnerSessionError.cleanupFailed(failures) }
             // After an owner crash there is no relay object, only its socket directory.
             try RunnerNetworkDirectories(stateDirectory: stateDirectory).remove(id)
-            relays.removeValue(forKey: id)
+            guests.removeValue(forKey: id)
         }
     }
 
@@ -172,25 +175,33 @@ final class AppleContainerBackend: RunnerBackend {
     }
 
     static func requireRelayConfiguration(_ data: Data, id: RunnerID, socket: URL) throws {
-        struct Machine: Decodable {
+        struct Machine: Decodable, Equatable {
             let id: String
             let homeMount: String
-            let networkSocket: String
+            let networkSocket: String?
         }
-        guard let machines = try? JSONDecoder().decode([Machine].self, from: data), machines.count == 1,
-              machines[0].id == id.value, machines[0].homeMount == "none", machines[0].networkSocket == socket.path else {
-            throw AppleContainerNetworkError.unsupportedConfiguration
+        let machines: [Machine]
+        do { machines = try JSONDecoder().decode([Machine].self, from: data) }
+        catch { throw AppleContainerBackendError.invalidInspection }
+        guard machines == [Machine(id: id.value, homeMount: "none", networkSocket: socket.path)] else {
+            throw AppleContainerBackendError.unsupportedConfiguration
         }
     }
 
     static func requireNetworkSupport(containerURL: URL, executor: any ProcessExecuting) throws {
         let request = ProcessRequest(executableURL: containerURL, arguments: ["machine", "create", "--help"],
-                                     timeout: 5, outputCapture: .tail(maxBytes: 64 * 1_024))
+                                     timeout: Self.preflightTimeout, outputCapture: .tail(maxBytes: 64 * 1_024))
         let result = try executor.execute(request).requireSuccess(for: request)
-        guard result.stdoutText.contains("--network-socket") else { throw AppleContainerNetworkError.unsupportedCLI }
+        guard result.stdoutText.contains("--network-socket") else { throw AppleContainerBackendError.unsupportedCLI }
+        let boot = ProcessRequest(executableURL: containerURL, arguments: ["machine", "boot", "--help"],
+                                  timeout: Self.preflightTimeout, outputCapture: .tail(maxBytes: 64 * 1_024))
+        try executor.execute(boot).requireSuccess(for: boot)
     }
 
     func stopRunner(on id: RunnerID) throws {
+        // Recovery must not boot an abandoned guest, including after a rollback
+        // to stock Container, which would discard its isolated network setting.
+        guard lock.withLock({ guests[id]?.booted == true }) else { return }
         _ = try loadStorage()
         _ = try run(
             [
@@ -212,7 +223,7 @@ final class AppleContainerBackend: RunnerBackend {
         timeout: TimeInterval? = nil,
         outputCapture: ProcessOutputCapture = .all,
         cancellable: Bool = true,
-        checking: (() throws -> Void)? = nil
+        checking: @escaping () throws -> Void = {}
     ) throws -> ProcessResult {
         let request = ProcessRequest(
             executableURL: containerURL,
@@ -222,9 +233,7 @@ final class AppleContainerBackend: RunnerBackend {
             outputCapture: outputCapture,
             cancellable: cancellable
         )
-        let result: ProcessResult
-        if let checking { result = try executor.execute(request, checking: checking) }
-        else { result = try executor.execute(request) }
+        let result = try executor.execute(request, checking: checking)
         return try result.requireSuccess(for: request)
     }
 
@@ -238,10 +247,11 @@ final class AppleContainerBackend: RunnerBackend {
     }
 }
 
-enum AppleContainerNetworkError: Error, LocalizedError {
+enum AppleContainerBackendError: Error, LocalizedError, Equatable {
     case notReady(RunnerID)
     case unsupportedCLI
     case unsupportedConfiguration
+    case invalidInspection
 
     var errorDescription: String? {
         switch self {
@@ -250,6 +260,8 @@ enum AppleContainerNetworkError: Error, LocalizedError {
             "This Container executable does not support isolated runner networking. Build and install the pinned fork with Scripts/build-runner-container.sh, then restart Container before starting yieldd."
         case .unsupportedConfiguration:
             "Apple Container did not retain the isolated relay configuration. Build and install the pinned fork with Scripts/build-runner-container.sh, restart Container, and retry. The guest was not booted."
+        case .invalidInspection:
+            "Apple Container returned an invalid machine inspection. The guest was not booted."
         }
     }
 }

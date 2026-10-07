@@ -57,6 +57,12 @@ struct Doctor {
         } else {
             checks.append(contentsOf: containerChecks())
         }
+        do {
+            try RunnerNetwork.requireRelay(at: relayURL)
+            checks.append(DoctorCheck(name: "network relay", status: .passed("available")))
+        } catch {
+            checks.append(DoctorCheck(name: "network relay", status: .failed(describeError(error))))
+        }
         checks.append(contentsOf: githubChecks())
         do {
             if let storage = try loadStorage() {
@@ -77,7 +83,6 @@ struct Doctor {
         let checks: [(String, () throws -> Void)] = [
             ("macOS virtualization", { try MacOSVirtualMachineLifecycle.requireSupportedHost() }),
             ("Virtualization entitlement", { try VirtualizationEntitlement.requireCurrentProcess() }),
-            ("macOS network relay", { try RunnerNetwork.requireRelay(at: relayURL) }),
             ("macOS template", {
                 try validateRunnerServiceTemplate(
                     templateURL, stateDirectory: stateDirectory
@@ -143,7 +148,6 @@ struct Doctor {
             arguments: ["machine", "list", "--quiet"]
         )
         do {
-            try RunnerNetwork.requireRelay(at: relayURL)
             try AppleContainerBackend.requireNetworkSupport(containerURL: containerURL, executor: executor)
             try executor.execute(machineRequest).requireSuccess(for: machineRequest)
             checks.append(DoctorCheck(name: "container machine", status: .passed("available")))

@@ -81,7 +81,7 @@ func machineTestPreflightFailurePreservesErrorAndReleasesMemory(
 ) throws {
     let executor = RecordingProcessExecutor(outcomes: [])
     var storageChecks = 0
-    let backend = AppleContainerBackend(
+    let backend = try AppleContainerBackend(
         containerURL: URL(fileURLWithPath: "/test/container"), executor: executor,
         stateDirectory: unconfiguredContainerStateDirectory,
         loadStorage: {

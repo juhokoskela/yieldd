@@ -171,7 +171,7 @@ func makeRunnerSession(
     let backend: any RunnerBackend
     switch slotBackend {
     case let .linux(containerURL):
-        backend = AppleContainerBackend(
+        backend = try AppleContainerBackend(
             containerURL: containerURL,
             executor: executor,
             stateDirectory: leaseStore.directory,
@@ -215,7 +215,7 @@ func makeRunnerRecovery(
 ) -> RunnerRecovery {
     return RunnerRecovery(
         linuxBackend: {
-            AppleContainerBackend(containerURL: try resolveContainer(), executor: executor, stateDirectory: leaseStore.directory)
+            try AppleContainerBackend(containerURL: try resolveContainer(), executor: executor, stateDirectory: leaseStore.directory)
         },
         github: GitHubRunnerClient(ghURL: ghURL, executor: executor),
         leaseStore: leaseStore,

@@ -49,12 +49,12 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
     let replay = try ProcessExecutor().execute(fixture.request("control", ["run"]))
     #expect(replay.terminationStatus == 7)
     #expect(replay.stdoutText == "listener output\n")
-    let executor = RecordingProcessExecutor(outcomes: [
+    let outcomes: [Result<ProcessResult, any Error>] = [
         .success(processResult()),
         .success(try ProcessExecutor().execute(status)),
         .success(replay),
-    ])
-    let backend = try readyLinuxBackend(executor: executor, containerURL: URL(fileURLWithPath: "/test/container"), id: RunnerID(value: "yieldd-test"))
+    ]
+    let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: URL(fileURLWithPath: "/test/container"), id: RunnerID(value: "yieldd-test"))
     do {
         try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in
             Issue.record("The listener has already completed")

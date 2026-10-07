@@ -33,7 +33,7 @@ struct RunnerRecovery {
         )] = []
         var recoveryFailures: [RunnerSessionCleanupFailure] = []
         do {
-            try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: Set(leases.map(\.runnerID)),
+            try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: Set(leases.map(\.runnerID)),
                                          checkCancellation: checkCancellation, makeCloneStore: makeCloneStore)
         } catch {
             if isCancellation(error) { throw error }

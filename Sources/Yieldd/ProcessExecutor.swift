@@ -150,16 +150,14 @@ protocol ProcessExecuting {
 extension ProcessExecuting {
     func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
         try checking()
-        let result = try execute(request)
-        try checking()
-        return result
+        return try execute(request)
     }
 }
 
 struct ProcessExecutor: ProcessExecuting {
     private let terminationGracePeriod: TimeInterval
     private let cancellationPollInterval: TimeInterval
-    private let checkCancellation: (() throws -> Void)?
+    private var checkCancellation: (() throws -> Void)?
     private let maximumExecutionDeadline: (@Sendable () -> DispatchTime?)?
 
     init(
@@ -178,15 +176,18 @@ struct ProcessExecutor: ProcessExecuting {
 
     func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
         try checking()
-        let monitored = ProcessExecutor(
-            terminationGracePeriod: terminationGracePeriod,
-            cancellationPollInterval: cancellationPollInterval,
-            checkCancellation: { try self.checkCancellation?(); try checking() },
-            maximumExecutionDeadline: maximumExecutionDeadline
-        )
-        let result = try monitored.execute(request)
-        try checking()
-        return result
+        var monitored = self
+        monitored.checkCancellation = {
+            try self.checkCancellation?()
+            do { try checking() }
+            catch { throw ProcessMonitorFailure(cause: error) }
+        }
+        do { return try monitored.execute(request) }
+        catch {
+            if case let ProcessExecutionError.cancelled(_, _, underlying) = error,
+               let failure = underlying as? ProcessMonitorFailure { throw failure.cause }
+            throw error
+        }
     }
 
     func execute(_ request: ProcessRequest) throws -> ProcessResult {
@@ -595,6 +596,10 @@ struct ProcessExecutor: ProcessExecuting {
         }
         return false
     }
+}
+
+private struct ProcessMonitorFailure: Error {
+    let cause: any Error
 }
 
 private enum ProcessWaitOutcome {

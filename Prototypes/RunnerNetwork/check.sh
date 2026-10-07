@@ -13,10 +13,11 @@ go test -modfile "$relay_module" -race -timeout 90s ./...
 go vet -modfile "$relay_module" ./...
 YIELDD_TEST_RELAY="$repo_root/.build/yieldd-network-relay" \
     swift test --package-path "$repo_root" --no-parallel \
-    --filter 'RunnerNetworkRelayTests|RunnerNetworkTests|PacketSocketTests|macOSBackend|runnerNetwork|linux|monitoredProcess' -j 6
+    --filter 'RunnerNetworkRelayTests|RunnerNetworkTests|PacketSocketTests|macOSBackend|runnerNetwork|LinuxRunnerNetworkTests|monitoredProcess' -j 6
 swift build --package-path "$container_source" --target MachineAPIService -j 6
 swift build --package-path "$container_source" --product container -j 6
 "$container_source/.build/debug/container" machine create --help | grep -q -- --network-socket
+"$container_source/.build/debug/container" machine boot --help | grep -q 'without terminal input'
 swift test --package-path "$container_source" \
     --filter 'MacProbeLifecycleTests|MachineConfigTests|ContainerConfigurationResourcesTests' -j 6
 codesign --verify --strict "$repo_root/.build/mac-network-probe"

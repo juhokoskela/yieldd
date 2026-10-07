@@ -238,41 +238,6 @@ func macOSBackendRunsThroughTheExistingSession() throws {
     admission.release(reservation)
 }
 
-private final class BackendNetwork: RunnerNetworking {
-    var startError: (any Error)?
-    var relays: [BackendRelay] = []
-    var relayFailure: (any Error)?
-    var relayStopFailure: (any Error)?
-    func start(for id: RunnerID, checkCancellation: () throws -> Void) throws -> any RunnerNetworkRelaying {
-        try checkCancellation()
-        if let startError { throw startError }
-        let relay = BackendRelay()
-        relays.append(relay)
-        relay.failure = relayFailure
-        relay.stopFailure = relayStopFailure
-        return relay
-    }
-}
-
-private final class BackendRelay: RunnerNetworkRelaying {
-    static let socket = URL(fileURLWithPath: "/unused/network.sock")
-    let socketURL = socket
-    let sshSocketURL = socket.appendingPathExtension("ssh")
-    var failure: (any Error)?
-    var stopFailure: (any Error)?
-    var stops = 0
-    var stopDeadline: DispatchTime?
-    var isRunning: Bool { failure == nil && !stopped }
-    private var stopped = false
-    func check() throws { if let failure { throw failure } }
-    func stop(deadline: DispatchTime?) throws {
-        stops += 1
-        stopDeadline = deadline
-        if let stopFailure { throw stopFailure }
-        stopped = true
-    }
-}
-
 @Test
 func macOSBackendRelayStartupFailureDoesNotBootOrRetainClone() throws {
     let fixture = try ProbeBundleFixture()

@@ -134,7 +134,7 @@ Still unverified or deliberately incomplete:
 
 - The full modified Linux machine CLI/service path, including first-boot setup and persisted machine cleanup. The live harness bypasses those layers, not the runtime itself.
 - Relay memory/CPU/connection budgets and performance under load. Normal Linux operations now monitor relay health, but the installed CLI path still needs live validation. Upstream network services live for the helper process; this design uses one helper per guest.
-- An owner crash closes the relay but can leave its temporary directory or guest-side socket path. Normal macOS runner recovery now sweeps its own socket directories; the standalone probes still require manual socket-directory cleanup after a crash. Process-level lifecycle checks do not establish VM or runner recovery.
+- An owner crash closes the relay but can leave its temporary directory or guest-side socket path. Normal runner recovery sweeps its socket directories; the standalone probes still require manual socket-directory cleanup after a crash. Process-level lifecycle checks do not establish VM or runner recovery.
 - Denial totals are process-local and best effort, including during normal shutdown. There is no durable metric collection or alerting yet.
 - Public DNS and permitted Internet endpoints remain possible data channels. Rejecting unneeded record types in the built-in service does not restrict jobs from using another public DNS or HTTPS service.
 - IPv6 Internet support and a complete review of the third-party packet stack.
