@@ -1,9 +1,4 @@
-#!/bin/bash
-# Sourced by the pinned Container build and the prototype checks.
-set -euo pipefail
-
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-prototype_dir="$repo_root/Prototypes/RunnerNetwork"
+# Sourced after repo_root and prototype_dir are set by the build/check scripts.
 source "$prototype_dir/source-paths.sh"
 prepare_checkout https://github.com/apple/container.git \
     "$container_revision" "$container_source" "$prototype_dir/container.patch" \
@@ -19,6 +14,8 @@ copy_source() {
     mkdir -p "$(dirname "$destination")"
     if ! cmp -s "$source" "$destination"; then cp "$source" "$destination"; fi
 }
+# Regenerated copies are excluded from checkout verification. Overwrite them
+# from the tracked sources before compiling, so stale copies cannot enter a build.
 copy_source "$repo_root/Sources/Yieldd/PacketSocket.swift" \
     "$container_source/Sources/Services/RuntimeLinux/Server/PacketSocket.swift"
 copy_source "$prototype_dir/LinuxProbe.swift" "$container_source/Sources/YielddNetworkProbe/LinuxProbe.swift"

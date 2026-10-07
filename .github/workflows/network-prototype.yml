@@ -48,3 +48,5 @@ jobs:
           cache-dependency-path: Prototypes/RunnerNetwork/go.sum
       - name: Build and check without a VM or installed Container service
         run: bash Prototypes/RunnerNetwork/check.sh
+      - name: Build the Container installer without installing it
+        run: Scripts/build-runner-container.sh
