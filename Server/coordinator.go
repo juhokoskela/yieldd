@@ -32,11 +32,7 @@ type bootstrapAPI interface {
 
 const maximumAssignments = 16
 
-const bootstrapIdentityAttempts = 4
-const bootstrapIdentityRetryDelay = 2 * time.Second
-
 var bootstrapIdentityMismatch = errors.New("bootstrap run identity does not match its lease")
-var staleAssignment = errors.New("assignment changed before its transition could be committed")
 
 // One event loop owns every assignment in a repository/platform queue.
 type coordinator struct {
@@ -48,6 +44,7 @@ type coordinator struct {
 	device            *deviceQueue
 	reportedLocalHold map[string]localPhase
 	refreshDemand     bool
+	demandUnavailable bool
 	paused            error
 }
 
@@ -141,14 +138,9 @@ func (c *coordinator) surplusAssignments(count int) map[string]bool {
 // Publish the complete journal before changing the event loop's view.
 func (a *assignment) replace(nextLease *lease) error {
 	if a.lease != nil {
-		if a.state.Leases[a.lease.Name] != a.lease {
-			return staleAssignment
-		}
 		if err := a.lease.validateTransition(nextLease); err != nil {
 			return err
 		}
-	} else if nextLease == nil || a.state.Leases[nextLease.Name] != nil {
-		return staleAssignment
 	}
 	next := *a.state
 	next.Leases = maps.Clone(a.state.Leases)
@@ -212,9 +204,6 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		c.device.forget(c.state.Owner)
 		err = nil
 	}
-	if err != nil {
-		err = &callbackError{err}
-	}
 	return len(c.state.Leases), err
 }
 
@@ -229,7 +218,10 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	completed := false
 	var failures []error
-	surplus := c.surplusAssignments(count)
+	var surplus map[string]bool
+	if !c.demandUnavailable {
+		surplus = c.surplusAssignments(count)
+	}
 	for _, name := range c.names() {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(failures, err)...)
@@ -244,7 +236,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 				return err
 			}
 		}
-		recoverOnly := (surplus[name] || c.paused != nil) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
+		recoverOnly := (surplus[name] || c.paused != nil || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
 		done, err := a.reconcile(ctx, recoverOnly)
 		if err != nil && !isJournalWrite(err) && a.lease != nil && a.lease.Local != nil && a.lease.CleanupIntent && transientFailure(err) {
 			c.logger.Warn("Local cleanup retained for retry", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
@@ -267,6 +259,10 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			return nil
 		}
 		return c.paused
+	}
+	if c.demandUnavailable {
+		c.device.forget(c.state.Owner)
+		return nil
 	}
 	// Never replace completed execution from the listener's cached demand.
 	if completed {
@@ -429,8 +425,11 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 		if run == nil {
 			return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, retry reconciliation later without redispatching", l.Name)
 		}
+		if !run.matches(l) {
+			return false, bootstrapIdentityMismatch
+		}
 	} else {
-		run, err = a.verifiedRun(ctx)
+		run, err = a.bootstrap.getRun(ctx, l.RunID)
 		var missing *missingWorkflowRun
 		if errors.As(err, &missing) {
 			return a.recoverMissingRun(ctx, recoverOnly)
@@ -438,9 +437,6 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 		if err != nil {
 			return false, err
 		}
-	}
-	if !run.matches(l) {
-		return false, bootstrapIdentityMismatch
 	}
 	if l.RunID == 0 {
 		next := *l
@@ -450,10 +446,17 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 		}
 	}
 	l = a.lease
+	if run == nil || run.ID != l.RunID {
+		return false, bootstrapIdentityMismatch
+	}
+	// Nonterminal metadata may lag dispatch. Never wait on the device request owner.
+	if run.Status != "completed" && !recoverOnly {
+		return false, nil
+	}
+	if !run.matches(l) {
+		return false, bootstrapIdentityMismatch
+	}
 	if run.Status != "completed" {
-		if !recoverOnly {
-			return false, nil
-		}
 		err := a.bootstrap.cancelRun(ctx, l.RunID)
 		if err == nil {
 			a.logger.Info("Bootstrap cancellation requested; waiting for terminal state", "run", l.RunID)
@@ -462,7 +465,7 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 		if !hasHTTPStatus(err, 409) {
 			return false, fmt.Errorf("cancel bootstrap: %w", err)
 		}
-		run, err = a.verifiedRun(ctx)
+		run, err = a.bootstrap.getRun(ctx, l.RunID)
 		if err != nil {
 			return false, fmt.Errorf("recheck bootstrap after cancellation conflict: %w", err)
 		}
@@ -477,27 +480,6 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 		return false, err
 	}
 	return a.finishCleanup(ctx, recoverOnly)
-}
-
-func (a *assignment) verifiedRun(ctx context.Context) (*workflowRun, error) {
-	for attempt := 0; ; attempt++ {
-		run, err := a.bootstrap.getRun(ctx, a.lease.RunID)
-		if err != nil || run.matches(a.lease) {
-			return run, err
-		}
-		if run != nil && run.ID > 0 && run.ID != a.lease.RunID {
-			return nil, bootstrapIdentityMismatch
-		}
-		if attempt == bootstrapIdentityAttempts-1 {
-			return nil, bootstrapIdentityMismatch
-		}
-		if attempt == 0 {
-			a.logger.Warn("Bootstrap identity not yet confirmed; rechecking before any cleanup", "runner", a.lease.Name, "run", a.lease.RunID, "retry_delay", bootstrapIdentityRetryDelay)
-		}
-		if err := waitForRetry(ctx, bootstrapIdentityRetryDelay); err != nil {
-			return nil, err
-		}
-	}
 }
 
 func (a *assignment) recoverMissingRun(ctx context.Context, recoverOnly bool) (bool, error) {

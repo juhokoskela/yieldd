@@ -636,8 +636,6 @@ func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 				wantReads := 2
 				if mode == "non-conflict" {
 					wantReads = 1
-				} else if mode == "wrong-title" || mode == "missing" {
-					wantReads = 1 + bootstrapIdentityAttempts
 				}
 				if w.getCalls != wantReads {
 					t.Fatal("unexpected status reads", w.getCalls)

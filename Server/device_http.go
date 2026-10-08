@@ -140,11 +140,24 @@ func (s *coordinatorLoop) HandleDesiredRunnerCount(ctx context.Context, count in
 	err := s.invoke(ctx, func(ctx context.Context) (err error) {
 		s.demandObserved = true
 		s.desiredCount = count
+		s.worker.demandUnavailable = false
 		actual, err = s.worker.HandleDesiredRunnerCount(ctx, count)
 		return err
 	})
+	if err != nil {
+		return actual, &callbackError{err}
+	}
 	return actual, err
 }
+
+func (s *coordinatorLoop) suspendProvisioning() error {
+	return s.invoke(s.ctx, func(context.Context) error {
+		s.worker.demandUnavailable = true
+		s.worker.device.forget(s.worker.state.Owner)
+		return nil
+	})
+}
+
 func (s *coordinatorLoop) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error {
 	err := s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobStarted(ctx, job) })
 	if err != nil {

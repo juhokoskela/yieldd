@@ -15,27 +15,21 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/golang-jwt/jwt/v4"
 )
 
 func TestSDKLookupAndTransientFailuresAfterTokenRefresh(t *testing.T) {
 	for _, status := range []int{200, 403, 429, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-			}).SignedString([]byte("test-only"))
-			if err != nil {
-				t.Fatal(err)
-			}
+			auth := sdkAuthentication(t)
 			var requests []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests = append(requests, r.Method+" "+r.URL.Path)
+				if status, body := auth(r, "http://"+r.Host+"/"); status != 0 {
+					w.WriteHeader(status)
+					io.WriteString(w, body)
+					return
+				}
 				switch r.URL.Path {
-				case "/api/v3/repos/owner/repo/actions/runners/registration-token":
-					w.WriteHeader(201)
-					io.WriteString(w, `{"token":"private-registration-token"}`)
-				case "/api/v3/actions/runner-registration":
-					fmt.Fprintf(w, `{"url":"http://%s/","token":%q}`, r.Host, token)
 				case "/_apis/runtime/runnerscalesets/2":
 					w.WriteHeader(status)
 					if status != 200 {

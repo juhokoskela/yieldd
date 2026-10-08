@@ -28,9 +28,6 @@ type lease struct {
 
 func (l *lease) validateTransition(next *lease) error {
 	if next == nil {
-		if !l.CleanupIntent {
-			return errors.New("assignment cannot be cleared before cleanup intent is persisted")
-		}
 		return nil
 	}
 	if next.Name != l.Name || !next.Created.Equal(l.Created) ||

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 )
 
@@ -25,19 +24,16 @@ func TestSDKListenerReopensSessionAfterHTTPFailureWithoutLosingIssuedLease(t *te
 		t.Fatal(err)
 	}
 	owner, scaleSetID := c.state.Owner, c.state.ScaleSetID
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}).SignedString([]byte("test-only"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	auth := sdkAuthentication(t)
 	var created, closed atomic.Int64
 	polled := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if status, body := auth(r, "http://"+r.Host+"/"); status != 0 {
+			w.WriteHeader(status)
+			io.WriteString(w, body)
+			return
+		}
 		switch {
-		case r.URL.Path == "/api/v3/repos/owner/repo/actions/runners/registration-token":
-			w.WriteHeader(201)
-			io.WriteString(w, `{"token":"test-registration-token"}`)
-		case r.URL.Path == "/api/v3/actions/runner-registration":
-			fmt.Fprintf(w, `{"url":"http://%s/","token":%q}`, r.Host, token)
 		case r.Method == "POST" && r.URL.Path == fmt.Sprintf("/_apis/runtime/runnerscalesets/%d/sessions", scaleSetID):
 			var session scaleset.RunnerScaleSetSession
 			if err := json.NewDecoder(r.Body).Decode(&session); err != nil || session.OwnerName != owner {

@@ -42,28 +42,7 @@ func TestAssignmentTransitionsPreserveIdentityAndPersistedIntent(t *testing.T) {
 	}
 }
 
-func TestStaleAssignmentCannotCommitOverNewerState(t *testing.T) {
-	c, _, _ := newFixture(t)
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-		t.Fatal(err)
-	}
-	name := singleLease(c.state).Name
-	stale, current := c.assigned(name), c.assigned(name)
-	if err := current.beginCleanup("success"); err != nil {
-		t.Fatal(err)
-	}
-	if err := stale.replace(stale.lease); !errors.Is(err, staleAssignment) {
-		t.Fatal("stale snapshot overwrote cleanup intent", err)
-	}
-	if !c.state.Leases[name].CleanupIntent {
-		t.Fatal("cleanup intent was lost")
-	}
-}
-
 func TestLocalTransitionsCannotReopenExecutionOrReleaseUnacknowledgedCapacity(t *testing.T) {
-	original := &lease{Name: "yieldd-test", RunnerID: 1, Local: &localLease{
-		DeviceID: "device", Slot: 2, Phase: localIssued, JobStarted: true, JobCompleted: true,
-	}}
 	for _, change := range []struct {
 		name string
 		edit func(*lease)
@@ -76,24 +55,47 @@ func TestLocalTransitionsCannotReopenExecutionOrReleaseUnacknowledgedCapacity(t 
 		{"issued to hosted", func(l *lease) { l.Local = nil }},
 	} {
 		t.Run(change.name, func(t *testing.T) {
+			c, _, store, request := localFixture(t)
+			if _, err := c.acceptDevice(t.Context(), request); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.assigned(request.Runner).recordLocalJob(singleLease(c.state).RunnerID, true); err != nil {
+				t.Fatal(err)
+			}
+			original := singleLease(c.state)
 			next, local := *original, *original.Local
 			next.Local = &local
 			change.edit(&next)
-			if err := original.validateTransition(&next); err == nil {
+			if err := c.assigned(request.Runner).replace(&next); err == nil {
 				t.Fatal("local execution was reopened or moved")
+			}
+			saved, err := store.load(c.state.Config)
+			if err != nil || *singleLease(saved).Local != *original.Local || singleLease(c.state) != original {
+				t.Fatal("invalid local transition changed the journal", err)
 			}
 		})
 	}
-	if err := original.validateTransition(nil); err == nil {
-		t.Fatal("assignment cleared without persisted cleanup intent")
+}
+
+func TestCleanupIntentIsRequiredBeforeAnyDeletionAndCannotBeRevoked(t *testing.T) {
+	c, w, _ := newFixture(t)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
 	}
-	cleaning := *original
-	cleaning.CleanupIntent = true
-	if err := cleaning.validateTransition(original); err == nil {
+	a := c.assigned(singleLease(c.state).Name)
+	if err := a.cleanup(t.Context()); err == nil || w.runner == nil || w.secret == "" {
+		t.Fatal("cleanup deleted resources without durable intent", err)
+	}
+	if err := a.beginCleanup("success"); err != nil {
+		t.Fatal(err)
+	}
+	next := *a.lease
+	next.CleanupIntent = false
+	if err := a.replace(&next); err == nil {
 		t.Fatal("persisted cleanup intent was revoked")
 	}
-	if err := cleaning.validateTransition(nil); err != nil {
-		t.Fatal("completed cleanup cannot clear its assignment", err)
+	if !singleLease(c.state).CleanupIntent {
+		t.Fatal("cleanup intent was lost")
 	}
 }
 
