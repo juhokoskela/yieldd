@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"strings"
 	"time"
@@ -27,18 +28,30 @@ func publicDNS(ctx context.Context, dial func(string, string) (net.Conn, error),
 		}()
 		if request.Opcode != dns.OpcodeQuery || len(request.Question) != 1 {
 			response.Rcode = dns.RcodeRefused
-			counts.dns.Add(1)
+			counts.record(dnsMalformed, []byte{byte(request.Opcode)})
 			return
 		}
 		question := request.Question[0]
 		name := strings.ToLower(question.Name)
-		if question.Qclass != dns.ClassINET || !dns.IsFqdn(name) ||
-			!strings.Contains(strings.TrimSuffix(name, "."), ".") ||
-			name == "home.arpa." || strings.HasSuffix(name, ".home.arpa.") ||
-			strings.HasSuffix(name, ".local.") || strings.HasSuffix(name, ".localhost.") ||
-			(question.Qtype != dns.TypeA && question.Qtype != dns.TypeAAAA) {
+		// Ignore transaction IDs and case when tracking repeated questions.
+		signature := append([]byte(name), 0)
+		signature = binary.BigEndian.AppendUint16(signature, question.Qtype)
+		signature = binary.BigEndian.AppendUint16(signature, question.Qclass)
+		if question.Qclass != dns.ClassINET || !dns.IsFqdn(name) {
 			response.Rcode = dns.RcodeRefused
-			counts.dns.Add(1)
+			counts.record(dnsMalformed, signature)
+			return
+		}
+		if !strings.Contains(strings.TrimSuffix(name, "."), ".") ||
+			name == "home.arpa." || strings.HasSuffix(name, ".home.arpa.") ||
+			strings.HasSuffix(name, ".local.") || strings.HasSuffix(name, ".localhost.") {
+			response.Rcode = dns.RcodeRefused
+			counts.record(dnsLocalName, signature)
+			return
+		}
+		if question.Qtype != dns.TypeA && question.Qtype != dns.TypeAAAA {
+			response.Rcode = dns.RcodeRefused
+			counts.record(dnsRecordType, signature)
 			return
 		}
 		// There is no IPv6 packet path in this prototype. Answer AAAA with NODATA.
@@ -50,7 +63,7 @@ func publicDNS(ctx context.Context, dial func(string, string) (net.Conn, error),
 			defer func() { <-slots }()
 		default:
 			response.Rcode = dns.RcodeServerFailure
-			counts.dns.Add(1)
+			counts.record(dnsSaturated, signature)
 			return
 		}
 		// TCP avoids truncated recursive answers and uses the same checked dial
@@ -58,6 +71,9 @@ func publicDNS(ctx context.Context, dial func(string, string) (net.Conn, error),
 		connection, err := dial("tcp", publicResolver)
 		if err != nil {
 			response.Rcode = dns.RcodeServerFailure
+			if ctx.Err() == nil {
+				counts.record(dnsUpstreamFailure, signature)
+			}
 			return
 		}
 		defer connection.Close()
@@ -70,6 +86,9 @@ func publicDNS(ctx context.Context, dial func(string, string) (net.Conn, error),
 		answer, _, err := (&dns.Client{Timeout: 5 * time.Second}).ExchangeWithConnContext(lookup, query, &dns.Conn{Conn: connection})
 		if err != nil {
 			response.Rcode = dns.RcodeServerFailure
+			if ctx.Err() == nil {
+				counts.record(dnsUpstreamFailure, signature)
+			}
 			return
 		}
 		response.Rcode = answer.Rcode
