@@ -2,7 +2,7 @@ const { spawn } = require('node:child_process');
 const { createHash, randomBytes } = require('node:crypto');
 const { createReadStream, constants } = require('node:fs');
 const { createServer } = require('node:http');
-const { mkdtemp, mkdir, writeFile, access, rm, open, readdir } = require('node:fs/promises');
+const { mkdtemp, mkdir, writeFile, access, rm, open, readdir, lstat } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
@@ -98,21 +98,27 @@ async function verifyArchive(path, expected) {
 
 async function writableDirectories(path) {
     let directory;
+    let entries;
     try {
-        // Change directory permissions through the opened inode, never through a symlink.
+        // O_NOFOLLOW protects the final component; escaped-process races are out of scope.
         directory = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     } catch (error) {
         if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code)) return;
         throw error;
     }
     try {
-        const info = await directory.stat();
-        if ((info.mode & 0o700) !== 0o700) await directory.chmod(0o700);
-        for (const entry of await readdir(path, { withFileTypes: true })) {
-            if (entry.isDirectory()) await writableDirectories(join(path, entry.name));
+        const opened = await directory.stat({ bigint: true });
+        await directory.chmod(0o700);
+        entries = await readdir(path, { withFileTypes: true });
+        const current = await lstat(path, { bigint: true });
+        if (current.dev !== opened.dev || current.ino !== opened.ino || !current.isDirectory()) {
+            throw new Error('Bootstrap cleanup directory changed; refusing permission repair.');
         }
     } finally {
         await directory.close();
+    }
+    for (const entry of entries) {
+        if (entry.isDirectory()) await writableDirectories(join(path, entry.name));
     }
 }
 
@@ -246,4 +252,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive, removePrivateDirectory };
+module.exports = { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive, removePrivateDirectory, writableDirectories };
