@@ -1,8 +1,8 @@
 const { spawn } = require('node:child_process');
 const { createHash, randomBytes } = require('node:crypto');
-const { createReadStream } = require('node:fs');
+const { createReadStream, constants } = require('node:fs');
 const { createServer } = require('node:http');
-const { mkdtemp, mkdir, writeFile, access, rm } = require('node:fs/promises');
+const { mkdtemp, mkdir, writeFile, access, rm, open, readdir } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
@@ -94,6 +94,37 @@ async function verifyArchive(path, expected) {
     const hash = createHash('sha256');
     for await (const chunk of createReadStream(path)) hash.update(chunk);
     if (hash.digest('hex') !== expected) throw new Error('Runner archive checksum mismatch.');
+}
+
+async function writableDirectories(path) {
+    let directory;
+    try {
+        // Change directory permissions through the opened inode, never through a symlink.
+        directory = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    } catch (error) {
+        if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code)) return;
+        throw error;
+    }
+    try {
+        const info = await directory.stat();
+        if ((info.mode & 0o700) !== 0o700) await directory.chmod(0o700);
+        for (const entry of await readdir(path, { withFileTypes: true })) {
+            if (entry.isDirectory()) await writableDirectories(join(path, entry.name));
+        }
+    } finally {
+        await directory.close();
+    }
+}
+
+async function removePrivateDirectory(directory) {
+    try {
+        await rm(directory, { recursive: true, force: true });
+    } catch (error) {
+        if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+        // Go's module cache deliberately makes its directories read-only.
+        await writableDirectories(directory);
+        await rm(directory, { recursive: true, force: true });
+    }
 }
 
 async function runListener(runner, options) {
@@ -196,7 +227,7 @@ async function bootstrap(encoded, name, signal) {
         await access(join(directory, 'job-completed'));
         console.log('Nested runner exited after a job. Check the original workflow for its result.');
     } finally {
-        await rm(directory, { recursive: true, force: true });
+        await removePrivateDirectory(directory);
     }
 }
 
@@ -215,4 +246,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive };
+module.exports = { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive, removePrivateDirectory };
