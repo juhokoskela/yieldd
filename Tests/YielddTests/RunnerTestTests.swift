@@ -1389,7 +1389,7 @@ func storageDisappearingBeforeCreationDoesNotPublishALeaseOrRetainMemory() throw
     defer { try? FileManager.default.removeItem(at: directory) }
     let executor = RecordingProcessExecutor(outcomes: [])
     var checks = 0
-    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor,
+    let backend = try AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor,
         stateDirectory: directory, loadStorage: {
             checks += 1
             throw RunnerStorageError.notConfigured

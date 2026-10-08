@@ -8,6 +8,8 @@ func doctorReportsSuccessfulChecks() throws {
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()),
+        .success(processResult(stdout: "--network-socket")),
+        .success(processResult()),
         .success(processResult()),
         .success(processResult()),
     ])
@@ -15,7 +17,7 @@ func doctorReportsSuccessfulChecks() throws {
     let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        loadStorage: { nil }, supportsAppleSilicon: { true }
+        loadStorage: { nil }, relayURL: URL(fileURLWithPath: "/usr/bin/true"), supportsAppleSilicon: { true }
     ).run()
 
     #expect(report.succeeded)
@@ -24,12 +26,15 @@ func doctorReportsSuccessfulChecks() throws {
         .passed(fixture.executable(named: "container").path),
         .passed("reachable"),
         .passed("available"),
+        .passed("available"),
         .passed(fixture.executable(named: "gh").path),
         .passed("authenticated"),
         .passed("quota-backed"),
     ])
     #expect(executor.requests.map(\.arguments) == [
         ["system", "status", "--format", "json"],
+        ["machine", "create", "--help"],
+        ["machine", "boot", "--help"],
         ["machine", "list", "--quiet"],
         ["auth", "status", "--active", "--hostname", "github.com"],
     ])
@@ -48,14 +53,14 @@ func doctorSkipsDependentChecksWhenContainerIsMissing() {
     ).run()
 
     #expect(!report.succeeded)
-    #expect(report.checks.count == 7)
+    #expect(report.checks.count == 8)
     #expect(report.checks[2].status == .skipped("container executable is unavailable"))
     #expect(report.checks[3].status == .skipped("container executable is unavailable"))
-    guard case .failed = report.checks[4].status else {
+    guard case .failed = report.checks[5].status else {
         Issue.record("Expected the gh executable check to fail")
         return
     }
-    #expect(report.checks[5].status == .skipped("gh executable is unavailable"))
+    #expect(report.checks[6].status == .skipped("gh executable is unavailable"))
     #expect(executor.requests.isEmpty)
     #expect(throws: DoctorReportError.checksFailed) {
         try report.requireSuccess()
@@ -100,8 +105,8 @@ func doctorChecksGitHubEvenWhenContainerIsMissing() throws {
     ).run()
 
     #expect(!report.succeeded)
-    #expect(report.checks[4].status == .passed(fixture.executable(named: "gh").path))
-    #expect(report.checks[5].status == .passed("authenticated"))
+    #expect(report.checks[5].status == .passed(fixture.executable(named: "gh").path))
+    #expect(report.checks[6].status == .passed("authenticated"))
     #expect(executor.requests.map(\.arguments) == [
         ["auth", "status", "--active", "--hostname", "github.com"],
     ])
@@ -120,7 +125,7 @@ func macOSDoctorDoesNotRequireOrInvokeContainer() throws {
 
     #expect(!report.succeeded)
     #expect(!report.checks.contains { $0.name.hasPrefix("container") })
-    let relay = try #require(report.checks.first { $0.name == "macOS network relay" })
+    let relay = try #require(report.checks.first { $0.name == "network relay" })
     guard case .failed = relay.status else {
         Issue.record("An unpackaged test executable must report its missing relay")
         return

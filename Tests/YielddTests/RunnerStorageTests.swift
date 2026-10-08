@@ -125,7 +125,7 @@ func storageRejectsSymlinkEscapesAndMissingMachineCleanup() throws {
 @Test
 func backendStorageFailurePreventsGuestCreation() throws {
     let executor = RecordingProcessExecutor(outcomes: [])
-    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/missing/container"), executor: executor,
+    let backend = try AppleContainerBackend(containerURL: URL(fileURLWithPath: "/missing/container"), executor: executor,
         stateDirectory: unconfiguredContainerStateDirectory)
     #expect(throws: RunnerStorageError.notConfigured) { try backend.create(id: RunnerID(value: "yieldd-test"), memory: .full) }
     #expect(executor.requests.isEmpty)
@@ -164,7 +164,7 @@ func missingStorageBindingBlocksBothDestructionBackends() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [])
-    let linux = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/missing/container"), executor: executor,
+    let linux = try AppleContainerBackend(containerURL: URL(fileURLWithPath: "/missing/container"), executor: executor,
                                       stateDirectory: fixture.rootURL)
     let mac = try MacOSVirtualizationBackend(stateDirectory: fixture.rootURL, templateURL: fixture.templateURL,
         cloneRootURL: fixture.cloneRootURL, executor: executor)

@@ -13,7 +13,7 @@ func removeMacOSRunnerFiles(_ id: RunnerID, in directory: URL,
     if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
 }
 
-func removeUnleasedMacOSClones(in directory: URL, keeping ids: Set<RunnerID>, checkCancellation: () throws -> Void = {},
+func removeUnleasedRunnerFiles(in directory: URL, keeping ids: Set<RunnerID>, checkCancellation: () throws -> Void = {},
                                makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) }
     var failures: [RunnerSessionCleanupFailure] = []

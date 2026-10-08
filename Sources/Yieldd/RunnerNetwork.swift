@@ -12,26 +12,28 @@ protocol RunnerNetworkRelaying: AnyObject {
 
 extension RunnerNetworkRelay: RunnerNetworkRelaying {}
 
-protocol MacOSRunnerNetworking {
+protocol RunnerNetworking {
     func start(for id: RunnerID, checkCancellation: () throws -> Void) throws -> any RunnerNetworkRelaying
 }
 
-struct MacOSRunnerNetwork: MacOSRunnerNetworking {
+struct RunnerNetwork: RunnerNetworking {
     private let executableURL: URL
     private let directories: RunnerNetworkDirectories
+    private let platform: RunnerPlatform
 
     static var bundledRelayURL: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/yieldd-network-relay")
     }
 
-    init(stateDirectory: URL, executableURL: URL = bundledRelayURL) throws {
+    init(stateDirectory: URL, platform: RunnerPlatform, executableURL: URL = bundledRelayURL) throws {
         self.executableURL = executableURL
+        self.platform = platform
         directories = try RunnerNetworkDirectories(stateDirectory: stateDirectory)
     }
 
     static func requireRelay(at executableURL: URL = bundledRelayURL) throws {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
-            throw MacOSRunnerNetworkError.missingRelay(executableURL.path)
+            throw RunnerNetworkError.missingRelay(executableURL.path)
         }
     }
 
@@ -44,7 +46,7 @@ struct MacOSRunnerNetwork: MacOSRunnerNetworking {
         do {
             return try RunnerNetworkRelay.start(
                 executableURL: executableURL, directory: directory,
-                identity: (runner: id.value, platform: RunnerPlatform.macOS.rawValue),
+                identity: (runner: id.value, platform: platform.rawValue),
                 checkCancellation: checkCancellation
             )
         } catch {
@@ -127,13 +129,13 @@ struct RunnerNetworkDirectories {
     }
 }
 
-enum MacOSRunnerNetworkError: Error, LocalizedError {
+enum RunnerNetworkError: Error, LocalizedError {
     case missingRelay(String)
 
     var errorDescription: String? {
         switch self {
         case let .missingRelay(path):
-            "The macOS runner network relay is missing at \(path). Build and use yieldd.app with Scripts/build-local-app.sh."
+            "The runner network relay is missing at \(path). Build and use yieldd.app with Scripts/build-local-app.sh."
         }
     }
 }

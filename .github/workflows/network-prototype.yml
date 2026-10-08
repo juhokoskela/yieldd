@@ -7,6 +7,8 @@ on:
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
       - 'Sources/Yieldd/PacketSocket.swift'
       - 'Scripts/build-network-relay.sh'
+      - 'Scripts/build-runner-container.sh'
+      - 'Scripts/prepare-runner-container.sh'
       - 'Scripts/prepare-patched-source.sh'
       - 'Scripts/test-prepare-patched-source.sh'
       - 'Packaging/yieldd.entitlements'
@@ -18,6 +20,8 @@ on:
       - 'Sources/Yieldd/RunnerNetworkRelay.swift'
       - 'Sources/Yieldd/PacketSocket.swift'
       - 'Scripts/build-network-relay.sh'
+      - 'Scripts/build-runner-container.sh'
+      - 'Scripts/prepare-runner-container.sh'
       - 'Scripts/prepare-patched-source.sh'
       - 'Scripts/test-prepare-patched-source.sh'
       - 'Packaging/yieldd.entitlements'
@@ -44,3 +48,5 @@ jobs:
           cache-dependency-path: Prototypes/RunnerNetwork/go.sum
       - name: Build and check without a VM or installed Container service
         run: bash Prototypes/RunnerNetwork/check.sh
+      - name: Build the Container installer without installing it
+        run: Scripts/build-runner-container.sh
