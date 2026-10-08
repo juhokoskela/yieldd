@@ -224,7 +224,7 @@ func TestOwnedRelayProcess(t *testing.T) {
 		if err := json.NewEncoder(os.Stdout).Encode(os.Getpid()); err != nil {
 			t.Fatal(err)
 		}
-		if err := runOwnedRelay(ctx, path, os.Stdin, os.Stdout, os.Stderr, relayIdentity{}); err != nil {
+		if err := runOwnedRelay(ctx, path, os.Stdin, os.Stdout, os.Stderr); err != nil {
 			t.Fatal(err)
 		}
 	case "owner":

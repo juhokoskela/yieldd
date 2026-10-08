@@ -222,7 +222,7 @@ func TestOfferTimerFailureStopsWithDurableRecoveryState(t *testing.T) {
 					t.Fatal(err)
 				}
 				err := <-done
-				var provisioning *callbackError
+				var provisioning *provisioningError
 				if !errors.As(err, &provisioning) || !errors.Is(err, io.ErrUnexpectedEOF) {
 					t.Fatal("lost timer failure", err)
 				}

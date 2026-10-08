@@ -146,18 +146,10 @@ func (s *coordinatorLoop) HandleDesiredRunnerCount(ctx context.Context, count in
 	return actual, err
 }
 func (s *coordinatorLoop) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error {
-	err := s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobStarted(ctx, job) })
-	if err != nil {
-		return &callbackError{err}
-	}
-	return nil
+	return s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobStarted(ctx, job) })
 }
 func (s *coordinatorLoop) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error {
-	err := s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobCompleted(ctx, job) })
-	if err != nil {
-		return &callbackError{err}
-	}
-	return nil
+	return s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobCompleted(ctx, job) })
 }
 
 func listenForDevice(address, token string, allowNonLoopback bool) (net.Listener, error) {

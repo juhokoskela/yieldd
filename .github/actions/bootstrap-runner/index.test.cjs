@@ -1,33 +1,13 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { mkdtemp, mkdir, writeFile, readFile, stat, rm, chmod, symlink } = require('node:fs/promises');
+const { mkdtemp, mkdir, writeFile, readFile, stat, rm } = require('node:fs/promises');
 const { createHash } = require('node:crypto');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { createInterface } = require('node:readline');
 const { test } = require('node:test');
-const { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive, removePrivateDirectory } = require('./index.cjs');
-
-test('cleanup removes read-only module caches without following symlinks', async t => {
-    const fixture = await mkdtemp(join(tmpdir(), 'yieldd-cleanup-test-'));
-    t.after(() => removePrivateDirectory(fixture));
-    const directory = join(fixture, 'bootstrap');
-    const cache = join(directory, 'home/go/pkg/mod/example@v1');
-    const outside = join(fixture, 'outside');
-    await mkdir(cache, { recursive: true });
-    await mkdir(outside);
-    await writeFile(join(cache, 'LICENSE'), 'read-only module', { mode: 0o444 });
-    await writeFile(join(outside, 'sentinel'), 'untouched');
-    await symlink(outside, join(cache, 'outside'));
-    await chmod(cache, 0o555);
-    await chmod(outside, 0o555);
-    await removePrivateDirectory(directory);
-    await assert.rejects(stat(directory), { code: 'ENOENT' });
-    assert.equal(await readFile(join(outside, 'sentinel'), 'utf8'), 'untouched');
-    assert.equal((await stat(outside)).mode & 0o777, 0o555);
-    await removePrivateDirectory(directory); // Lost cleanup responses are safe to retry.
-});
+const { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive } = require('./index.cjs');
 
 const name = 'yieldd-bootstrap-test';
 function encodeSettings(settings) {

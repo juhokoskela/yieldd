@@ -44,7 +44,6 @@ struct MacOSRunnerNetwork: MacOSRunnerNetworking {
         do {
             return try RunnerNetworkRelay.start(
                 executableURL: executableURL, directory: directory,
-                identity: (runner: id.value, platform: "macos"),
                 checkCancellation: checkCancellation
             )
         } catch {

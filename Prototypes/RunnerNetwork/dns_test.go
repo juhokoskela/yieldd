@@ -122,8 +122,8 @@ func TestDNSRejectsLocalNamesAndUnneededTypes(t *testing.T) {
 			t.Errorf("%s %d was not refused: %v", test.name, test.kind, response.message)
 		}
 	}
-	if report := readPolicyReport(t, counts); report.DNS != 12 {
-		t.Fatal("missing DNS denial counts", report.DNS)
+	if counts.dns.Load() != 12 {
+		t.Fatal("missing DNS denial counts", counts.dns.Load())
 	}
 	query := new(dns.Msg)
 	query.SetQuestion("public.example.", dns.TypeAAAA)

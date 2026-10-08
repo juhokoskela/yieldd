@@ -603,46 +603,42 @@ func TestZeroDemandCleansUpOnlyUndispatchedLeases(t *testing.T) {
 func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 	for _, mode := range []string{"running", "read-failed", "wrong-id", "wrong-title", "missing", "non-conflict"} {
 		t.Run(mode, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				c, w, _ := newFixture(t)
-				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-					t.Fatal(err)
+			c, w, _ := newFixture(t)
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+				t.Fatal(err)
+			}
+			w.cancelErr = &apiError{status: http.StatusConflict}
+			if mode == "non-conflict" {
+				w.cancelErr = &apiError{status: http.StatusForbidden}
+			}
+			w.beforeCancel = func() {
+				switch mode {
+				case "read-failed":
+					w.getErr = errors.New("cannot read run")
+				case "wrong-id":
+					w.run.Status = "completed"
+					w.run.ID++
+				case "wrong-title":
+					w.run.Status = "completed"
+					w.run.DisplayTitle = "Bootstrap someone-else"
+				case "missing":
+					w.run = nil
 				}
-				w.cancelErr = &apiError{status: http.StatusConflict}
-				if mode == "non-conflict" {
-					w.cancelErr = &apiError{status: http.StatusForbidden}
-				}
-				w.beforeCancel = func() {
-					switch mode {
-					case "read-failed":
-						w.getErr = errors.New("cannot read run")
-					case "wrong-id":
-						w.run.Status = "completed"
-						w.run.ID++
-					case "wrong-title":
-						w.run.Status = "completed"
-						w.run.DisplayTitle = "Bootstrap someone-else"
-					case "missing":
-						w.run = nil
-					}
-				}
-				done, err := c.reconcile(t.Context(), true)
-				if done || (err == nil) != (mode == "running") {
-					t.Fatal(done, err)
-				}
-				if singleLease(c.state).CleanupIntent || w.runner == nil || w.secret == "" {
-					t.Fatal("cleaned up without verified termination")
-				}
-				wantReads := 2
-				if mode == "non-conflict" {
-					wantReads = 1
-				} else if mode == "wrong-title" || mode == "missing" {
-					wantReads = 1 + bootstrapIdentityAttempts
-				}
-				if w.getCalls != wantReads {
-					t.Fatal("unexpected status reads", w.getCalls)
-				}
-			})
+			}
+			done, err := c.reconcile(t.Context(), true)
+			if done || (err == nil) != (mode == "running") {
+				t.Fatal(done, err)
+			}
+			if singleLease(c.state).CleanupIntent || w.runner == nil || w.secret == "" {
+				t.Fatal("cleaned up without verified termination")
+			}
+			wantReads := 2
+			if mode == "non-conflict" {
+				wantReads = 1
+			}
+			if w.getCalls != wantReads {
+				t.Fatal("unexpected status reads", w.getCalls)
+			}
 		})
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"syscall"
 	"time"
 
@@ -26,13 +25,10 @@ func main() {
 	// Upstream logs packet-level denials. Do not let guest traffic flood host logs.
 	log.SetOutput(io.Discard)
 	socket := flag.String("socket", "", "Datagram socket in a private, host-owned directory")
-	runner := flag.String("runner", "", "Host-issued runner identity for diagnostic summaries")
-	platform := flag.String("platform", "", "Runner platform for diagnostic summaries: linux or macos")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
-	identity := relayIdentity{Runner: *runner, Platform: *platform}
-	if err := runOwnedRelay(ctx, *socket, os.Stdin, os.Stdout, os.Stderr, identity); err != nil {
+	if err := runOwnedRelay(ctx, *socket, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		reported := make(chan struct{})
 		go func() { defer close(reported); fmt.Fprintln(os.Stderr, err) }()
 		select {
@@ -45,10 +41,7 @@ func main() {
 
 // The owner holds stdin open without sending data. EOF, an error, or any input
 // revokes ownership. This covers owner crashes without trusting a reusable PID.
-func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, diagnostics io.Writer, identity relayIdentity) error {
-	if err := identity.validate(); err != nil {
-		return err
-	}
+func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, diagnostics io.Writer) error {
 	descriptor := int(owner.Fd())
 	if err := unix.SetNonblock(descriptor, true); err != nil {
 		return fmt.Errorf("prepare relay lifetime pipe: %w", err)
@@ -80,23 +73,12 @@ func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, di
 	}()
 	defer func() { stop(); <-ownerDone; owner.Close() }()
 	counts := new(denialCounters)
-	counts.identity, counts.reportedAt = identity, time.Now()
 	// Diagnostics belong to the helper process. Never join a reporter that may
 	// be blocked by its consumer; process exit also ends that goroutine.
 	go counts.report(ctx, diagnostics)
 	err := serve(ctx, socket, ready, counts)
 	if err != nil && ctx.Err() == nil {
 		return err
-	}
-	return nil
-}
-
-func (i relayIdentity) validate() error {
-	if i.Runner == "" && i.Platform == "" {
-		return nil
-	}
-	if len(i.Runner) > 128 || !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]*$`).MatchString(i.Runner) || (i.Platform != "linux" && i.Platform != "macos") {
-		return errors.New("invalid relay diagnostic identity")
 	}
 	return nil
 }
