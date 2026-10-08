@@ -4,16 +4,17 @@ import Testing
 @testable import Yieldd
 
 @Suite struct RunnerNetworkRelayTests {
-    @Test func forwardsDiagnosticIdentityAsSeparateArguments() throws {
+    @Test(arguments: [("linux", "linux"), ("macOS", "macos"), ("macos", "macos")])
+    func forwardsDiagnosticIdentityAsSeparateArguments(platform: String, expected: String) throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
         let arguments = fixture.root.appendingPathComponent("arguments")
         let executable = try fixture.script("printf '%s\\n' \"$@\" > '\(arguments.path)'\nprintf '%s\\n' '\(fixture.ready)'\nexec /bin/cat")
         let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory,
-            identity: (runner: "yieldd-diagnostic-test", platform: "macos"))
+            identity: (runner: "yieldd-diagnostic-test", platform: platform))
         defer { try? relay.stop() }
         let captured = try String(contentsOf: arguments, encoding: .utf8).split(separator: "\n").map(String.init)
-        #expect(captured == ["--socket", relay.socketURL.path, "--runner", "yieldd-diagnostic-test", "--platform", "macos"])
+        #expect(captured == ["--socket", relay.socketURL.path, "--runner", "yieldd-diagnostic-test", "--platform", expected])
     }
 
     @Test func shutdownToleratesAnAlreadyRemovedDirectory() throws {

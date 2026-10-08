@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net"
 	"testing"
@@ -32,16 +31,8 @@ func TestDenialCountersIncludeFramesAndDestinations(t *testing.T) {
 	cancel()
 	var output bytes.Buffer
 	counts.report(ctx, &output)
-	var report struct {
-		Event        string `json:"event"`
-		Destinations uint64 `json:"denied_destinations"`
-		Frames       uint64 `json:"dropped_frames"`
-		DNS          uint64 `json:"rejected_dns"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
-		t.Fatal(err)
-	}
-	if report.Event != "relay_policy_totals" || report.Destinations != 1 || report.Frames != 1 || report.DNS != 0 {
+	report := decodePolicyReports(t, output.Bytes())
+	if report.Event != "relay_policy_totals" || report.Reasons["destination_non_public"].Total != 1 || report.Reasons["frame_malformed"].Total != 1 || len(report.Reasons) != 2 {
 		t.Fatalf("incorrect shutdown totals: %+v", report)
 	}
 }

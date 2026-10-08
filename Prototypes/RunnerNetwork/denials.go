@@ -18,6 +18,7 @@ const (
 	frameProtocol
 	frameOptions
 	frameFragment
+	frameNeighbor
 	destinationInvalid
 	destinationNonPublic
 	destinationHost
@@ -31,9 +32,22 @@ const (
 )
 
 var reasonNames = [denialReasonCount]string{
-	"frame_malformed", "frame_identity", "frame_ipv6", "frame_unsupported_protocol", "frame_ip_options", "frame_fragment",
-	"destination_invalid", "destination_non_public", "destination_host", "host_address_check_failed",
-	"dns_malformed", "dns_local_name", "dns_record_type", "dns_saturated", "dns_upstream_failed",
+	frameMalformed:       "frame_malformed",
+	frameIdentity:        "frame_identity",
+	frameIPv6:            "frame_ipv6",
+	frameProtocol:        "frame_unsupported_protocol",
+	frameOptions:         "frame_ip_options",
+	frameFragment:        "frame_fragment",
+	frameNeighbor:        "frame_neighbor",
+	destinationInvalid:   "destination_invalid",
+	destinationNonPublic: "destination_non_public",
+	destinationHost:      "destination_host",
+	destinationHostCheck: "host_address_check_failed",
+	dnsMalformed:         "dns_malformed",
+	dnsLocalName:         "dns_local_name",
+	dnsRecordType:        "dns_record_type",
+	dnsSaturated:         "dns_saturated",
+	dnsUpstreamFailure:   "dns_upstream_failed",
 }
 
 const maximumTrackedDenials = 256
@@ -55,74 +69,66 @@ type denialCounters struct {
 	identity   relayIdentity
 	mu         sync.Mutex
 	reasons    [denialReasonCount]reasonCounts
-	previous   [denialReasonCount]uint64
-	seen       map[[32]byte]struct{}
+	seen       [denialReasonCount]map[[32]byte]struct{}
 	reportedAt time.Time
 }
 
 func (c *denialCounters) record(reason denialReason, signature []byte) {
 	// Fingerprints stay in memory for one reporting interval. Never emit guest data.
-	hash := sha256.New()
-	hash.Write([]byte{byte(reason)})
-	hash.Write(signature)
-	var fingerprint [32]byte
-	hash.Sum(fingerprint[:0])
+	fingerprint := sha256.Sum256(signature)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sample := &c.reasons[reason]
 	sample.Total++
-	if _, found := c.seen[fingerprint]; found {
+	sample.Interval++
+	if _, found := c.seen[reason][fingerprint]; found {
 		sample.Repeated++
-	} else if len(c.seen) < maximumTrackedDenials {
-		if c.seen == nil {
-			c.seen = make(map[[32]byte]struct{})
+	} else if len(c.seen[reason]) < maximumTrackedDenials {
+		if c.seen[reason] == nil {
+			c.seen[reason] = make(map[[32]byte]struct{})
 		}
-		c.seen[fingerprint] = struct{}{}
+		c.seen[reason][fingerprint] = struct{}{}
 		sample.Distinct++
 	} else {
 		sample.Untracked++
 	}
 }
 
+type denialReport struct {
+	Event string `json:"event"`
+	relayIdentity
+	IntervalSeconds float64 `json:"interval_seconds"`
+	Reason          string  `json:"reason,omitempty"`
+	reasonCounts
+}
+
 func (c *denialCounters) write(w io.Writer) {
 	c.mu.Lock()
 	now := time.Now()
-	var interval float64
-	if !c.reportedAt.IsZero() {
-		interval = now.Sub(c.reportedAt).Seconds()
-	}
-	reasons := make(map[string]reasonCounts)
-	var frames, destinations, rejectedDNS uint64
+	interval := now.Sub(c.reportedAt).Seconds()
+	var reports []denialReport
 	for reason := range c.reasons {
 		sample := c.reasons[reason]
-		switch {
-		case denialReason(reason) <= frameFragment:
-			frames += sample.Total
-		case denialReason(reason) <= destinationHostCheck:
-			destinations += sample.Total
-		case denialReason(reason) <= dnsSaturated:
-			rejectedDNS += sample.Total
-		}
 		if sample.Total != 0 {
-			sample.Interval = sample.Total - c.previous[reason]
-			reasons[reasonNames[reason]] = sample
+			reports = append(reports, denialReport{Event: "relay_policy_totals", relayIdentity: c.identity,
+				IntervalSeconds: interval, Reason: reasonNames[reason], reasonCounts: sample})
 		}
-		c.previous[reason] = sample.Total
-		c.reasons[reason].Distinct, c.reasons[reason].Repeated, c.reasons[reason].Untracked = 0, 0, 0
+		c.reasons[reason] = reasonCounts{Total: sample.Total}
+		c.seen[reason] = nil
 	}
-	c.seen, c.reportedAt = nil, now
-	report := struct {
-		Event string `json:"event"`
-		relayIdentity
-		Interval     float64                 `json:"interval_seconds"`
-		Destinations uint64                  `json:"denied_destinations"`
-		Frames       uint64                  `json:"dropped_frames"`
-		DNS          uint64                  `json:"rejected_dns"`
-		Reasons      map[string]reasonCounts `json:"reasons"`
-	}{"relay_policy_totals", c.identity, interval, destinations, frames, rejectedDNS, reasons}
+	c.reportedAt = now
+	if len(reports) == 0 {
+		reports = append(reports, denialReport{Event: "relay_policy_totals", relayIdentity: c.identity, IntervalSeconds: interval})
+	}
 	c.mu.Unlock()
 	// A blocked log consumer must not hold up packet handling or process shutdown.
-	_ = json.NewEncoder(w).Encode(report)
+	// Each reason fits one atomic Darwin pipe write, even with maximum counters.
+	encoder := json.NewEncoder(w)
+	for _, report := range reports {
+		if err := encoder.Encode(report); err != nil {
+			return
+		}
+	}
 }
 
 func (c *denialCounters) report(ctx context.Context, w io.Writer) {

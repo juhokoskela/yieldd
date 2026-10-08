@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"strings"
@@ -22,7 +23,6 @@ type policyReport struct {
 	Event string `json:"event"`
 	relayIdentity
 	Interval float64                 `json:"interval_seconds"`
-	DNS      uint64                  `json:"rejected_dns"`
 	Reasons  map[string]reasonCounts `json:"reasons"`
 }
 
@@ -30,14 +30,31 @@ func readPolicyReport(t *testing.T, counts *denialCounters) policyReport {
 	t.Helper()
 	var buffer bytes.Buffer
 	counts.write(&buffer)
-	var report policyReport
-	if err := json.Unmarshal(buffer.Bytes(), &report); err != nil {
-		t.Fatal(err)
-	}
+	report := decodePolicyReports(t, buffer.Bytes())
 	if strings.Contains(buffer.String(), "private-query") {
 		t.Fatal("guest data leaked into diagnostics")
 	}
 	return report
+}
+
+func decodePolicyReports(t *testing.T, output []byte) policyReport {
+	t.Helper()
+	result := policyReport{Reasons: make(map[string]reasonCounts)}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	for {
+		var report denialReport
+		err := decoder.Decode(&report)
+		if errors.Is(err, io.EOF) {
+			return result
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		result.Event, result.relayIdentity, result.Interval = report.Event, report.relayIdentity, report.IntervalSeconds
+		if report.Reason != "" {
+			result.Reasons[report.Reason] = report.reasonCounts
+		}
+	}
 }
 
 func TestDiagnosticsIdentifyRelayAndSeparateRepeatedQuestionsByInterval(t *testing.T) {
@@ -60,12 +77,47 @@ func TestDiagnosticsIdentifyRelayAndSeparateRepeatedQuestionsByInterval(t *testi
 		if got := report.Reasons["dns_local_name"]; got != (reasonCounts{Total: 3, Interval: 3, Distinct: 2, Repeated: 1}) {
 			t.Fatal("DNS repeats included IDs/case or mixed up intervals", got)
 		}
-		counts.record(dnsLocalName, []byte("private-query.local."))
+		query := new(dns.Msg)
+		query.SetQuestion("private-query.local.", dns.TypeA)
+		handler.ServeDNS(new(dnsRecorder), query)
 		time.Sleep(30 * time.Second)
 		if got := readPolicyReport(t, counts).Reasons["dns_local_name"]; got != (reasonCounts{Total: 4, Interval: 1, Distinct: 1}) {
 			t.Fatal("repeat tracking or totals did not reset correctly", got)
 		}
 	})
+}
+
+func TestFrameTrafficDoesNotConsumeDNSRepeatTracking(t *testing.T) {
+	counts := new(denialCounters)
+	for i := range 300 {
+		counts.record(frameProtocol, []byte(fmt.Sprint(i)))
+	}
+	handler := publicDNS(t.Context(), nil, counts)
+	query := new(dns.Msg)
+	query.SetQuestion("printer.local.", dns.TypeA)
+	for range 50 {
+		handler.ServeDNS(new(dnsRecorder), query.Copy())
+	}
+	got := readPolicyReport(t, counts).Reasons["dns_local_name"]
+	if got.Distinct != 1 || got.Repeated != 49 || got.Untracked != 0 {
+		t.Fatal("frame noise hid a DNS retry loop", got)
+	}
+}
+
+func TestDNSPolicyDenialIsNotAnUpstreamFailure(t *testing.T) {
+	counts := new(denialCounters)
+	handler := publicDNS(t.Context(), func(string, string) (net.Conn, error) {
+		counts.record(destinationHost, []byte(publicResolver))
+		return nil, &deniedDestination{destinationHost}
+	}, counts)
+	query := new(dns.Msg)
+	query.SetQuestion("public.example.", dns.TypeA)
+	response := new(dnsRecorder)
+	handler.ServeDNS(response, query)
+	report := readPolicyReport(t, counts)
+	if response.message.Rcode != dns.RcodeServerFailure || report.Reasons["destination_host"].Total != 1 || report.Reasons["dns_upstream_failed"].Total != 0 {
+		t.Fatal("one policy refusal was also reported as a resolver outage", report)
+	}
 }
 
 func TestDiagnosticRepeatTrackingIsBoundedAndReportsIncompleteTracking(t *testing.T) {
@@ -74,8 +126,8 @@ func TestDiagnosticRepeatTrackingIsBoundedAndReportsIncompleteTracking(t *testin
 		counts.record(destinationNonPublic, []byte(fmt.Sprint(i)))
 	}
 	counts.record(destinationNonPublic, []byte("0"))
-	if len(counts.seen) != maximumTrackedDenials {
-		t.Fatal("unbounded guest-controlled tracking", len(counts.seen))
+	if len(counts.seen[destinationNonPublic]) != maximumTrackedDenials {
+		t.Fatal("unbounded guest-controlled tracking", len(counts.seen[destinationNonPublic]))
 	}
 	got := readPolicyReport(t, counts).Reasons["destination_non_public"]
 	if got.Distinct != maximumTrackedDenials || got.Repeated != 1 || got.Untracked != 20 || got.Interval != maximumTrackedDenials+21 {
@@ -115,8 +167,43 @@ func TestDNSSaturationAndUpstreamFailuresAreSeparateFromPolicyRefusals(t *testin
 	once.Do(func() { close(release) })
 	pending.Wait()
 	report := readPolicyReport(t, counts)
-	if report.Reasons["dns_saturated"].Total != 1 || report.Reasons["dns_upstream_failed"].Total != 16 || report.DNS != 1 {
+	if report.Reasons["dns_saturated"].Total != 1 || report.Reasons["dns_upstream_failed"].Total != 16 || len(report.Reasons) != 2 {
 		t.Fatal("upstream failures were counted as policy refusals", report)
+	}
+}
+
+type atomicDiagnosticWrites struct {
+	bytes.Buffer
+	lengths []int
+}
+
+func (w *atomicDiagnosticWrites) Write(b []byte) (int, error) {
+	w.lengths = append(w.lengths, len(b))
+	return w.Buffer.Write(b)
+}
+
+func TestDiagnosticReasonsHaveNamesAndFitAtomicPipeWrites(t *testing.T) {
+	counts := &denialCounters{identity: relayIdentity{Runner: strings.Repeat("x", 128), Platform: "macos"}, reportedAt: time.Now().Add(-time.Duration(math.MaxInt64))}
+	names := make(map[string]bool)
+	for reason, name := range reasonNames {
+		if name == "" || names[name] {
+			t.Fatal("reason has a missing or duplicate name", reason, name)
+		}
+		names[name] = true
+		counts.reasons[reason] = reasonCounts{math.MaxUint64, math.MaxUint64, math.MaxUint64, math.MaxUint64, math.MaxUint64}
+	}
+	var output atomicDiagnosticWrites
+	counts.write(&output)
+	if len(output.lengths) != int(denialReasonCount) {
+		t.Fatal("reasons were not written separately", output.lengths)
+	}
+	for _, length := range output.lengths {
+		if length > 512 {
+			t.Fatal("diagnostic line exceeds Darwin's atomic pipe limit", length)
+		}
+	}
+	if len(decodePolicyReports(t, output.Bytes()).Reasons) != int(denialReasonCount) {
+		t.Fatal("reason disappeared from output")
 	}
 }
 

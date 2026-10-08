@@ -19,7 +19,7 @@ func sampleFrame() []byte {
 }
 
 func TestFrameBoundary(t *testing.T) {
-	if !validFrame(sampleFrame()) {
+	if _, valid := frameRejection(sampleFrame()); !valid {
 		t.Fatal("valid IPv4 frame denied")
 	}
 	for _, test := range []struct {
@@ -35,6 +35,10 @@ func TestFrameBoundary(t *testing.T) {
 		{"VLAN", func(b []byte) []byte { b[12] = 0x81; b[13] = 0; return b }, frameProtocol},
 		{"fragment", func(b []byte) []byte { b[20] = 0x20; return b }, frameFragment},
 		{"options", func(b []byte) []byte { b[14] = 0x46; return b }, frameOptions},
+		{"wrong IP version", func(b []byte) []byte { b[14] = 0x65; return b }, frameMalformed},
+		{"short IP header", func(b []byte) []byte { b[14] = 0x44; return b }, frameMalformed},
+		{"truncated IP options", func(b []byte) []byte { b[14] = 0x4f; return b }, frameMalformed},
+		{"options exceed IP size", func(b []byte) []byte { b[14] = 0x46; b[17] = 20; return b }, frameMalformed},
 		{"ICMP", func(b []byte) []byte { b[23] = 1; return b }, frameProtocol},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -49,5 +53,36 @@ func TestFrameBoundary(t *testing.T) {
 func FuzzFrameBoundary(f *testing.F) {
 	f.Add(sampleFrame())
 	f.Add([]byte{})
-	f.Fuzz(func(_ *testing.T, data []byte) { validFrame(data) })
+	f.Fuzz(func(_ *testing.T, data []byte) { frameRejection(data) })
+}
+
+func TestARPReasonsSeparateNeighborsFromIdentitySpoofing(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		edit   func([]byte)
+		reason denialReason
+	}{
+		{"neighbor", func(p []byte) { p[27] = 3 }, frameNeighbor},
+		{"unsupported operation", func(p []byte) { p[7] = 3 }, frameProtocol},
+		{"sender hardware", func(p []byte) { p[8] = 4 }, frameIdentity},
+		{"sender address", func(p []byte) { p[17] = 3 }, frameIdentity},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame := make([]byte, 42)
+			copy(frame[6:12], guestHardware)
+			binary.BigEndian.PutUint16(frame[12:14], 0x0806)
+			payload := frame[14:]
+			copy(payload, []byte{0, 1, 8, 0, 6, 4, 0, 1})
+			copy(payload[8:14], guestHardware)
+			copy(payload[14:18], guestAddress)
+			copy(payload[24:28], gatewayAddress)
+			if _, valid := frameRejection(frame); !valid {
+				t.Fatal("valid gateway ARP was rejected")
+			}
+			test.edit(payload)
+			if reason, valid := frameRejection(frame); valid || reason != test.reason {
+				t.Fatal("ARP rejection misclassified", reason, test.reason)
+			}
+		})
+	}
 }

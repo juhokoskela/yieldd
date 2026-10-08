@@ -79,8 +79,7 @@ func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, di
 		}
 	}()
 	defer func() { stop(); <-ownerDone; owner.Close() }()
-	counts := new(denialCounters)
-	counts.identity, counts.reportedAt = identity, time.Now()
+	counts := &denialCounters{identity: identity, reportedAt: time.Now()}
 	// Diagnostics belong to the helper process. Never join a reporter that may
 	// be blocked by its consumer; process exit also ends that goroutine.
 	go counts.report(ctx, diagnostics)
@@ -91,11 +90,13 @@ func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, di
 	return nil
 }
 
+var diagnosticRunnerPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,127}$`)
+
 func (i relayIdentity) validate() error {
 	if i.Runner == "" && i.Platform == "" {
 		return nil
 	}
-	if len(i.Runner) > 128 || !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]*$`).MatchString(i.Runner) || (i.Platform != "linux" && i.Platform != "macos") {
+	if !diagnosticRunnerPattern.MatchString(i.Runner) || (i.Platform != "linux" && i.Platform != "macos") {
 		return errors.New("invalid relay diagnostic identity")
 	}
 	return nil

@@ -51,14 +51,15 @@ final class RunnerNetworkRelay: @unchecked Sendable {
         socketURL = directoryURL.appendingPathComponent("n")
         sshSocketURL = socketURL.appendingPathExtension("ssh")
         process.executableURL = executableURL
-        process.arguments = ["--socket", socketURL.path]
+        var arguments = ["--socket", socketURL.path]
         if let identity {
-            process.arguments? += ["--runner", identity.runner, "--platform", identity.platform]
+            arguments += ["--runner", identity.runner, "--platform", identity.platform.lowercased()]
         }
+        process.arguments = arguments
         process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
         process.standardInput = lifetime
         process.standardOutput = readiness
-        // The trusted relay emits fixed-size policy totals, not packet contents.
+        // The trusted relay emits bounded per-reason summaries, not packet contents.
         process.standardError = FileHandle.standardError
         process.terminationHandler = { [exited] _ in exited.signal() }
     }
