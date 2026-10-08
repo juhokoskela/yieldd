@@ -25,20 +25,22 @@ func TestFrameBoundary(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func([]byte) []byte
+		reason denialReason
 	}{
-		{"short", func(b []byte) []byte { return b[:13] }},
-		{"oversize", func(b []byte) []byte { return append(b, make([]byte, 1514)...) }},
-		{"spoofed MAC", func(b []byte) []byte { b[6] = 4; return b }},
-		{"spoofed IP", func(b []byte) []byte { b[26] = 8; return b }},
-		{"IPv6", func(b []byte) []byte { b[12] = 0x86; b[13] = 0xdd; return b }},
-		{"VLAN", func(b []byte) []byte { b[12] = 0x81; b[13] = 0; return b }},
-		{"fragment", func(b []byte) []byte { b[20] = 0x20; return b }},
-		{"options", func(b []byte) []byte { b[14] = 0x46; return b }},
-		{"ICMP", func(b []byte) []byte { b[23] = 1; return b }},
+		{"short", func(b []byte) []byte { return b[:13] }, frameMalformed},
+		{"oversize", func(b []byte) []byte { return append(b, make([]byte, 1514)...) }, frameMalformed},
+		{"spoofed MAC", func(b []byte) []byte { b[6] = 4; return b }, frameIdentity},
+		{"spoofed IP", func(b []byte) []byte { b[26] = 8; return b }, frameIdentity},
+		{"IPv6", func(b []byte) []byte { b[12] = 0x86; b[13] = 0xdd; return b }, frameIPv6},
+		{"VLAN", func(b []byte) []byte { b[12] = 0x81; b[13] = 0; return b }, frameProtocol},
+		{"fragment", func(b []byte) []byte { b[20] = 0x20; return b }, frameFragment},
+		{"options", func(b []byte) []byte { b[14] = 0x46; return b }, frameOptions},
+		{"ICMP", func(b []byte) []byte { b[23] = 1; return b }, frameProtocol},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if validFrame(test.mutate(sampleFrame())) {
-				t.Fatal("invalid frame permitted")
+			reason, valid := frameRejection(test.mutate(sampleFrame()))
+			if valid || reason != test.reason {
+				t.Fatal("invalid frame permitted or incorrectly categorized", reason, test.reason)
 			}
 		})
 	}
