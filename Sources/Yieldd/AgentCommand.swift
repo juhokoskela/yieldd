@@ -60,7 +60,7 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
             )
 
             try validateRunnerServiceTemplate(templateURL, stateDirectory: leaseStore.directory)
-            try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: Set(leaseStore.load().map(\.runnerID)))
+            try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: Set(leaseStore.load().map(\.runnerID)))
             try MacOSVirtualizationProbe(stateDirectory: leaseStore.directory).run(
                 templateURL: templateURL,
                 cloneRootURL: RunnerStorage.required(in: leaseStore.directory).probesURL,
@@ -116,7 +116,8 @@ struct AgentInstallCommand: ParsableCommand {
         stateDirectory: URL? = nil,
         memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission(),
         loadStorage: ((URL) throws -> RunnerStorage?)? = nil,
-        relayURL: URL = MacOSRunnerNetwork.bundledRelayURL
+        relayURL: URL = RunnerNetwork.bundledRelayURL,
+        executor: any ProcessExecuting = ProcessExecutor()
     ) throws {
         let slots = try runners.serviceConfiguration()
         try memoryAdmission.validateCapacity(reserving: slots.memoryReservationBytes)
@@ -127,7 +128,10 @@ struct AgentInstallCommand: ParsableCommand {
         if let templateURL = configuration.runners.macOSTemplateURL {
             if let storage { try storage.validateMacOS(template: templateURL, clones: storage.clonesURL) }
             try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory)
-            try MacOSRunnerNetwork.requireRelay(at: relayURL)
+        }
+        try RunnerNetwork.requireRelay(at: relayURL)
+        if slots.requiresLinux, let container = configuration.containerURL {
+            try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: executor)
         }
         guard !preflightOnly else {
             // Machine-readable result consumed by install-local-agent.sh.
@@ -230,7 +234,7 @@ func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, e
                          makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     try withRunnerOwnership(in: store.directory) { leaseStore in
         if try leaseStore.load().isEmpty {
-            try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: [], makeCloneStore: makeCloneStore)
+            try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: [], makeCloneStore: makeCloneStore)
             return
         }
 

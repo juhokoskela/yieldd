@@ -26,18 +26,21 @@ struct Doctor {
     let supportsAppleSilicon: () -> Bool
     let stateDirectory: URL
     let loadStorage: () throws -> RunnerStorage?
+    let relayURL: URL
 
     init(
         stateDirectory: URL,
         executor: any ProcessExecuting = ProcessExecutor(),
         executableLocator: ExecutableLocator = ExecutableLocator(),
         loadStorage: (() throws -> RunnerStorage?)? = nil,
+        relayURL: URL = RunnerNetwork.bundledRelayURL,
         supportsAppleSilicon: @escaping () -> Bool = HostCapabilities.supportsAppleSilicon
     ) {
         self.executor = executor
         self.executableLocator = executableLocator
         self.supportsAppleSilicon = supportsAppleSilicon
         self.stateDirectory = stateDirectory
+        self.relayURL = relayURL
         self.loadStorage = loadStorage ?? { try RunnerStorage.validated(in: stateDirectory, executor: executor) }
     }
 
@@ -53,6 +56,12 @@ struct Doctor {
             checks.append(contentsOf: macOSChecks(templateURL: templateURL))
         } else {
             checks.append(contentsOf: containerChecks())
+        }
+        do {
+            try RunnerNetwork.requireRelay(at: relayURL)
+            checks.append(DoctorCheck(name: "network relay", status: .passed("available")))
+        } catch {
+            checks.append(DoctorCheck(name: "network relay", status: .failed(describeError(error))))
         }
         checks.append(contentsOf: githubChecks())
         do {
@@ -74,7 +83,6 @@ struct Doctor {
         let checks: [(String, () throws -> Void)] = [
             ("macOS virtualization", { try MacOSVirtualMachineLifecycle.requireSupportedHost() }),
             ("Virtualization entitlement", { try VirtualizationEntitlement.requireCurrentProcess() }),
-            ("macOS network relay", { try MacOSRunnerNetwork.requireRelay() }),
             ("macOS template", {
                 try validateRunnerServiceTemplate(
                     templateURL, stateDirectory: stateDirectory
@@ -140,6 +148,7 @@ struct Doctor {
             arguments: ["machine", "list", "--quiet"]
         )
         do {
+            try AppleContainerBackend.requireNetworkSupport(containerURL: containerURL, executor: executor)
             try executor.execute(machineRequest).requireSuccess(for: machineRequest)
             checks.append(DoctorCheck(name: "container machine", status: .passed("available")))
         } catch {

@@ -139,9 +139,27 @@ func agentInstallPreflightResolvesToolsWithoutAPackagedApplication() throws {
     try command.run(locateExecutable: { name in
         resolvedTools.append(name)
         return URL(fileURLWithPath: "/usr/bin/\(name)")
-    }, stateDirectory: fixture.directory, memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil })
+    }, stateDirectory: fixture.directory, memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil }, relayURL: URL(fileURLWithPath: "/usr/bin/true"),
+       executor: RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "--network-socket")), .success(processResult())]))
 
     #expect(resolvedTools == ["container", "gh"])
+}
+
+@Test
+func agentInstallPreflightRejectsStockContainerBeforeSavingConfiguration() throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let command = try AgentInstallCommand.parse(["owner/repository", "--preflight-only"])
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "stock machine create"))])
+    #expect(throws: AppleContainerBackendError.unsupportedCLI) {
+        try command.run(locateExecutable: { URL(fileURLWithPath: "/test/\($0)") },
+            stateDirectory: fixture.directory,
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024),
+            loadStorage: { _ in nil },
+            relayURL: URL(fileURLWithPath: "/usr/bin/true"), executor: executor)
+    }
+    #expect(executor.requests.map(\.arguments) == [["machine", "create", "--help"]])
+    #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("agent.json").path))
 }
 
 @Test
@@ -285,7 +303,8 @@ func agentPreflightValidatesCombinedReservations(hostGiB: Int, mixed: Bool) thro
             return URL(fileURLWithPath: "/usr/bin/true")
         }, stateDirectory: fixture.rootURL,
         memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: UInt64(hostGiB) * 1_024 * 1_024 * 1_024), loadStorage: { _ in nil },
-        relayURL: URL(fileURLWithPath: "/usr/bin/true"))
+        relayURL: URL(fileURLWithPath: "/usr/bin/true"),
+        executor: RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "--network-socket")), .success(processResult())]))
     }
     if mixed && hostGiB == 24 {
         #expect(throws: RunnerMemoryAdmissionError.insufficientHostMemory(

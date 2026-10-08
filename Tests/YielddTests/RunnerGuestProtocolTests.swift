@@ -19,8 +19,8 @@ func guestProtocolRejectsOutdatedScriptsWithoutSendingCredentials(_ response: St
     let outcome: Result<ProcessResult, any Error> = response == "old-script"
         ? .failure(ProcessExecutionError.nonZeroExit(request: request, result: processResult(stderr: "usage: yieldd-configure-runner OWNER/REPO NAME", status: 2)))
         : .success(processResult(stdout: response))
-    let executor = RecordingProcessExecutor(outcomes: [outcome, outcome])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+    let outcomes: [Result<ProcessResult, any Error>] = [outcome, outcome]
+    let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: request.executableURL, id: RunnerID(value: "yieldd-test"))
     if response == "1\n" {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
         #expect(executor.requests.count == 2)
@@ -38,12 +38,11 @@ func guestProtocolTimeoutIdentifiesTheHelperAndPreservesDiagnostics(completedChe
     let helper = ["yieldd-configure-runner", "yieldd-runner-control"][completedChecks]
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),
         arguments: [], timeout: 5)
-    let executor = RecordingProcessExecutor(outcomes:
-        Array(repeating: .success(processResult(stdout: "1\n")), count: completedChecks) + [
+    let outcomes: [Result<ProcessResult, any Error>] = Array(repeating: .success(processResult(stdout: "1\n")), count: completedChecks) + [
             .failure(ProcessExecutionError.timedOut(request: request,
                 result: processResult(stderr: "SSH diagnostic tail"))),
-        ])
-    let backend = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"), executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+        ]
+    let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: URL(fileURLWithPath: "/test/container"), id: RunnerID(value: "yieldd-test"))
 
     do {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
@@ -64,11 +63,11 @@ func guestProtocolTimeoutIdentifiesTheHelperAndPreservesDiagnostics(completedChe
 @Test
 func guestProtocolPreservesProcessCancellation() throws {
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/container"), arguments: [])
-    let executor = RecordingProcessExecutor(outcomes: [
+    let outcomes: [Result<ProcessResult, any Error>] = [
         .failure(ProcessExecutionError.cancelled(request: request, result: processResult(),
             underlying: CancellationError())),
-    ])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor, stateDirectory: unconfiguredContainerStateDirectory)
+    ]
+    let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: request.executableURL, id: RunnerID(value: "yieldd-test"))
 
     do {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
@@ -89,9 +88,8 @@ func guestProtocolPreservesProcessCancellation() throws {
 func guestProtocolPreservesTransportAndDaemonDiagnostics(status: Int32) throws {
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/container"), arguments: [])
     let result = processResult(stderr: "transport connection unavailable", status: status)
-    let executor = RecordingProcessExecutor(outcomes: [.success(result)])
-    let backend = AppleContainerBackend(containerURL: request.executableURL, executor: executor,
-                                         stateDirectory: unconfiguredContainerStateDirectory)
+    let outcomes: [Result<ProcessResult, any Error>] = [.success(result)]
+    let (backend, _) = try readyLinuxBackend(outcomes: outcomes, containerURL: request.executableURL, id: RunnerID(value: "yieldd-test"))
     let error = try #require(#expect(throws: ProcessExecutionError.self) {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
     })

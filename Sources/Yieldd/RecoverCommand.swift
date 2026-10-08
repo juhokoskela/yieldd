@@ -16,7 +16,7 @@ struct RecoverCommand: ParsableCommand {
                 leaseStore: store,
                 makeGitHub: { GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor) },
                 makeLinuxBackend: {
-                    AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: store.directory)
+                    try AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: store.directory)
                 },
                 checkCancellation: stop.check,
                 wait: stop.wait
@@ -38,7 +38,7 @@ func recoverAbandonedRunners(
 ) throws {
     try checkCancellation()
     if try leaseStore.load().isEmpty {
-        try removeUnleasedMacOSClones(in: leaseStore.directory, keeping: [], checkCancellation: checkCancellation, makeCloneStore: makeCloneStore)
+        try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: [], checkCancellation: checkCancellation, makeCloneStore: makeCloneStore)
         return
     }
     let recovery = RunnerRecovery(

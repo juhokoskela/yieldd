@@ -4,6 +4,56 @@ import Testing
 @testable import Yieldd
 
 @Test
+func monitoredProcessPropagatesRelayFailureInsteadOfCancellation() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yieldd-monitor-\(UUID().uuidString)", isDirectory: true)
+    let processGroupURL = directory.appendingPathComponent("group.pid")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer {
+        terminateProcessGroupRecorded(at: processGroupURL)
+        try? FileManager.default.removeItem(at: directory)
+    }
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "echo $$ > \"$1\"; exec /bin/sleep 30", "yieldd-monitor-test", processGroupURL.path], timeout: 2)
+    let error = try #require(#expect(throws: RunnerNetworkRelayError.self) {
+        try ProcessExecutor(terminationGracePeriod: 0, cancellationPollInterval: 0.01).execute(request, checking: {
+            if processIdentifierRecorded(at: processGroupURL) != nil {
+                throw RunnerNetworkRelayError.exited(status: 9)
+            }
+        })
+    })
+    #expect(!isCancellation(error))
+    let processGroup = try #require(processIdentifierRecorded(at: processGroupURL))
+    #expect(!processGroupExists(processGroup))
+}
+
+@Test
+func monitoredExecutionDoesNotRecheckAfterReturningSuccess() throws {
+    var checks = 0
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [])
+    let result = processResult()
+    let executor = RecordingProcessExecutor(outcomes: [.success(result)])
+    #expect(try executor.execute(request, checking: {
+        checks += 1
+        if checks > 1 { throw RunnerNetworkRelayError.exited(status: 9) }
+    }) == result)
+    #expect(checks == 1)
+}
+
+@Test
+func monitoredProcessPreservesActualCancellation() throws {
+    var checks = 0
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 2)
+    let error = try #require(#expect(throws: CancellationError.self) {
+        try ProcessExecutor(terminationGracePeriod: 0, cancellationPollInterval: 0.01).execute(request, checking: {
+            checks += 1
+            if checks >= 2 { throw CancellationError() }
+        })
+    })
+    #expect(isCancellation(error))
+}
+
+@Test
 func capturesStandardOutput() throws {
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/usr/bin/printf"),

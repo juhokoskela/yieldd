@@ -66,23 +66,22 @@ struct ConnectCommand: ParsableCommand {
                     print("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
                     return
                 }
-                if template != nil {
-                    try removeUnleasedMacOSClones(in: directory, keeping: [], checkCancellation: stop.check)
-                }
+                try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
                 let storage = try RunnerStorage.required(in: directory)
                 try storage.validate(stateDirectory: directory)
+                try RunnerNetwork.requireRelay()
                 let memory = RunnerMemoryAdmission()
                 for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
                 if let template {
                     try storage.validateMacOS(template: template, clones: storage.clonesURL)
                     try MacOSVirtualizationBackend.validateTemplate(at: template)
                     try VirtualizationEntitlement.requireCurrentProcess()
-                    try MacOSRunnerNetwork.requireRelay()
                 }
                 let backends = try platforms.map { platform -> RunnerSlotBackend in
                     switch platform {
                     case .linux:
                         let container = try ExecutableLocator().locate("container")
+                        try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check))
                         try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check), stateDirectory: directory).start()
                         try storage.validateContainer(containerExecutable: container)
                         return .linux(containerURL: container)
@@ -103,8 +102,9 @@ struct ConnectCommand: ParsableCommand {
                     let backend: any RunnerBackend
                     switch worker.backend {
                     case let .linux(containerURL):
-                        backend = AppleContainerBackend(containerURL: containerURL, executor: executor,
+                        backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
                             stateDirectory: directory,
+                            checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                             dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
                     case let .macOS(templateURL):
                         backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,

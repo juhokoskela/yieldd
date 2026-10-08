@@ -85,7 +85,7 @@ func storageQuotaStopsWritesButNotRecoveryJournal() throws {
     let linuxBundle = storage.containerURL.appendingPathComponent("plugin-state/machine-apiserver/machines/\(linuxID.value)")
     try FileManager.default.createDirectory(at: linuxBundle, withIntermediateDirectories: true)
     let container = StorageContainerExecutor(storage: storage, id: linuxID)
-    let linux = AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"),
+    let linux = try AppleContainerBackend(containerURL: URL(fileURLWithPath: "/test/container"),
         executor: container, stateDirectory: leases.directory)
     try AppleContainerSystem(containerURL: URL(fileURLWithPath: "/test/container"), executor: container,
                              stateDirectory: leases.directory).start()

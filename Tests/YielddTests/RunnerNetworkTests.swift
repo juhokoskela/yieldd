@@ -4,7 +4,7 @@ import Testing
 import Virtualization
 @testable import Yieldd
 
-@Suite struct MacOSRunnerNetworkTests {
+@Suite struct RunnerNetworkTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"] != nil), arguments: [false, true])
     func realRelayAttachmentAndCleanupWithFakeVM(blockDirectoryRemoval: Bool) throws {
         let executable = try #require(ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"])
@@ -18,7 +18,7 @@ import Virtualization
         let backend = try MacOSVirtualizationBackend(
             stateDirectory: fixture.rootURL, templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
             executor: executor,
-            network: MacOSRunnerNetwork(stateDirectory: fixture.rootURL, executableURL: URL(fileURLWithPath: executable)),
+            network: RunnerNetwork(stateDirectory: fixture.rootURL, executableURL: URL(fileURLWithPath: executable)),
             requireEntitlement: {},
             loadStorage: { nil }, makeMachine: { _, _, path in
                 socket = try PacketSocket(path: path.path)
@@ -138,7 +138,7 @@ func runnerNetworkPreflightRejectsMissingHelper() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let missing = fixture.rootURL.appendingPathComponent("missing-relay")
-    #expect(throws: MacOSRunnerNetworkError.self) { try MacOSRunnerNetwork.requireRelay(at: missing) }
+    #expect(throws: RunnerNetworkError.self) { try RunnerNetwork.requireRelay(at: missing) }
 }
 
 @Test(arguments: [false, true])
@@ -147,7 +147,7 @@ func runnerNetworkFailedStartRemovesItsDirectory(cancelAfterCreation: Bool) thro
     defer { fixture.remove() }
     let store = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
-    let network = try MacOSRunnerNetwork(
+    let network = try RunnerNetwork(
         stateDirectory: fixture.rootURL, executableURL: fixture.rootURL.appendingPathComponent("missing-relay")
     )
     var checks = 0
@@ -170,7 +170,7 @@ func runnerNetworkRejectedStartPreservesExistingFiles() throws {
     let directory = try store.create(for: id)
     let file = directory.appendingPathComponent("existing")
     try Data("previous owner".utf8).write(to: file)
-    let network = try MacOSRunnerNetwork(stateDirectory: fixture.rootURL)
+    let network = try RunnerNetwork(stateDirectory: fixture.rootURL)
     #expect(throws: POSIXError(.ENOTEMPTY)) { _ = try network.start(for: id, checkCancellation: {}) }
     #expect(try Data(contentsOf: file) == Data("previous owner".utf8))
 }
@@ -183,7 +183,7 @@ func runnerNetworkOrphansAreRemovedEvenWhenCloneStorageIsMissing() throws {
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
     let orphan = try store.create(for: RunnerID(value: "yieldd-network-orphan"))
     #expect(throws: RunnerSessionError.self) {
-        try removeUnleasedMacOSClones(in: fixture.rootURL, keeping: [])
+        try removeUnleasedRunnerFiles(in: fixture.rootURL, keeping: [])
     }
     #expect(!FileManager.default.fileExists(atPath: orphan.path))
 }

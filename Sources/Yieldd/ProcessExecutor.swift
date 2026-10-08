@@ -144,12 +144,20 @@ extension ProcessExecutionError: LocalizedError {
 
 protocol ProcessExecuting {
     func execute(_ request: ProcessRequest) throws -> ProcessResult
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult
+}
+
+extension ProcessExecuting {
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
+        try checking()
+        return try execute(request)
+    }
 }
 
 struct ProcessExecutor: ProcessExecuting {
     private let terminationGracePeriod: TimeInterval
     private let cancellationPollInterval: TimeInterval
-    private let checkCancellation: (() throws -> Void)?
+    private var checkCancellation: (() throws -> Void)?
     private let maximumExecutionDeadline: (@Sendable () -> DispatchTime?)?
 
     init(
@@ -164,6 +172,22 @@ struct ProcessExecutor: ProcessExecuting {
         self.cancellationPollInterval = cancellationPollInterval
         self.checkCancellation = checkCancellation
         self.maximumExecutionDeadline = maximumExecutionDeadline
+    }
+
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
+        try checking()
+        var monitored = self
+        monitored.checkCancellation = {
+            try self.checkCancellation?()
+            do { try checking() }
+            catch { throw ProcessMonitorFailure(cause: error) }
+        }
+        do { return try monitored.execute(request) }
+        catch {
+            if case let ProcessExecutionError.cancelled(_, _, underlying) = error,
+               let failure = underlying as? ProcessMonitorFailure { throw failure.cause }
+            throw error
+        }
     }
 
     func execute(_ request: ProcessRequest) throws -> ProcessResult {
@@ -572,6 +596,10 @@ struct ProcessExecutor: ProcessExecuting {
         }
         return false
     }
+}
+
+private struct ProcessMonitorFailure: Error {
+    let cause: any Error
 }
 
 private enum ProcessWaitOutcome {

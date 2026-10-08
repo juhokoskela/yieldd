@@ -25,6 +25,102 @@ index 93b93c4..85f5522 100644
          .executableTarget(
              name: "container",
              dependencies: [
+diff --git a/Sources/ContainerCommands/Machine/MachineBoot.swift b/Sources/ContainerCommands/Machine/MachineBoot.swift
+new file mode 100644
+--- /dev/null
++++ b/Sources/ContainerCommands/Machine/MachineBoot.swift
+@@ -0,0 +1,41 @@
++//===----------------------------------------------------------------------===//
++// Copyright © 2026 Apple Inc. and the container project authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//   https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//===----------------------------------------------------------------------===//
++
++import ArgumentParser
++import ContainerAPIClient
++import MachineAPIClient
++
++extension Application {
++    public struct MachineBoot: AsyncLoggableCommand {
++        public init() {}
++
++        public static let configuration = CommandConfiguration(
++            commandName: "boot",
++            abstract: "Boot a container machine without terminal input"
++        )
++
++        @OptionGroup
++        public var logOptions: Flags.Logging
++
++        @Argument(help: "container machine ID (uses default if not specified)")
++        var id: String?
++
++        public func run() async throws {
++            let snapshot = try await bootMachine(id: id, client: MachineClient(), log: log, interactive: false)
++            print(snapshot.id)
++        }
++    }
++}
+diff --git a/Sources/ContainerCommands/Machine/MachineCommand.swift b/Sources/ContainerCommands/Machine/MachineCommand.swift
+--- a/Sources/ContainerCommands/Machine/MachineCommand.swift
++++ b/Sources/ContainerCommands/Machine/MachineCommand.swift
+@@ -45,6 +45,7 @@ extension Application {
+                 """,
+             subcommands: [
++                MachineBoot.self,
+                 MachineCreate.self,
+                 MachineDelete.self,
+                 MachineInspect.self,
+                 MachineList.self,
+diff --git a/Sources/ContainerCommands/Machine/MachineCreate.swift b/Sources/ContainerCommands/Machine/MachineCreate.swift
+--- a/Sources/ContainerCommands/Machine/MachineCreate.swift
++++ b/Sources/ContainerCommands/Machine/MachineCreate.swift
+@@ -69,6 +69,9 @@ extension Application {
+         @Option(name: .long, help: "Path to a custom kernel binary (e.g. vmlinux).")
+         public var kernel: String?
+
++        @Option(name: .long, help: "Host-owned packet relay socket. Requires --home-mount none.")
++        public var networkSocket: String?
++
+         @Argument(help: "Container image reference (e.g., alpine:3.22)")
+         var image: String
+
+@@ -102,6 +105,7 @@ extension Application {
+                     "home-mount": homeMount,
+                     "virtualization": virtualization ? "true" : nil,
+                     "kernel": resolvedKernel?.string,
++                    "network-socket": networkSocket,
+                 ].compactMapValues { $0 }
+             )
+
+diff --git a/Sources/ContainerCommands/Machine/MachineInspect.swift b/Sources/ContainerCommands/Machine/MachineInspect.swift
+--- a/Sources/ContainerCommands/Machine/MachineInspect.swift
++++ b/Sources/ContainerCommands/Machine/MachineInspect.swift
+@@ -66,6 +66,7 @@ private struct InspectOutput: Codable {
+     let homeMount: MachineConfig.HomeMountOption
+     let diskSize: UInt64?
+     let ipAddress: String?
++    let networkSocket: String?
+
+     init(_ snapshot: MachineSnapshot) {
+         self.id = snapshot.id
+@@ -82,5 +83,6 @@ private struct InspectOutput: Codable {
+         self.homeMount = snapshot.bootConfig.homeMount
+         self.diskSize = snapshot.diskSize
+         self.ipAddress = snapshot.ipAddress
++        self.networkSocket = snapshot.bootConfig.networkSocket
+     }
+ }
 diff --git a/Sources/ContainerPersistence/MachineConfig.swift b/Sources/ContainerPersistence/MachineConfig.swift
 index 6c81612..aad4534 100644
 --- a/Sources/ContainerPersistence/MachineConfig.swift
