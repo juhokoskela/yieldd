@@ -5,15 +5,84 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/actions/scaleset"
+	"github.com/golang-jwt/jwt/v4"
 )
+
+func TestSDKLookupAndTransientFailuresAfterTokenRefresh(t *testing.T) {
+	for _, status := range []int{200, 403, 429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			}).SignedString([]byte("test-only"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var requests []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				switch r.URL.Path {
+				case "/api/v3/repos/owner/repo/actions/runners/registration-token":
+					w.WriteHeader(201)
+					io.WriteString(w, `{"token":"private-registration-token"}`)
+				case "/api/v3/actions/runner-registration":
+					fmt.Fprintf(w, `{"url":"http://%s/","token":%q}`, r.Host, token)
+				case "/_apis/runtime/runnerscalesets/2":
+					w.WriteHeader(status)
+					if status != 200 {
+						io.WriteString(w, `{"message":"private-jit secret-token"}`)
+					}
+				default:
+					t.Error("unexpected request", r.Method, r.URL.Path)
+					w.WriteHeader(400)
+				}
+			}))
+			defer server.Close()
+			client, err := newScaleSetClient(server.URL+"/owner/repo", "private-pat")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ensurePlatformScaleSet(t.Context(), client, config{Repository: "owner/repo", Platform: "macos"}, 2)
+			if err == nil {
+				t.Fatal("expected lookup failure")
+			}
+			want := []string{"POST /api/v3/repos/owner/repo/actions/runners/registration-token", "POST /api/v3/actions/runner-registration", "GET /_apis/runtime/runnerscalesets/2"}
+			if !slices.Equal(requests, want) {
+				t.Fatalf("requests = %v, want %v", requests, want)
+			}
+			if !strings.Contains(err.Error(), "saved scale set 2") {
+				t.Fatal("missing saved identity", err)
+			}
+			if strings.Contains(err.Error(), "private-") || strings.Contains(err.Error(), "secret-token") {
+				t.Fatal("credential leaked")
+			}
+			if transientFailure(err) != (status == 200 || status == 429 || status == 503) {
+				t.Fatal("incorrect cleanup retry classification", status, err)
+			}
+			if status == 200 && err.Error() != "Scale Set API get saved scale set 2 failed: empty response (response details withheld)" {
+				t.Fatal("incorrect empty-response diagnostic", err)
+			}
+		})
+	}
+}
+
+func TestQueueStartupFailureIdentifiesRepositoryAndPlatform(t *testing.T) {
+	cfg := testConfig
+	cfg.Platform = "macos"
+	_, err := openPlatformCoordinator(t.Context(), cfg, "relative-state", "test-only", false)
+	if err == nil || err.Error() != "repository "+cfg.Repository+" platform macos: state directory must be absolute" {
+		t.Fatal("missing queue identity", err)
+	}
+}
 
 type scaleSetWriteResponse struct {
 	*fakeScaleSets

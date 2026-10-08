@@ -24,6 +24,11 @@ type platformCoordinator struct {
 }
 
 func openPlatformCoordinator(ctx context.Context, cfg config, directory, token string, recoverOnly bool) (_ *platformCoordinator, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("repository %s platform %s: %w", cfg.Repository, cfg.platform(), err)
+		}
+	}()
 	store, err := openStore(directory)
 	if err != nil {
 		return nil, err
@@ -38,18 +43,15 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if err != nil {
 		return nil, err
 	}
-	// A lost registration POST must never be retried automatically.
-	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
-		GitHubConfigURL: "https://github.com/" + cfg.Repository, PersonalAccessToken: token,
-		SystemInfo: scaleset.SystemInfo{System: "yieldd", Version: "prototype", Subsystem: "coordinator"},
-	}, scaleset.WithRetryMax(0), scaleset.WithTimeout(60*time.Second))
+	logger := slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())
+	client, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
 	if err != nil {
 		return nil, &sdkError{"initialize client", err}
 	}
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())}
+	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger}
 	loopContext, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	p.loop = newCoordinatorLoop(loopContext, worker)
@@ -75,6 +77,15 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 		return nil, err
 	}
 	return p, nil
+}
+
+func newScaleSetClient(configURL, token string) (*scaleset.Client, error) {
+	// A lost registration POST must never be retried automatically. Let the SDK
+	// create separate HTTP clients, rather than sharing its mutable auth policy.
+	return scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
+		GitHubConfigURL: configURL, PersonalAccessToken: token,
+		SystemInfo: scaleset.SystemInfo{System: "yieldd", Version: "prototype", Subsystem: "coordinator"},
+	}, scaleset.WithRetryMax(0), scaleset.WithTimeout(60*time.Second))
 }
 
 func closeCoordinators(workers ...*platformCoordinator) {
@@ -153,13 +164,15 @@ func ensurePlatformScaleSet(ctx context.Context, client scaleSetAPI, cfg config,
 	}
 	var set *scaleset.RunnerScaleSet
 	var err error
+	operation := fmt.Sprintf("find scale set %q", name)
 	if savedID != 0 {
+		operation = fmt.Sprintf("get saved scale set %d", savedID)
 		set, err = client.GetRunnerScaleSetByID(ctx, savedID)
 	} else {
 		set, err = client.GetRunnerScaleSet(ctx, 1, name)
 	}
 	if err != nil {
-		return 0, &sdkError{"find scale set", err}
+		return 0, &sdkError{operation, err}
 	}
 	baseLabels := []scaleset.Label{{Name: name}}
 	if set == nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,7 +67,35 @@ type sdkError struct {
 }
 
 func (e *sdkError) Error() string {
-	return fmt.Sprintf("Scale Set API %s failed (response details withheld)", e.operation)
+	return fmt.Sprintf("Scale Set API %s failed: %s (response details withheld)", e.operation, failureKind(e.cause))
+}
+
+func failureKind(err error) string {
+	var syntax *json.SyntaxError
+	var shape *json.UnmarshalTypeError
+	var network net.Error
+	if errors.Is(err, context.Canceled) {
+		return "request canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request timed out"
+	}
+	if errors.As(err, &network) {
+		if network.Timeout() {
+			return "request timed out"
+		}
+		return "request did not complete"
+	}
+	if errors.Is(err, io.EOF) {
+		return "empty response"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "incomplete response"
+	}
+	if errors.As(err, &syntax) || errors.As(err, &shape) {
+		return "invalid response"
+	}
+	return "unclassified error"
 }
 func (e *sdkError) Unwrap() error { return e.cause }
 

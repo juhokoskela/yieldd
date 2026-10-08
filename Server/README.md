@@ -149,6 +149,8 @@ If a recorded workflow returns 404, the coordinator first verifies Actions acces
 
 If dispatch fails before the HTTP transport consumes any payload bytes, the coordinator closes the body against late reads and persists cleanup intent. Once the transport has consumed any bytes, a cancellation or connection error remains ambiguous, even if delivery may have failed. It never treats a context error alone as evidence that dispatch did not happen.
 
+Startup errors name the repository and platform. Scale Set API errors state a category but never include SDK response bodies. The SDK does not expose every HTTP failure as a distinct category. An empty HTTP 200 for a saved scale set does not prove the set is gone; the coordinator stops rather than replace a saved identity.
+
 A secret-deletion 404 does not clear the lease by itself. Cleanup verifies that the named secret is absent and that the Secrets API remains accessible. Lost access or inconsistent responses retain the cleanup obligation.
 
 Likewise, a runner-status 404 requires a successful runner listing from the application repository before cleanup can treat the runner as absent. A failed access check cannot establish that the runner is idle.
