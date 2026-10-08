@@ -153,7 +153,9 @@ func agentInstallPreflightRejectsStockContainerBeforeSavingConfiguration() throw
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "stock machine create"))])
     #expect(throws: AppleContainerBackendError.unsupportedCLI) {
         try command.run(locateExecutable: { URL(fileURLWithPath: "/test/\($0)") },
-            stateDirectory: fixture.directory, loadStorage: { _ in nil },
+            stateDirectory: fixture.directory,
+            memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 24 * 1_024 * 1_024 * 1_024),
+            loadStorage: { _ in nil },
             relayURL: URL(fileURLWithPath: "/usr/bin/true"), executor: executor)
     }
     #expect(executor.requests.map(\.arguments) == [["machine", "create", "--help"]])
