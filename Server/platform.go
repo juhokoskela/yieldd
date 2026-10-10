@@ -16,12 +16,22 @@ import (
 
 // Each repository/platform queue owns a journal, message session, and serialized lifecycle.
 type platformCoordinator struct {
-	cancel   context.CancelFunc
-	store    *stateStore
-	loop     *coordinatorLoop
-	session  *scaleset.MessageSessionClient
-	messages *listener.Listener
+	cancel     context.CancelFunc
+	store      *stateStore
+	loop       *coordinatorLoop
+	session    listenerSession
+	messages   *listener.Listener
+	scaleSetID int
+	newSession func(context.Context) (listenerSession, error)
 }
+
+type listenerSession interface {
+	listener.Client
+	Close(context.Context) error
+}
+
+const listenerRetryDelay = 5 * time.Second
+const listenerMaximumRetryDelay = time.Minute
 
 func openPlatformCoordinator(ctx context.Context, cfg config, directory, token string, recoverOnly bool) (_ *platformCoordinator, err error) {
 	defer func() {
@@ -68,12 +78,12 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 			return nil, err
 		}
 	}
-	p.session, err = client.MessageSessionClient(ctx, id, saved.Owner)
-	if err != nil {
-		return nil, &sdkError{"open message session", err}
+	owner := saved.Owner
+	p.scaleSetID = id
+	p.newSession = func(ctx context.Context) (listenerSession, error) {
+		return client.MessageSessionClient(ctx, id, owner)
 	}
-	p.messages, err = listener.New(shutdownAwareListenerClient{Client: p.session, lifetime: loopContext}, listener.Config{ScaleSetID: id, MaxRunners: maximumAssignments})
-	if err != nil {
+	if err := p.openMessages(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -105,6 +115,8 @@ func (p *platformCoordinator) close(ctx context.Context) {
 	if p.session != nil {
 		if err := p.session.Close(ctx); err != nil {
 			slog.Error("Close scale set session", "error", &sdkError{"close message session", err})
+		} else {
+			p.session = nil
 		}
 	}
 	if err := p.store.Close(); err != nil {
@@ -119,10 +131,8 @@ func (p *platformCoordinator) run(ctx context.Context, recoverOnly bool) error {
 			if err != nil || done {
 				return err
 			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(5 * time.Second):
+			if err := waitForRetry(ctx, cleanupRetryDelay); err != nil {
+				return err
 			}
 		}
 	}
@@ -133,20 +143,78 @@ func (p *platformCoordinator) run(ctx context.Context, recoverOnly bool) error {
 	worker.logger.Info("Serving scale set", "scale_set", worker.state.ScaleSetID, "capacity", maximumAssignments, "local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
 	done := make(chan error, 1)
 	go func() { done <- p.loop.run(); p.cancel() }()
-	err := p.messages.Run(p.loop.ctx, p.loop)
+	err := p.listen()
 	p.cancel()
 	loopErr := <-done
 	if loopErr != nil && !onlyCancellation(loopErr) {
 		return loopErr
 	}
 	if err != nil && !onlyCancellation(err) {
-		var provisioning *provisioningError
-		if errors.As(err, &provisioning) {
-			return provisioning
-		}
-		return &sdkError{"listen for demand", err}
+		return err
 	}
 	return nil
+}
+
+func (p *platformCoordinator) openMessages(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	session, err := p.newSession(ctx)
+	if err != nil {
+		return &sdkError{"open message session", err}
+	}
+	p.session = session
+	p.messages, err = listener.New(shutdownAwareListenerClient{Client: session, lifetime: p.loop.ctx}, listener.Config{ScaleSetID: p.scaleSetID, MaxRunners: maximumAssignments})
+	return err
+}
+
+func (p *platformCoordinator) listen() error {
+	ctx := p.loop.ctx
+	delay := listenerRetryDelay
+	for {
+		started := time.Now()
+		err := p.messages.Run(ctx, p.loop)
+		var callback *callbackError
+		if errors.As(err, &callback) {
+			return callback
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := p.loop.suspendProvisioning(); err != nil {
+			return err
+		}
+		if time.Since(started) >= listenerMaximumRetryDelay {
+			delay = listenerRetryDelay
+		}
+		p.loop.worker.logger.Warn("Demand listener interrupted; retaining assignments and reconnecting", "retry_delay", delay, "error", &sdkError{"listen for demand", err})
+		for {
+			if err := waitForRetry(ctx, delay); err != nil {
+				return err
+			}
+			delay = min(delay*2, listenerMaximumRetryDelay)
+			if p.session != nil {
+				closeCtx, cancel := context.WithTimeout(ctx, listenerRetryDelay)
+				err := p.session.Close(closeCtx)
+				cancel()
+				if err == nil {
+					p.session = nil
+				}
+				if err != nil && ctx.Err() == nil {
+					p.loop.worker.logger.Warn("Previous demand session could not be closed", "error", &sdkError{"close message session", err})
+				}
+			}
+			if err := p.openMessages(ctx); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				p.loop.worker.logger.Warn("Demand listener reconnect failed; retaining assignments", "retry_delay", delay, "error", err)
+				continue
+			}
+			p.loop.worker.logger.Info("Demand listener reconnected", "scale_set", p.scaleSetID)
+			break
+		}
+	}
 }
 
 type scaleSetAPI interface {

@@ -4,6 +4,37 @@ import Testing
 @testable import Yieldd
 
 @Suite struct RunnerNetworkRelayTests {
+    @Test(arguments: [RunnerPlatform.linux, .macOS])
+    func networkBindsDiagnosticsToGuestPlatform(platform: RunnerPlatform) throws {
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let directories = try RunnerNetworkDirectories(stateDirectory: fixture.root)
+        defer { try? FileManager.default.removeItem(at: directories.rootURL) }
+        let id = RunnerID(value: "yieldd-diagnostic-platform")
+        let directory = try directories.create(for: id)
+        let arguments = fixture.root.appendingPathComponent("arguments")
+        let ready = "{\"version\":2,\"ssh\":\"\(directory.appendingPathComponent("n.ssh").path)\"}"
+        let executable = try fixture.script("printf '%s\\n' \"$@\" > '\(arguments.path)'\nprintf '%s\\n' '\(ready)'\nexec /bin/cat")
+        let network = try RunnerNetwork(stateDirectory: fixture.root, platform: platform, executableURL: executable)
+        let relay = try network.start(for: id, checkCancellation: {})
+        defer { try? relay.stop(deadline: nil) }
+        let captured = try String(contentsOf: arguments, encoding: .utf8).split(separator: "\n").map(String.init)
+        #expect(captured == ["--socket", relay.socketURL.path, "--runner", id.value, "--platform", platform.rawValue.lowercased()])
+    }
+
+    @Test(arguments: [("linux", "linux"), ("macOS", "macos"), ("macos", "macos")])
+    func forwardsDiagnosticIdentityAsSeparateArguments(platform: String, expected: String) throws {
+        let fixture = try RelayProcessFixture()
+        defer { fixture.remove() }
+        let arguments = fixture.root.appendingPathComponent("arguments")
+        let executable = try fixture.script("printf '%s\\n' \"$@\" > '\(arguments.path)'\nprintf '%s\\n' '\(fixture.ready)'\nexec /bin/cat")
+        let relay = try RunnerNetworkRelay.start(executableURL: executable, directory: fixture.directory,
+            identity: (runner: "yieldd-diagnostic-test", platform: platform))
+        defer { try? relay.stop() }
+        let captured = try String(contentsOf: arguments, encoding: .utf8).split(separator: "\n").map(String.init)
+        #expect(captured == ["--socket", relay.socketURL.path, "--runner", "yieldd-diagnostic-test", "--platform", expected])
+    }
+
     @Test func shutdownToleratesAnAlreadyRemovedDirectory() throws {
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
@@ -194,7 +225,8 @@ import Testing
         let executable = try #require(ProcessInfo.processInfo.environment["YIELDD_TEST_RELAY"])
         let fixture = try RelayProcessFixture()
         defer { fixture.remove() }
-        let relay = try RunnerNetworkRelay.start(executableURL: URL(fileURLWithPath: executable), directory: fixture.directory)
+        let relay = try RunnerNetworkRelay.start(executableURL: URL(fileURLWithPath: executable), directory: fixture.directory,
+            identity: (runner: "yieldd-diagnostic-test", platform: "macos"))
         defer { try? relay.stop() }
         try relay.check()
         #expect(FileManager.default.fileExists(atPath: relay.sshSocketURL.path))

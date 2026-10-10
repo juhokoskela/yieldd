@@ -43,7 +43,7 @@ final class AppleContainerBackend: RunnerBackend {
         self.executor = executor
         self.dockerReadiness = dockerReadiness
         self.stateDirectory = stateDirectory
-        self.network = try network ?? RunnerNetwork(stateDirectory: stateDirectory)
+        self.network = try network ?? RunnerNetwork(stateDirectory: stateDirectory, platform: .linux)
         self.checkCancellation = checkCancellation
         self.maximumExecutionDeadline = maximumExecutionDeadline
         self.loadStorage = loadStorage ?? {

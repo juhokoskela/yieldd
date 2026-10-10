@@ -99,8 +99,8 @@ func failureKind(err error) string {
 }
 func (e *sdkError) Unwrap() error { return e.cause }
 
-// Distinguish our diagnostics from raw SDK errors returned by the listener.
-type provisioningError struct{ cause error }
+// Coordinator callback failures must not be retried as SDK listener failures.
+type callbackError struct{ cause error }
 
-func (e *provisioningError) Error() string { return e.cause.Error() }
-func (e *provisioningError) Unwrap() error { return e.cause }
+func (e *callbackError) Error() string { return e.cause.Error() }
+func (e *callbackError) Unwrap() error { return e.cause }

@@ -16,7 +16,7 @@ struct LinuxRunnerNetworkTests {
         let executor = RelayLinuxExecutor()
         let backend = try AppleContainerBackend(containerURL: linuxContainer, executor: executor,
             stateDirectory: fixture.directory, loadStorage: { nil },
-            network: try RunnerNetwork(stateDirectory: fixture.directory, executableURL: URL(fileURLWithPath: executable)))
+            network: try RunnerNetwork(stateDirectory: fixture.directory, platform: .linux, executableURL: URL(fileURLWithPath: executable)))
         defer { try? backend.destroy(linuxNetworkID) }
         try backend.create(id: linuxNetworkID, memory: .full)
         let socket = try #require(executor.socket)

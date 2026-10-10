@@ -114,7 +114,7 @@ func (c *coordinator) declineDevice(request deviceRequest) error {
 
 func (a *assignment) accept(ctx context.Context, request deviceRequest) (*deviceCredential, error) {
 	l := a.lease
-	if a.paused != nil || l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
+	if a.paused != nil || a.demandUnavailable || l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
 		return nil, &deviceError{status: http.StatusGone, message: "offer is no longer available; clean up without starting a runner"}
 	}
 	next := *l.Local

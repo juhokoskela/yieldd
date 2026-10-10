@@ -140,16 +140,37 @@ func (s *coordinatorLoop) HandleDesiredRunnerCount(ctx context.Context, count in
 	err := s.invoke(ctx, func(ctx context.Context) (err error) {
 		s.demandObserved = true
 		s.desiredCount = count
+		s.worker.demandUnavailable = false
 		actual, err = s.worker.HandleDesiredRunnerCount(ctx, count)
 		return err
 	})
+	if err != nil {
+		return actual, &callbackError{err}
+	}
 	return actual, err
 }
+
+func (s *coordinatorLoop) suspendProvisioning() error {
+	return s.invoke(s.ctx, func(context.Context) error {
+		s.worker.demandUnavailable = true
+		s.worker.device.forget(s.worker.state.Owner)
+		return nil
+	})
+}
+
 func (s *coordinatorLoop) HandleJobStarted(ctx context.Context, job *scaleset.JobStarted) error {
-	return s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobStarted(ctx, job) })
+	err := s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobStarted(ctx, job) })
+	if err != nil {
+		return &callbackError{err}
+	}
+	return nil
 }
 func (s *coordinatorLoop) HandleJobCompleted(ctx context.Context, job *scaleset.JobCompleted) error {
-	return s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobCompleted(ctx, job) })
+	err := s.invoke(ctx, func(ctx context.Context) error { return s.worker.HandleJobCompleted(ctx, job) })
+	if err != nil {
+		return &callbackError{err}
+	}
+	return nil
 }
 
 func listenForDevice(address, token string, allowNonLoopback bool) (net.Listener, error) {

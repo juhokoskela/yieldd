@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"net"
 	"strings"
 	"time"
@@ -25,20 +27,31 @@ func publicDNS(ctx context.Context, dial func(string, string) (net.Conn, error),
 			}
 			_ = w.WriteMsg(response)
 		}()
+		var signature []byte
+		refuse := func(reason denialReason) { response.Rcode = dns.RcodeRefused; counts.record(reason, signature) }
 		if request.Opcode != dns.OpcodeQuery || len(request.Question) != 1 {
-			response.Rcode = dns.RcodeRefused
-			counts.dns.Add(1)
+			signature = []byte{byte(request.Opcode)}
+			refuse(dnsMalformed)
 			return
 		}
 		question := request.Question[0]
 		name := strings.ToLower(question.Name)
-		if question.Qclass != dns.ClassINET || !dns.IsFqdn(name) ||
-			!strings.Contains(strings.TrimSuffix(name, "."), ".") ||
+		// Ignore transaction IDs and case when tracking repeated questions.
+		signature = append([]byte(name), 0)
+		signature = binary.BigEndian.AppendUint16(signature, question.Qtype)
+		signature = binary.BigEndian.AppendUint16(signature, question.Qclass)
+		if question.Qclass != dns.ClassINET || !dns.IsFqdn(name) {
+			refuse(dnsMalformed)
+			return
+		}
+		if !strings.Contains(strings.TrimSuffix(name, "."), ".") ||
 			name == "home.arpa." || strings.HasSuffix(name, ".home.arpa.") ||
-			strings.HasSuffix(name, ".local.") || strings.HasSuffix(name, ".localhost.") ||
-			(question.Qtype != dns.TypeA && question.Qtype != dns.TypeAAAA) {
-			response.Rcode = dns.RcodeRefused
-			counts.dns.Add(1)
+			strings.HasSuffix(name, ".local.") || strings.HasSuffix(name, ".localhost.") {
+			refuse(dnsLocalName)
+			return
+		}
+		if question.Qtype != dns.TypeA && question.Qtype != dns.TypeAAAA {
+			refuse(dnsRecordType)
 			return
 		}
 		// There is no IPv6 packet path in this prototype. Answer AAAA with NODATA.
@@ -50,29 +63,36 @@ func publicDNS(ctx context.Context, dial func(string, string) (net.Conn, error),
 			defer func() { <-slots }()
 		default:
 			response.Rcode = dns.RcodeServerFailure
-			counts.dns.Add(1)
+			counts.record(dnsSaturated, signature)
 			return
 		}
-		// TCP avoids truncated recursive answers and uses the same checked dial
-		// path as guest TCP traffic. No fallback to another resolver is allowed.
-		connection, err := dial("tcp", publicResolver)
+		answer, err := exchangeDNS(ctx, dial, question.Name)
 		if err != nil {
 			response.Rcode = dns.RcodeServerFailure
-			return
-		}
-		defer connection.Close()
-		query := new(dns.Msg)
-		query.SetQuestion(question.Name, dns.TypeA)
-		lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		stop := context.AfterFunc(lookup, func() { connection.Close() })
-		defer stop()
-		answer, _, err := (&dns.Client{Timeout: 5 * time.Second}).ExchangeWithConnContext(lookup, query, &dns.Conn{Conn: connection})
-		if err != nil {
-			response.Rcode = dns.RcodeServerFailure
+			var denied *deniedDestination
+			if ctx.Err() == nil && !errors.As(err, &denied) {
+				counts.record(dnsUpstreamFailure, signature)
+			}
 			return
 		}
 		response.Rcode = answer.Rcode
 		response.Answer = answer.Answer
 	})
+}
+
+func exchangeDNS(ctx context.Context, dial func(string, string) (net.Conn, error), name string) (*dns.Msg, error) {
+	// TCP avoids truncated answers and uses the guest's checked dial path.
+	connection, err := dial("tcp", publicResolver)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	query := new(dns.Msg)
+	query.SetQuestion(name, dns.TypeA)
+	lookup, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	stop := context.AfterFunc(lookup, func() { connection.Close() })
+	defer stop()
+	answer, _, err := (&dns.Client{Timeout: 5 * time.Second}).ExchangeWithConnContext(lookup, query, &dns.Conn{Conn: connection})
+	return answer, err
 }

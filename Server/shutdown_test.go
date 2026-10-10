@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/golang-jwt/jwt/v4"
 	"github.com/hashicorp/go-retryablehttp"
 )
 
@@ -65,20 +64,14 @@ func (f shutdownTransport) RoundTrip(r *http.Request) (*http.Response, error) { 
 
 func shutdownSession(t *testing.T, remove func(context.Context) error) *scaleset.MessageSessionClient {
 	t.Helper()
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-	}).SignedString([]byte("test-only"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	auth := sdkAuthentication(t)
 	transport := &http.Transport{}
 	transport.RegisterProtocol("https", shutdownTransport(func(r *http.Request) (*http.Response, error) {
 		status, body := http.StatusOK, ""
+		if code, payload := auth(r, "https://test.invalid/tenant/"); code != 0 {
+			return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload)), Request: r}, nil
+		}
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/registration-token"):
-			status, body = http.StatusCreated, `{"token":"test-registration"}`
-		case strings.HasSuffix(r.URL.Path, "/runner-registration"):
-			status, body = http.StatusCreated, fmt.Sprintf(`{"url":"https://test.invalid/tenant/","token":%q}`, token)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions"):
 			body = `{"sessionId":"01234567-89ab-4def-8123-456789abcdef"}`
 		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/sessions/"):

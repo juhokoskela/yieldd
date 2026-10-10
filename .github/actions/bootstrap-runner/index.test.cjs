@@ -1,13 +1,75 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { mkdtemp, mkdir, writeFile, readFile, stat, rm } = require('node:fs/promises');
+const { mkdtemp, mkdir, writeFile, readFile, stat, rm, chmod, symlink, open, rename } = require('node:fs/promises');
 const { createHash } = require('node:crypto');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { createInterface } = require('node:readline');
 const { test } = require('node:test');
-const { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive } = require('./index.cjs');
+const { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive, removePrivateDirectory, writableDirectories } = require('./index.cjs');
+
+test('cleanup removes read-only module caches without following symlinks', async t => {
+    const fixture = await mkdtemp(join(tmpdir(), 'yieldd-cleanup-test-'));
+    t.after(() => removePrivateDirectory(fixture));
+    const directory = join(fixture, 'bootstrap');
+    const cache = join(directory, 'home/go/pkg/mod/example@v1');
+    const outside = join(fixture, 'outside');
+    await mkdir(cache, { recursive: true });
+    await mkdir(outside);
+    await writeFile(join(cache, 'LICENSE'), 'read-only module', { mode: 0o444 });
+    await writeFile(join(outside, 'sentinel'), 'untouched');
+    await symlink(outside, join(cache, 'outside'));
+    await chmod(cache, 0o555);
+    await chmod(outside, 0o555);
+    await removePrivateDirectory(directory);
+    await assert.rejects(stat(directory), { code: 'ENOENT' });
+    assert.equal(await readFile(join(outside, 'sentinel'), 'utf8'), 'untouched');
+    assert.equal((await stat(outside)).mode & 0o777, 0o555);
+    await removePrivateDirectory(directory); // An already-removed tree needs no further cleanup.
+});
+
+test('permission repair refuses a final-component symlink', async t => {
+    const fixture = await mkdtemp(join(tmpdir(), 'yieldd-permissions-test-'));
+    t.after(() => removePrivateDirectory(fixture));
+    const outside = join(fixture, 'outside');
+    await mkdir(outside);
+    await writeFile(join(outside, 'sentinel'), 'untouched');
+    await chmod(outside, 0o555);
+    const link = join(fixture, 'link');
+    await symlink(outside, link);
+    await writableDirectories(link);
+    assert.equal((await stat(outside)).mode & 0o777, 0o555);
+    assert.equal(await readFile(join(outside, 'sentinel'), 'utf8'), 'untouched');
+});
+
+test('permission repair refuses a directory replaced after opening it', async t => {
+    const fixture = await mkdtemp(join(tmpdir(), 'yieldd-permissions-swap-test-'));
+    t.after(() => removePrivateDirectory(fixture));
+    const directory = join(fixture, 'bootstrap');
+    const outside = join(fixture, 'outside');
+    const child = join(outside, 'child');
+    await mkdir(directory);
+    await mkdir(child, { recursive: true });
+    await writeFile(join(child, 'sentinel'), 'untouched');
+    await chmod(child, 0o555);
+    const handle = await open(directory, 'r');
+    const prototype = Object.getPrototypeOf(handle);
+    const chmodHandle = prototype.chmod;
+    await handle.close();
+    let swapped = false;
+    t.mock.method(prototype, 'chmod', async function (mode) {
+        await chmodHandle.call(this, mode);
+        if (!swapped) {
+            swapped = true;
+            await rename(directory, join(fixture, 'original'));
+            await symlink(outside, directory);
+        }
+    });
+    await assert.rejects(writableDirectories(directory), /directory changed/u);
+    assert.equal((await stat(child)).mode & 0o777, 0o555);
+    assert.equal(await readFile(join(child, 'sentinel'), 'utf8'), 'untouched');
+});
 
 const name = 'yieldd-bootstrap-test';
 function encodeSettings(settings) {

@@ -11,6 +11,13 @@ import (
 
 var errDenied = errors.New("guest destination denied")
 
+type deniedDestination struct {
+	reason denialReason
+}
+
+func (e *deniedDestination) Error() string { return errDenied.Error() }
+func (e *deniedDestination) Unwrap() error { return errDenied }
+
 // IPv4-only prototype. IPv6, including mapped and transition addresses, is denied.
 var deniedNetworks = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -59,20 +66,23 @@ func hostAddresses() ([]netip.Addr, error) {
 
 func permittedDial(ctx context.Context, network, address string, local func() ([]netip.Addr, error), dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
 	if network != "tcp" && network != "udp" {
-		return nil, errDenied
+		return nil, &deniedDestination{destinationInvalid}
 	}
 	endpoint, err := netip.ParseAddrPort(address)
-	if err != nil || endpoint.Port() == 0 || !publicDestination(endpoint.Addr()) {
-		return nil, errDenied
+	if err != nil || endpoint.Port() == 0 {
+		return nil, &deniedDestination{destinationInvalid}
+	}
+	if !publicDestination(endpoint.Addr()) {
+		return nil, &deniedDestination{destinationNonPublic}
 	}
 	// Refresh at each new host connection, including after Wi-Fi/VPN changes.
 	addresses, err := local()
 	if err != nil {
-		return nil, errors.Join(errDenied, fmt.Errorf("cannot validate host addresses: %w", err))
+		return nil, errors.Join(&deniedDestination{destinationHostCheck}, fmt.Errorf("cannot validate host addresses: %w", err))
 	}
 	for _, address := range addresses {
 		if address.Unmap() == endpoint.Addr() {
-			return nil, errDenied
+			return nil, &deniedDestination{destinationHost}
 		}
 	}
 	// No name resolution or proxy environment is involved at this boundary.
@@ -83,8 +93,9 @@ func outboundDial(ctx context.Context, counts *denialCounters) func(string, stri
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	return func(network, address string) (net.Conn, error) {
 		connection, err := permittedDial(ctx, network, address, hostAddresses, dialer.DialContext)
-		if errors.Is(err, errDenied) {
-			counts.destinations.Add(1)
+		var denied *deniedDestination
+		if errors.As(err, &denied) {
+			counts.record(denied.reason, []byte(network+" "+address))
 		}
 		return connection, err
 	}

@@ -63,7 +63,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         clones = MacOSRunnerCloneStore(rootURL: cloneRootURL.resolvingSymlinksInPath())
         try Self.validateTemplateLocation(self.templateURL, cloneRootURL: clones.rootURL)
         self.executor = executor
-        self.network = try network ?? RunnerNetwork(stateDirectory: stateDirectory)
+        self.network = try network ?? RunnerNetwork(stateDirectory: stateDirectory, platform: .macOS)
         self.checkCancellation = checkCancellation
         self.wait = wait
         self.maximumExecutionDeadline = maximumExecutionDeadline

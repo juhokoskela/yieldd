@@ -122,8 +122,13 @@ func TestDNSRejectsLocalNamesAndUnneededTypes(t *testing.T) {
 			t.Errorf("%s %d was not refused: %v", test.name, test.kind, response.message)
 		}
 	}
-	if counts.dns.Load() != 12 {
-		t.Fatal("missing DNS denial counts", counts.dns.Load())
+	var rejected uint64
+	report := readPolicyReport(t, counts)
+	for _, reason := range []string{"dns_malformed", "dns_local_name", "dns_record_type"} {
+		rejected += report.Reasons[reason].Total
+	}
+	if rejected != 12 {
+		t.Fatal("missing DNS denial counts", rejected)
 	}
 	query := new(dns.Msg)
 	query.SetQuestion("public.example.", dns.TypeAAAA)

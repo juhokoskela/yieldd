@@ -18,7 +18,7 @@ import Virtualization
         let backend = try MacOSVirtualizationBackend(
             stateDirectory: fixture.rootURL, templateURL: fixture.templateURL, cloneRootURL: fixture.cloneRootURL,
             executor: executor,
-            network: RunnerNetwork(stateDirectory: fixture.rootURL, executableURL: URL(fileURLWithPath: executable)),
+            network: RunnerNetwork(stateDirectory: fixture.rootURL, platform: .macOS, executableURL: URL(fileURLWithPath: executable)),
             requireEntitlement: {},
             loadStorage: { nil }, makeMachine: { _, _, path in
                 socket = try PacketSocket(path: path.path)
@@ -148,7 +148,7 @@ func runnerNetworkFailedStartRemovesItsDirectory(cancelAfterCreation: Bool) thro
     let store = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
     let network = try RunnerNetwork(
-        stateDirectory: fixture.rootURL, executableURL: fixture.rootURL.appendingPathComponent("missing-relay")
+        stateDirectory: fixture.rootURL, platform: .macOS, executableURL: fixture.rootURL.appendingPathComponent("missing-relay")
     )
     var checks = 0
     #expect(throws: (any Error).self) {
@@ -170,7 +170,7 @@ func runnerNetworkRejectedStartPreservesExistingFiles() throws {
     let directory = try store.create(for: id)
     let file = directory.appendingPathComponent("existing")
     try Data("previous owner".utf8).write(to: file)
-    let network = try RunnerNetwork(stateDirectory: fixture.rootURL)
+    let network = try RunnerNetwork(stateDirectory: fixture.rootURL, platform: .macOS)
     #expect(throws: POSIXError(.ENOTEMPTY)) { _ = try network.start(for: id, checkCancellation: {}) }
     #expect(try Data(contentsOf: file) == Data("previous owner".utf8))
 }

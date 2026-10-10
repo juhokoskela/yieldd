@@ -1,8 +1,8 @@
 const { spawn } = require('node:child_process');
 const { createHash, randomBytes } = require('node:crypto');
-const { createReadStream } = require('node:fs');
+const { createReadStream, constants } = require('node:fs');
 const { createServer } = require('node:http');
-const { mkdtemp, mkdir, writeFile, access, rm } = require('node:fs/promises');
+const { mkdtemp, mkdir, writeFile, access, rm, open, readdir, lstat } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
@@ -94,6 +94,43 @@ async function verifyArchive(path, expected) {
     const hash = createHash('sha256');
     for await (const chunk of createReadStream(path)) hash.update(chunk);
     if (hash.digest('hex') !== expected) throw new Error('Runner archive checksum mismatch.');
+}
+
+async function writableDirectories(path) {
+    let directory;
+    let entries;
+    try {
+        // O_NOFOLLOW protects the final component; escaped-process races are out of scope.
+        directory = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    } catch (error) {
+        if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code)) return;
+        throw error;
+    }
+    try {
+        const opened = await directory.stat({ bigint: true });
+        await directory.chmod(0o700);
+        entries = await readdir(path, { withFileTypes: true });
+        const current = await lstat(path, { bigint: true });
+        if (current.dev !== opened.dev || current.ino !== opened.ino || !current.isDirectory()) {
+            throw new Error('Bootstrap cleanup directory changed; refusing permission repair.');
+        }
+    } finally {
+        await directory.close();
+    }
+    for (const entry of entries) {
+        if (entry.isDirectory()) await writableDirectories(join(path, entry.name));
+    }
+}
+
+async function removePrivateDirectory(directory) {
+    try {
+        await rm(directory, { recursive: true, force: true });
+    } catch (error) {
+        if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+        // Go's module cache deliberately makes its directories read-only.
+        await writableDirectories(directory);
+        await rm(directory, { recursive: true, force: true });
+    }
 }
 
 async function runListener(runner, options) {
@@ -196,7 +233,7 @@ async function bootstrap(encoded, name, signal) {
         await access(join(directory, 'job-completed'));
         console.log('Nested runner exited after a job. Check the original workflow for its result.');
     } finally {
-        await rm(directory, { recursive: true, force: true });
+        await removePrivateDirectory(directory);
     }
 }
 
@@ -215,4 +252,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive };
+module.exports = { validateConfiguration, runnerEnvironment, runProcess, runListener, verifyArchive, removePrivateDirectory, writableDirectories };

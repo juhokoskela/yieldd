@@ -26,6 +26,42 @@ type lease struct {
 	Local          *localLease `json:"local,omitempty"`
 }
 
+func (l *lease) validateTransition(next *lease) error {
+	if next == nil {
+		return nil
+	}
+	if next.Name != l.Name || !next.Created.Equal(l.Created) ||
+		(l.RunnerID != 0 && next.RunnerID != l.RunnerID) || (l.RunID != 0 && next.RunID != l.RunID) {
+		return errors.New("assignment identity cannot change during a transition")
+	}
+	if (l.CleanupIntent && !next.CleanupIntent) || (l.DispatchIntent && !next.DispatchIntent) {
+		return errors.New("persisted cleanup or dispatch intent cannot be revoked")
+	}
+	if l.Local == nil {
+		if next.Local != nil {
+			return errors.New("hosted assignment cannot become a local offer")
+		}
+		return nil
+	}
+	if next.Local == nil {
+		if l.Local.Phase != localOffered && l.Local.Phase != localDeclined {
+			return errors.New("accepted local assignment cannot become hosted provisioning")
+		}
+		return nil
+	}
+	previous, current := l.Local, next.Local
+	if previous.Slot != current.Slot || previous.DeviceID != current.DeviceID ||
+		(previous.JobStarted && !current.JobStarted) || (previous.JobCompleted && !current.JobCompleted) {
+		return errors.New("local assignment identity and job progress cannot be reset")
+	}
+	if current.Phase == previous.Phase ||
+		(previous.Phase == localOffered && (current.Phase == localDeclined || current.Phase == localAccepted)) ||
+		(previous.Phase == localAccepted && current.Phase == localIssued) {
+		return nil
+	}
+	return errors.New("invalid local assignment phase transition")
+}
+
 func (l lease) secretName() string {
 	return "YIELDD_JIT_" + strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(l.Name, "yieldd-bootstrap-"), "-", ""))
 }

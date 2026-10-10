@@ -17,6 +17,8 @@ type controlledMessages struct {
 	messages chan *scaleset.RunnerScaleSetMessage
 	delete   func(context.Context) error
 	acquire  func(context.Context) error
+	get      func(context.Context) (*scaleset.RunnerScaleSetMessage, error)
+	close    func(context.Context) error
 }
 
 func (s *controlledMessages) Session() scaleset.RunnerScaleSetSession {
@@ -24,12 +26,22 @@ func (s *controlledMessages) Session() scaleset.RunnerScaleSetSession {
 }
 
 func (s *controlledMessages) GetMessage(ctx context.Context, _, _ int) (*scaleset.RunnerScaleSetMessage, error) {
+	if s.get != nil {
+		return s.get(ctx)
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case message := <-s.messages:
 		return message, nil
 	}
+}
+
+func (s *controlledMessages) Close(ctx context.Context) error {
+	if s.close != nil {
+		return s.close(ctx)
+	}
+	return nil
 }
 
 func (s *controlledMessages) DeleteMessage(ctx context.Context, _ int) error {
@@ -56,7 +68,8 @@ func testPlatform(t *testing.T, ctx context.Context, c *coordinator, stream *con
 		cancel()
 		t.Fatal(err)
 	}
-	return &platformCoordinator{cancel: cancel, loop: newCoordinatorLoop(ctx, c), messages: messages}
+	return &platformCoordinator{cancel: cancel, loop: newCoordinatorLoop(ctx, c), messages: messages, session: stream, scaleSetID: c.state.ScaleSetID,
+		newSession: func(context.Context) (listenerSession, error) { return stream, nil }}
 }
 
 func TestListenerDetachedOperationsHonorShutdown(t *testing.T) {
