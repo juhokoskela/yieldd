@@ -7,6 +7,7 @@ configuration="$(GH_TOKEN=configuration-test YIELDD_CLIENT_TOKEN=xxxxxxxxxxxxxxx
     YIELDD_LOCAL_ONLY_REPOSITORIES=example/infrastructure YIELDD_INFRASTRUCTURE=example/infrastructure \
     YIELDD_STATE_VOLUME=yieldd-compose-test-state \
     YIELDD_FALLBACK_RUNNER='"ubuntu-24.04"' YIELDD_MACOS_FALLBACK_RUNNER='' \
+    YIELDD_MAX_FALLBACK_RUNNERS=3 \
     YIELDD_DEVICE_ID=01234567-89ab-4def-8123-456789abcdef \
     docker compose --env-file /dev/null -f compose.yaml config --format json)"
 
@@ -22,6 +23,7 @@ jq -e '.services.coordinator |
     (.command | index("example/application,example/infrastructure")) != null and
     (.command | index("--local-only-repositories")) != null and
     .command[(.command | index("--local-only-repositories")) + 1] == "example/infrastructure" and
+    .command[(.command | index("--max-fallback-runners")) + 1] == "3" and
     (.command | index("--allow-non-loopback-client-listen")) != null' <<< "$configuration" >/dev/null
 jq -e '.volumes.state.name == "yieldd-compose-test-state"' <<< "$configuration" >/dev/null
 

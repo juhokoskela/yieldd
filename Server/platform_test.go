@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -72,9 +73,41 @@ func TestSDKLookupAndTransientFailuresAfterTokenRefresh(t *testing.T) {
 func TestQueueStartupFailureIdentifiesRepositoryAndPlatform(t *testing.T) {
 	cfg := testConfig
 	cfg.Platform = "macos"
-	_, err := openPlatformCoordinator(t.Context(), cfg, "relative-state", "test-only", false)
+	_, err := openPlatformCoordinator(t.Context(), cfg, "relative-state", "test-only", false, defaultMaxFallbackRunners)
 	if err == nil || err.Error() != "repository "+cfg.Repository+" platform macos: state directory must be absolute" {
 		t.Fatal("missing queue identity", err)
+	}
+}
+
+func TestQueueConstructionUsesTheRuntimeFallbackLimit(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "queue")
+	for _, limit := range []int{3, 1} {
+		p, err := openPlatformCoordinator(t.Context(), testConfig, directory, "test-only", true, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		func() {
+			defer closeCoordinators(p)
+			c := p.loop.worker
+			_, w, _ := multipleFallbackFixture(t, limit)
+			c.runners, c.bootstrap = w, w
+			c.state.ScaleSetID = 3
+			if _, err := newDeviceRouter("", []*coordinatorLoop{p.loop}); err != nil {
+				t.Fatal(err)
+			}
+			if limit == 3 {
+				for range 4 {
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), 4); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if len(c.state.Leases) != 3 || w.dispatched != 3 {
+					t.Fatal("constructed queue did not use the runtime limit", len(c.state.Leases), w.dispatched)
+				}
+			} else if len(c.state.Leases) != 3 || c.maxFallbackRunners != 1 {
+				t.Fatal("changing the runtime limit invalidated the journal", len(c.state.Leases), c.maxFallbackRunners)
+			}
+		}()
 	}
 }
 

@@ -3,11 +3,36 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
 )
+
+func TestBootstrapIdentityDiagnostics(t *testing.T) {
+	l := &lease{Name: "yieldd-bootstrap-00000000-0000-4000-8000-000000000001", RunID: 99}
+	otherTitle := "Bootstrap yieldd-bootstrap-00000000-0000-4000-8000-000000000002"
+	for _, test := range []struct {
+		name string
+		run  *workflowRun
+		want string
+	}{
+		{"missing", nil, "observed_run=0 status=missing title=missing"},
+		{"another bootstrap", &workflowRun{ID: 100, Status: "completed", DisplayTitle: otherTitle}, "observed_run=100 status=completed title=" + otherTitle},
+		{"untrusted text", &workflowRun{ID: 100, Status: "secret-status\nforged log", DisplayTitle: "private-token\nforged log"}, "observed_run=100 status=unexpected title=unexpected"},
+		{"token after prefix", &workflowRun{ID: 100, Status: "queued", DisplayTitle: "Bootstrap ghp_secret_token"}, "observed_run=100 status=queued title=unexpected"},
+		{"action required", &workflowRun{ID: 99, Status: "action_required"}, "observed_run=99 status=action_required title=missing"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := identityMismatch(l, test.run)
+			want := fmt.Sprintf("%s: runner=%s expected_run=99 %s", bootstrapIdentityMismatch, l.Name, test.want)
+			if !errors.Is(err, bootstrapIdentityMismatch) || err.Error() != want {
+				t.Fatal("unsafe or incomplete identity diagnostic", err, "want", want)
+			}
+		})
+	}
+}
 
 func TestNonterminalBootstrapMetadataDoesNotPauseOrDelayTheQueue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

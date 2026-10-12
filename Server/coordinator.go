@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -25,32 +26,43 @@ type bootstrapAPI interface {
 	deleteSecret(context.Context, string) error
 	dispatch(context.Context, *lease, string) (int64, error)
 	findRun(context.Context, *lease) (*workflowRun, error)
+	// Status reads may run concurrently; all other operations stay serialized.
 	getRun(context.Context, int64) (*workflowRun, error)
 	cancelRun(context.Context, int64) error
 	runnerBusy(context.Context, string, int) (bool, error)
 }
 
-const maximumAssignments = 16
+const (
+	maximumAssignments        = 16
+	defaultMaxFallbackRunners = 1
+	identityMaximumRetryDelay = time.Minute
+)
 
 var bootstrapIdentityMismatch = errors.New("bootstrap run identity does not match its lease")
 
 // One event loop owns every assignment in a repository/platform queue.
 type coordinator struct {
-	state             *state
-	save              func(*state) error
-	runners           runnerAPI
-	bootstrap         bootstrapAPI
-	logger            *slog.Logger
-	device            *deviceQueue
-	reportedLocalHold map[string]localPhase
-	refreshDemand     bool
-	demandUnavailable bool
-	paused            error
+	state              *state
+	save               func(*state) error
+	runners            runnerAPI
+	bootstrap          bootstrapAPI
+	logger             *slog.Logger
+	device             *deviceQueue
+	reportedLocalHold  map[string]localPhase
+	refreshDemand      bool
+	demandUnavailable  bool
+	paused             error
+	identityRunners    []string
+	identityRetryAt    time.Time
+	identityRetryDelay time.Duration
+	maxFallbackRunners int
+	lastHostedCleanup  string
 }
 
 type assignment struct {
 	*coordinator
-	lease *lease
+	lease              *lease
+	deferHostedCleanup bool
 }
 
 type journalWriteError struct{ cause error }
@@ -63,13 +75,22 @@ func isJournalWrite(err error) bool {
 	return errors.As(err, &journal)
 }
 
-func (c *coordinator) hasFallback() bool {
+func (c *coordinator) identityPaused() bool {
+	return errors.Is(c.paused, bootstrapIdentityMismatch) && retryableBootstrapVerification(c.paused)
+}
+
+func (c *coordinator) fallbackFull() bool {
+	return c.fallbackCount() >= c.maxFallbackRunners
+}
+
+func (c *coordinator) fallbackCount() int {
+	count := 0
 	for _, l := range c.state.Leases {
 		if l.Local == nil {
-			return true
+			count++
 		}
 	}
-	return false
+	return count
 }
 
 func (c *coordinator) hasPendingOffer() bool {
@@ -194,41 +215,99 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 }
 
 func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	identityPaused := c.identityPaused()
+	retryDue := identityPaused && !time.Now().Before(c.identityRetryAt)
+	previousRunners := c.identityRunners
 	err := c.reconcileAndProvision(ctx, count)
-	if err != nil && !isJournalWrite(err) && !onlyCancellation(err) && c.hasIssuedLocal() {
+	if ctx.Err() != nil && !isJournalWrite(err) {
+		err = ctx.Err()
+	}
+	retryable := c.paused == nil || identityPaused
+	switch {
+	case retryable && (identityPaused || errors.Is(err, bootstrapIdentityMismatch)) && retryableBootstrapVerification(err):
+		if !identityPaused || retryDue {
+			c.identityRetryDelay = min(max(cleanupRetryDelay, c.identityRetryDelay*2), identityMaximumRetryDelay)
+			c.identityRetryAt = time.Now().Add(c.identityRetryDelay)
+		}
+		if !identityPaused || !slices.Equal(previousRunners, c.identityRunners) || retryDue && c.identityRetryDelay == identityMaximumRetryDelay {
+			c.logger.Warn("Bootstrap identity unverified; provisioning paused for automatic retry", "runners", c.identityRunners, "retry_delay", c.identityRetryDelay, "error", err)
+		}
+		if errors.Is(err, bootstrapIdentityMismatch) {
+			c.paused = err
+		}
+	case err != nil && !isJournalWrite(err) && !onlyCancellation(err) && c.hasIssuedLocal():
 		// Stop provisioning, not renewal or completion of already issued siblings.
-		if c.paused == nil {
+		if retryable {
 			c.logger.Error("Queue provisioning paused; issued local runners can finish. Resolve the error and restart to resume", "error", err)
 			c.paused = err
 		}
-		c.device.forget(c.state.Owner)
-		err = nil
+	default:
+		return len(c.state.Leases), err
 	}
-	return len(c.state.Leases), err
+	c.device.forget(c.state.Owner)
+	return len(c.state.Leases), nil
 }
 
 func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if c.hasFallback() {
+	if c.fallbackCount() != 0 {
 		// A queue already using fallback must not hold FIFO priority while
 		// blocked on GitHub. Rejoin after reconciliation if it still needs a Mac.
 		c.device.forget(c.state.Owner)
 	}
+	if a := c.nextHostedCleanup(); a != nil {
+		c.lastHostedCleanup = a.lease.Name
+		_, err := a.finishCleanup(ctx, false)
+		if err == nil && c.nextHostedCleanup() != nil {
+			c.device.redrive(c.state.Owner)
+		}
+		return err
+	}
 	completed := false
+	hostedCleanupAttempted, hostedCleanupCompleted := false, false
+	hostedProvisioned := false
+	verificationPending := false
+	retryLater := c.identityPaused() && time.Now().Before(c.identityRetryAt)
+	var identityRunners []string
 	var failures []error
 	var surplus map[string]bool
 	if !c.demandUnavailable {
 		surplus = c.surplusAssignments(count)
 	}
-	for _, name := range c.names() {
+	var runs map[string]*bootstrapRunResult
+	if !retryLater {
+		runs = c.lookupBootstrapRuns(ctx)
+	}
+	// Verify dispatched identities before any sibling can resume provisioning.
+	names := c.names()
+	slices.SortStableFunc(names, func(a, b string) int {
+		first, second := c.state.Leases[a].DispatchIntent, c.state.Leases[b].DispatchIntent
+		if first == second {
+			return 0
+		}
+		if first {
+			return -1
+		}
+		return 1
+	})
+	provisioningPaused := c.paused != nil
+	for _, name := range names {
 		if err := ctx.Err(); err != nil {
-			return errors.Join(append(failures, err)...)
+			return err
 		}
 		a := c.assigned(name)
+		a.deferHostedCleanup = hostedCleanupAttempted
 		l := a.lease
 		local := l.Local
+		if retryLater && l.DispatchIntent && !l.CleanupIntent {
+			verificationPending = true
+			if slices.Contains(c.identityRunners, name) {
+				identityRunners = append(identityRunners, name)
+			}
+			continue
+		}
 		if surplus[name] && local != nil && local.Phase == localIssued {
 			next := *local
 			next.Expires = time.Now().UTC()
@@ -236,23 +315,53 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 				return err
 			}
 		}
-		recoverOnly := (surplus[name] || c.paused != nil || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
-		done, err := a.reconcile(ctx, recoverOnly)
+		recoverOnly := (surplus[name] || provisioningPaused || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
+		done, err := a.reconcileWithRun(ctx, recoverOnly, runs[name])
+		if local == nil && !a.deferHostedCleanup && (done || a.lease != nil && a.lease.CleanupIntent) {
+			hostedCleanupAttempted, hostedCleanupCompleted = true, done
+			c.lastHostedCleanup = name
+		}
+		provisioningPaused = provisioningPaused || errors.Is(err, bootstrapIdentityMismatch)
+		hostedProvisioned = hostedProvisioned || (!l.DispatchIntent && a.lease != nil && a.lease.DispatchIntent)
+		if errors.Is(err, bootstrapIdentityMismatch) || (transientFailure(err) && slices.Contains(c.identityRunners, name)) {
+			identityRunners = append(identityRunners, name)
+		}
 		if err != nil && !isJournalWrite(err) && a.lease != nil && a.lease.Local != nil && a.lease.CleanupIntent && transientFailure(err) {
 			c.logger.Warn("Local cleanup retained for retry", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
 			continue
 		}
 		if err != nil {
 			failures = append(failures, err)
-			if isJournalWrite(err) || onlyCancellation(err) {
+			if isJournalWrite(err) {
 				return errors.Join(failures...)
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if onlyCancellation(err) {
+				return err
 			}
 			continue
 		}
 		completed = completed || (done && !(c.state.Config.LocalOnly && local != nil && local.Phase != localIssued))
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if hostedCleanupCompleted && c.nextHostedCleanup() != nil {
+		c.device.redrive(c.state.Owner)
+	}
+	c.identityRunners = identityRunners
 	if err := errors.Join(failures...); err != nil {
 		return err
+	}
+	if verificationPending {
+		return c.paused
+	}
+	if c.identityPaused() {
+		c.paused = nil
+		c.identityRetryAt, c.identityRetryDelay = time.Time{}, 0
+		c.logger.Info("Bootstrap identities verified; provisioning resumed")
 	}
 	if c.paused != nil {
 		if c.hasIssuedLocal() {
@@ -262,6 +371,10 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	if c.demandUnavailable {
 		c.device.forget(c.state.Owner)
+		return nil
+	}
+	if hostedProvisioned {
+		c.device.redrive(c.state.Owner)
 		return nil
 	}
 	// Never replace completed execution from the listener's cached demand.
@@ -280,6 +393,11 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	count = min(count, maximumAssignments)
 	if count <= len(c.state.Leases) {
+		// A stale positive listener count still needs refreshing after GitHub
+		// reports no work. Keep that protection until positive demand is satisfied.
+		if count > 0 {
+			c.refreshDemand = false
+		}
 		c.device.forget(c.state.Owner)
 		return nil
 	}
@@ -288,49 +406,85 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if c.hasPendingOffer() {
 		return nil
 	}
-	for len(c.state.Leases) < count {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if c.state.Config.LocalOnly {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.state.Config.LocalOnly {
+		c.device.wait(c.state.Owner)
+	}
+	l := &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
+	slot, local := 0, false
+	if c.state.Config.DeviceID != "" {
+		slot, local = c.device.claim(c.state.Owner, l.Name)
+	}
+	if local {
+		l.Local = &localLease{DeviceID: c.state.Config.DeviceID, Slot: slot, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
+	} else if c.state.Config.LocalOnly {
+		return nil
+	} else if c.fallbackFull() {
+		c.refreshDemand = false
+		if c.state.Config.DeviceID != "" {
 			c.device.wait(c.state.Owner)
 		}
-		l := &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
-		slot, local := 0, false
-		if c.state.Config.DeviceID != "" {
-			slot, local = c.device.claim(c.state.Owner, l.Name)
+		return nil
+	}
+	a := &assignment{coordinator: c}
+	if err := a.replace(l); err != nil {
+		return err
+	}
+	if local {
+		c.logger.Info("Local offer created", "runner", l.Name, "device", c.state.Config.DeviceID, "slot", slot, "accept_timeout", offerLifetime)
+		return nil
+	}
+	if err := a.register(ctx); err != nil {
+		return err
+	}
+	if err := a.prepare(ctx); err != nil {
+		return err
+	}
+	// Give device requests a turn before the next provisioning operation.
+	c.device.redrive(c.state.Owner)
+	return nil
+}
+
+func (c *coordinator) nextHostedCleanup() *assignment {
+	var first *assignment
+	for _, name := range c.names() {
+		l := c.state.Leases[name]
+		if l.Local != nil || !l.CleanupIntent {
+			continue
 		}
-		if !local {
-			if c.state.Config.LocalOnly {
-				return nil
-			}
-			// Preserve the existing paid-fallback limit while local work scales out.
-			if c.hasFallback() {
-				if c.state.Config.DeviceID != "" {
-					c.device.wait(c.state.Owner)
-				}
-				return nil
-			}
-		} else {
-			l.Local = &localLease{DeviceID: c.state.Config.DeviceID, Slot: slot, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
+		if first == nil {
+			first = c.assigned(name)
 		}
-		a := &assignment{coordinator: c}
-		if err := a.replace(l); err != nil {
-			return err
-		}
-		c.refreshDemand = false
-		if local {
-			c.logger.Info("Local offer created", "runner", l.Name, "device", c.state.Config.DeviceID, "slot", slot, "accept_timeout", offerLifetime)
-			return nil
-		}
-		if err := a.register(ctx); err != nil {
-			return err
-		}
-		if err := a.prepare(ctx); err != nil {
-			return err
+		if name > c.lastHostedCleanup {
+			return c.assigned(name)
 		}
 	}
-	return nil
+	return first
+}
+
+type bootstrapRunResult struct {
+	run *workflowRun
+	err error
+}
+
+func (c *coordinator) lookupBootstrapRuns(ctx context.Context) map[string]*bootstrapRunResult {
+	runs := make(map[string]*bootstrapRunResult)
+	api := c.bootstrap
+	var pending sync.WaitGroup
+	for name, l := range c.state.Leases {
+		if l.Local != nil || l.CleanupIntent || l.RunID == 0 {
+			continue
+		}
+		id, result := l.RunID, new(bootstrapRunResult)
+		runs[name] = result
+		// The queue has at most 16 leases. Only immutable status reads run
+		// concurrently; the owner waits before validating or changing any lease.
+		pending.Go(func() { result.run, result.err = api.getRun(ctx, id) })
+	}
+	pending.Wait()
+	return runs
 }
 
 func (a *assignment) register(ctx context.Context) error {
@@ -396,6 +550,10 @@ func (a *assignment) prepare(ctx context.Context) error {
 }
 
 func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, error) {
+	return a.reconcileWithRun(ctx, recoverOnly, nil)
+}
+
+func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, observed *bootstrapRunResult) (bool, error) {
 	l := a.lease
 	if l == nil {
 		return true, nil
@@ -426,10 +584,14 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 			return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, retry reconciliation later without redispatching", l.Name)
 		}
 		if !run.matches(l) {
-			return false, bootstrapIdentityMismatch
+			return false, identityMismatch(l, run)
 		}
 	} else {
-		run, err = a.bootstrap.getRun(ctx, l.RunID)
+		if observed != nil {
+			run, err = observed.run, observed.err
+		} else {
+			run, err = a.bootstrap.getRun(ctx, l.RunID)
+		}
 		var missing *missingWorkflowRun
 		if errors.As(err, &missing) {
 			return a.recoverMissingRun(ctx, recoverOnly)
@@ -447,14 +609,17 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 	}
 	l = a.lease
 	if run == nil || run.ID != l.RunID {
-		return false, bootstrapIdentityMismatch
+		return false, identityMismatch(l, run)
 	}
 	// Nonterminal metadata may lag dispatch. Never wait on the device request owner.
 	if run.Status != "completed" && !recoverOnly {
+		if a.identityPaused() && !run.matches(l) {
+			return false, identityMismatch(l, run)
+		}
 		return false, nil
 	}
 	if !run.matches(l) {
-		return false, bootstrapIdentityMismatch
+		return false, identityMismatch(l, run)
 	}
 	if run.Status != "completed" {
 		err := a.bootstrap.cancelRun(ctx, l.RunID)
@@ -470,7 +635,7 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 			return false, fmt.Errorf("recheck bootstrap after cancellation conflict: %w", err)
 		}
 		if !run.matches(l) {
-			return false, bootstrapIdentityMismatch
+			return false, identityMismatch(l, run)
 		}
 		if run.Status != "completed" {
 			return false, nil
@@ -513,6 +678,9 @@ func (a *assignment) beginCleanup(conclusion string) error {
 
 func (a *assignment) finishCleanup(ctx context.Context, recoverOnly bool) (bool, error) {
 	l := a.lease
+	if l.Local == nil && a.deferHostedCleanup {
+		return false, nil
+	}
 	if err := a.cleanup(ctx); err != nil {
 		return false, err
 	}

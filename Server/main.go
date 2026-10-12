@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,11 +26,13 @@ func run() error {
 	var cfg config
 	var directory, clientListen, macOSFallback, repositories, localOnly string
 	var recoverOnly, allowNonLoopbackClientListen bool
+	var maxFallbackRunners int
 	flag.StringVar(&repositories, "repositories", "", "Comma-separated application repositories (OWNER/REPOSITORY)")
 	flag.StringVar(&localOnly, "local-only-repositories", "", "Repositories that wait for local capacity and never dispatch fallback")
 	flag.StringVar(&cfg.Infrastructure, "infrastructure", "", "Infrastructure repository (OWNER/REPOSITORY)")
 	flag.StringVar(&cfg.Fallback, "fallback-runner", "", "Linux fallback target as a JSON label string or array")
 	flag.StringVar(&macOSFallback, "macos-fallback-runner", "", "Enable yieldd-macos with this fallback target as a JSON label string or array")
+	flag.IntVar(&maxFallbackRunners, "max-fallback-runners", defaultMaxFallbackRunners, fmt.Sprintf("Maximum active hosted bootstraps per repository/platform queue (1-%d)", maximumAssignments))
 	flag.StringVar(&directory, "state-dir", "", "Absolute private state directory")
 	flag.BoolVar(&recoverOnly, "recover", false, "Clean up recorded assignments and exit without provisioning")
 	flag.StringVar(&cfg.DeviceID, "device-id", "", "UUID of the connected Apple Silicon Mac")
@@ -38,6 +41,9 @@ func run() error {
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if maxFallbackRunners < 1 || maxFallbackRunners > maximumAssignments {
+		return fmt.Errorf("max-fallback-runners must be between 1 and %d", maximumAssignments)
 	}
 	configs, err := repositoryConfigs(cfg, repositories, localOnly, macOSFallback)
 	if err != nil {
@@ -76,7 +82,7 @@ func run() error {
 	platforms := map[string][]*coordinatorLoop{}
 	for _, c := range configs {
 		path := filepath.Join(directory, queueDirectory(c))
-		worker, err := openPlatformCoordinator(ctx, c, path, token, recoverOnly)
+		worker, err := openPlatformCoordinator(ctx, c, path, token, recoverOnly, maxFallbackRunners)
 		if err != nil {
 			return err
 		}

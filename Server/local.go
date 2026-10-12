@@ -231,7 +231,7 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, nil
 	}
 	expired := l.Local.expired()
-	if recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.hasFallback())) {
+	if recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull())) {
 		if err := a.beginCleanup(""); err != nil {
 			return false, err
 		}
