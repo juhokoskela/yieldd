@@ -33,7 +33,7 @@ type listenerSession interface {
 const listenerRetryDelay = 5 * time.Second
 const listenerMaximumRetryDelay = time.Minute
 
-func openPlatformCoordinator(ctx context.Context, cfg config, directory, token string, recoverOnly bool) (_ *platformCoordinator, err error) {
+func openPlatformCoordinator(ctx context.Context, cfg config, directory, token string, recoverOnly bool, maxFallbackRunners int) (_ *platformCoordinator, err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("repository %s platform %s: %w", cfg.Repository, cfg.platform(), err)
@@ -61,7 +61,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: defaultMaxFallbackRunners}
+	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: maxFallbackRunners}
 	loopContext, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	p.loop = newCoordinatorLoop(loopContext, worker)
