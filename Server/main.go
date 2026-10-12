@@ -25,11 +25,13 @@ func run() error {
 	var cfg config
 	var directory, clientListen, macOSFallback, repositories, localOnly string
 	var recoverOnly, allowNonLoopbackClientListen bool
+	var maxFallbackRunners int
 	flag.StringVar(&repositories, "repositories", "", "Comma-separated application repositories (OWNER/REPOSITORY)")
 	flag.StringVar(&localOnly, "local-only-repositories", "", "Repositories that wait for local capacity and never dispatch fallback")
 	flag.StringVar(&cfg.Infrastructure, "infrastructure", "", "Infrastructure repository (OWNER/REPOSITORY)")
 	flag.StringVar(&cfg.Fallback, "fallback-runner", "", "Linux fallback target as a JSON label string or array")
 	flag.StringVar(&macOSFallback, "macos-fallback-runner", "", "Enable yieldd-macos with this fallback target as a JSON label string or array")
+	flag.IntVar(&maxFallbackRunners, "max-fallback-runners", defaultMaxFallbackRunners, "Maximum active hosted bootstraps per repository/platform queue (1-16)")
 	flag.StringVar(&directory, "state-dir", "", "Absolute private state directory")
 	flag.BoolVar(&recoverOnly, "recover", false, "Clean up recorded assignments and exit without provisioning")
 	flag.StringVar(&cfg.DeviceID, "device-id", "", "UUID of the connected Apple Silicon Mac")
@@ -38,6 +40,9 @@ func run() error {
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if maxFallbackRunners < 1 || maxFallbackRunners > maximumAssignments {
+		return errors.New("max-fallback-runners must be between 1 and 16")
 	}
 	configs, err := repositoryConfigs(cfg, repositories, localOnly, macOSFallback)
 	if err != nil {
@@ -80,6 +85,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		worker.loop.worker.maxFallbackRunners = maxFallbackRunners
 		workers = append(workers, worker)
 		platforms[c.platform()] = append(platforms[c.platform()], worker.loop)
 	}

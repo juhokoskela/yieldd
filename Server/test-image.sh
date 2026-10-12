@@ -13,6 +13,14 @@ trap cleanup EXIT
 [[ "$(docker image inspect --format '{{.Config.User}}' "$image")" == '65532:65532' ]]
 docker run --rm --network none --read-only "$image" --help
 
+for limit in 0 17; do
+    if output="$(docker run --rm --network none --read-only "$image" --max-fallback-runners "$limit" 2>&1)"; then
+        echo "Invalid fallback limit was accepted: $limit" >&2
+        exit 1
+    fi
+    [[ "$output" == *'max-fallback-runners must be between 1 and 16'* ]]
+done
+
 owners=()
 for attempt in 1 2; do
     instance="$(docker create --network none --read-only --cap-drop ALL \
@@ -22,6 +30,7 @@ for attempt in 1 2; do
         --local-only-repositories example/infrastructure --infrastructure example/infrastructure \
         --device-id 01234567-89ab-4def-8123-456789abcdef \
         --fallback-runner '"ubuntu-24.04"' --macos-fallback-runner '"macos-26"' \
+        --max-fallback-runners "$attempt" \
         --state-dir /var/lib/yieldd --recover)"
     containers+=("$instance")
     docker start --attach "$instance"

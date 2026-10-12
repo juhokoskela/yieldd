@@ -30,22 +30,26 @@ type bootstrapAPI interface {
 	runnerBusy(context.Context, string, int) (bool, error)
 }
 
-const maximumAssignments = 16
+const (
+	maximumAssignments        = 16
+	defaultMaxFallbackRunners = 1
+)
 
 var bootstrapIdentityMismatch = errors.New("bootstrap run identity does not match its lease")
 
 // One event loop owns every assignment in a repository/platform queue.
 type coordinator struct {
-	state             *state
-	save              func(*state) error
-	runners           runnerAPI
-	bootstrap         bootstrapAPI
-	logger            *slog.Logger
-	device            *deviceQueue
-	reportedLocalHold map[string]localPhase
-	refreshDemand     bool
-	demandUnavailable bool
-	paused            error
+	state              *state
+	save               func(*state) error
+	runners            runnerAPI
+	bootstrap          bootstrapAPI
+	logger             *slog.Logger
+	device             *deviceQueue
+	reportedLocalHold  map[string]localPhase
+	refreshDemand      bool
+	demandUnavailable  bool
+	paused             error
+	maxFallbackRunners int
 }
 
 type assignment struct {
@@ -64,12 +68,17 @@ func isJournalWrite(err error) bool {
 }
 
 func (c *coordinator) hasFallback() bool {
+	return c.fallbackCount() != 0
+}
+
+func (c *coordinator) fallbackCount() int {
+	count := 0
 	for _, l := range c.state.Leases {
 		if l.Local == nil {
-			return true
+			count++
 		}
 	}
-	return false
+	return count
 }
 
 func (c *coordinator) hasPendingOffer() bool {
@@ -301,48 +310,47 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if c.hasPendingOffer() {
 		return nil
 	}
-	for len(c.state.Leases) < count {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.state.Config.LocalOnly {
+		c.device.wait(c.state.Owner)
+	}
+	l := &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
+	slot, local := 0, false
+	if c.state.Config.DeviceID != "" {
+		slot, local = c.device.claim(c.state.Owner, l.Name)
+	}
+	if !local {
 		if c.state.Config.LocalOnly {
-			c.device.wait(c.state.Owner)
-		}
-		l := &lease{Name: "yieldd-bootstrap-" + uuid.NewString(), Created: time.Now().UTC()}
-		slot, local := 0, false
-		if c.state.Config.DeviceID != "" {
-			slot, local = c.device.claim(c.state.Owner, l.Name)
-		}
-		if !local {
-			if c.state.Config.LocalOnly {
-				return nil
-			}
-			// Preserve the existing paid-fallback limit while local work scales out.
-			if c.hasFallback() {
-				if c.state.Config.DeviceID != "" {
-					c.device.wait(c.state.Owner)
-				}
-				return nil
-			}
-		} else {
-			l.Local = &localLease{DeviceID: c.state.Config.DeviceID, Slot: slot, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
-		}
-		a := &assignment{coordinator: c}
-		if err := a.replace(l); err != nil {
-			return err
-		}
-		c.refreshDemand = false
-		if local {
-			c.logger.Info("Local offer created", "runner", l.Name, "device", c.state.Config.DeviceID, "slot", slot, "accept_timeout", offerLifetime)
 			return nil
 		}
-		if err := a.register(ctx); err != nil {
-			return err
+		if c.fallbackCount() >= c.maxFallbackRunners {
+			if c.state.Config.DeviceID != "" {
+				c.device.wait(c.state.Owner)
+			}
+			return nil
 		}
-		if err := a.prepare(ctx); err != nil {
-			return err
-		}
+	} else {
+		l.Local = &localLease{DeviceID: c.state.Config.DeviceID, Slot: slot, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
 	}
+	a := &assignment{coordinator: c}
+	if err := a.replace(l); err != nil {
+		return err
+	}
+	c.refreshDemand = false
+	if local {
+		c.logger.Info("Local offer created", "runner", l.Name, "device", c.state.Config.DeviceID, "slot", slot, "accept_timeout", offerLifetime)
+		return nil
+	}
+	if err := a.register(ctx); err != nil {
+		return err
+	}
+	if err := a.prepare(ctx); err != nil {
+		return err
+	}
+	// Give device requests a turn before the next provisioning operation.
+	c.device.redrive(c.state.Owner)
 	return nil
 }
 

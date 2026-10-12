@@ -140,7 +140,7 @@ func newFixture(t *testing.T) (*coordinator, *fakeWorld, *stateStore) {
 		t.Fatal(err)
 	}
 	world := &fakeWorld{assignedJobs: 1}
-	return &coordinator{state: saved, save: store.save, runners: world, bootstrap: world, device: newDeviceQueue(nil), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, world, store
+	return &coordinator{state: saved, save: store.save, runners: world, bootstrap: world, device: newDeviceQueue(nil), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), maxFallbackRunners: defaultMaxFallbackRunners}, world, store
 }
 
 func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {

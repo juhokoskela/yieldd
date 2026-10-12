@@ -28,6 +28,8 @@ services:
       - ${YIELDD_FALLBACK_RUNNER:?Set YIELDD_FALLBACK_RUNNER to a JSON label string or array}
       - --macos-fallback-runner
       - ${YIELDD_MACOS_FALLBACK_RUNNER:-}
+      - --max-fallback-runners
+      - ${YIELDD_MAX_FALLBACK_RUNNERS:-1}
       - --device-id
       - ${YIELDD_DEVICE_ID:?Set YIELDD_DEVICE_ID}
       - --client-listen

@@ -2,7 +2,7 @@
 
 This Go service routes jobs for up to 16 application repositories through one coordinator and one Mac connection. Each repository has its own Linux and optional macOS scale sets. `runs-on: yieldd` targets Linux; `runs-on: yieldd-linux` targets the same scale set when GitHub retains that alias. `runs-on: yieldd-macos` targets macOS. Each platform uses its user-configured fallback target, dispatched through the infrastructure repository, unless that application repository is local-only.
 
-Each repository/platform queue can hold up to 16 assignments. A [connected Mac](../Docs/connected-mac-prototype.md) offers several Linux ARM64 or macOS ARM64 workers, shared across repositories and bounded by its memory budget. macOS is capped at two guests. Paid fallback remains limited to one active bootstrap per repository/platform queue; additional demand waits for local capacity or that bootstrap's cleanup. An issued local assignment retains only its own worker slot until cleanup is acknowledged. Other slots can keep working, including on the same repository. Idle workers create no guests and reserve no RAM. The installed Swift agent remains standalone; connected mode uses foreground `yieldd connect`.
+Each repository/platform queue can hold up to 16 assignments. A [connected Mac](../Docs/connected-mac-prototype.md) offers several Linux ARM64 or macOS ARM64 workers, shared across repositories and bounded by its memory budget. macOS is capped at two guests. Paid fallback defaults to one active bootstrap per repository/platform queue; `--max-fallback-runners` can raise that limit to 16. Additional demand waits when both local and configured hosted capacity are occupied. An issued local assignment retains only its own worker slot until cleanup is acknowledged. Other slots can keep working, including on the same repository. Idle workers create no guests and reserve no RAM. The installed Swift agent remains standalone; connected mode uses foreground `yieldd connect`.
 
 The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scaleset/tree/v0.4.0). It scales from GitHub's assigned-job count, not individual job notifications. GitHub chooses which queued job a runner receives.
 
@@ -32,6 +32,8 @@ go run . \
 ```
 
 Add `--macos-fallback-runner '"macos-26"'` to enable macOS queues for all repositories. Neither platform has a default fallback provider. Startup requests the `yieldd-linux` alias for each Linux set. If GitHub retains only `yieldd`, startup preserves that identity and warns that workflows must use `runs-on: yieldd`. This applies to saved, discovered, and newly created sets. Missing base labels, unexpected labels, and changed identities are rejected.
+
+Set `--max-fallback-runners 3` to allow up to three active hosted bootstraps in each repository/platform queue. The range is 1–16 and the default is 1. Local capacity remains preferred, and local-only queues never use fallback. The limit applies independently to every queue, not to the whole deployment, so raising it can increase hosted costs across repositories and platforms. Provisioning starts one hosted assignment per event-loop pass and schedules the next pass automatically. Startup logs show the configured `fallback_capacity`. Changing this limit needs no state migration; lowering it blocks new hosted assignments without canceling existing ones. Uncertain dispatches and pending cleanup still occupy capacity.
 
 Repositories listed in `--local-only-repositories` must also appear in `--repositories` and require a connected device. They wait for local capacity, without registering a runner or uploading credentials while waiting. An expired unaccepted offer returns to the local queue instead of dispatching fallback. Waiting local-only queues receive capacity in arrival order. The infrastructure repository may run its own CI this way, but cannot use itself for fallback. Keep its `runner-bootstrap.yml` on an external disposable provider; ordinary CI jobs may use `yieldd` or `yieldd-macos`.
 
@@ -64,6 +66,8 @@ YIELDD_LOCAL_ONLY_REPOSITORIES=juhokoskela/yieldd-infra
 YIELDD_INFRASTRUCTURE=juhokoskela/yieldd-infra
 YIELDD_STATE_VOLUME=yieldd-coordinator-multi-repository-state
 YIELDD_FALLBACK_RUNNER='"ubuntu-24.04"'
+# Hosted bootstrap limit per repository/platform queue (1–16).
+YIELDD_MAX_FALLBACK_RUNNERS=1
 # Optional: enable macOS with a user-selected fallback.
 YIELDD_MACOS_FALLBACK_RUNNER='"macos-26"'
 ```

@@ -6,7 +6,7 @@ This prototype offers Linux ARM64 containers, macOS ARM64 VMs, or both from one 
 
 macOS workers are capped at two, matching the standalone service and [Apple's standard macOS virtualization allowance](https://www.apple.com/legal/sla/docs/macOSTahoe.pdf). Shut down the template and other macOS VMs before running two guests. Linux workers are capped at 16. These are worker limits, not guarantees of available host CPU, disk, or memory.
 
-All repositories share these local workers. Each repository/platform queue can hold up to 16 assignments, with at most one active hosted fallback. Additional demand waits when neither local capacity nor another fallback slot is available. Local-only repositories never dispatch fallback. This is not yet a multi-device scheduler or installed connected agent. Workloads using fallback must support its architecture as well as local ARM64.
+All repositories share these local workers. Each repository/platform queue can hold up to 16 assignments. The coordinator's `--max-fallback-runners` setting limits active hosted bootstraps per queue, defaulting to one; Compose exposes it as `YIELDD_MAX_FALLBACK_RUNNERS`. Additional demand waits when neither local capacity nor another fallback slot is available. Local-only repositories never dispatch fallback. This is not yet a multi-device scheduler or installed connected agent. Workloads using fallback must support its architecture as well as local ARM64.
 
 ## Setup
 
@@ -79,7 +79,7 @@ On the Mac, offer both platforms through one process:
   --macos-template /Users/juhokoskela/VM.bundle
 ```
 
-For macOS only, omit `--platform linux`. With no platform flags, the existing command remains Linux-only. The macOS template path must be absolute and outside the managed clone directory. Workers poll independently without reserving memory. When simultaneous offers exceed the budget, only workers that acquire reservations can accept. A worker that loses admission immediately declines its offer, so the coordinator can reconcile without waiting five seconds. Declined or expired offers use fallback if the queue has no active fallback; otherwise they return to waiting. Local-only offers always return to waiting. A host with enough memory can execute several jobs from the same platform and repository, or mix platforms and repositories.
+For macOS only, omit `--platform linux`. With no platform flags, the existing command remains Linux-only. The macOS template path must be absolute and outside the managed clone directory. Workers poll independently without reserving memory. When simultaneous offers exceed the budget, only workers that acquire reservations can accept. A worker that loses admission immediately declines its offer, so the coordinator can reconcile without waiting five seconds. Declined or expired offers use fallback if the queue is below its configured hosted limit; otherwise they return to waiting. Local-only offers always return to waiting. A host with enough memory can execute several jobs from the same platform and repository, or mix platforms and repositories.
 
 The proxy must forward all of `/v1/`, including `/v1/macos/`. Workflows need only `runs-on: yieldd-macos`; no workflow-side routing action is needed.
 

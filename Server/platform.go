@@ -61,7 +61,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger}
+	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: defaultMaxFallbackRunners}
 	loopContext, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	p.loop = newCoordinatorLoop(loopContext, worker)
@@ -140,7 +140,7 @@ func (p *platformCoordinator) run(ctx context.Context, recoverOnly bool) error {
 	worker := p.loop.worker
 	// Remove a failed waiter's FIFO entry, never its issued capacity reservation.
 	defer worker.device.forget(worker.state.Owner)
-	worker.logger.Info("Serving scale set", "scale_set", worker.state.ScaleSetID, "capacity", maximumAssignments, "local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
+	worker.logger.Info("Serving scale set", "scale_set", worker.state.ScaleSetID, "capacity", maximumAssignments, "fallback_capacity", worker.maxFallbackRunners, "local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
 	done := make(chan error, 1)
 	go func() { done <- p.loop.run(); p.cancel() }()
 	err := p.listen()
