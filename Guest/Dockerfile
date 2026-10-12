@@ -13,6 +13,7 @@ RUN apt-get update \
         docker.io \
         git \
         jq \
+        sudo \
         systemd \
         systemd-sysv \
         libatomic1 \
@@ -32,6 +33,7 @@ COPY configure-runner /usr/local/bin/yieldd-configure-runner
 COPY runner-control /usr/local/bin/yieldd-runner-control
 COPY yieldd.slice /etc/systemd/system/yieldd.slice
 COPY docker-daemon.json /etc/docker/daemon.json
+COPY runner.sudoers /etc/sudoers.d/runner
 
 RUN mkdir -p /var/lib/dbus \
     && : > /etc/machine-id \
@@ -46,6 +48,9 @@ RUN mkdir -p /var/lib/dbus \
     && systemctl enable containerd.service docker.service \
     && useradd --create-home --shell /bin/bash runner \
     && usermod --append --groups docker runner \
+    && chmod 0440 /etc/sudoers.d/runner \
+    && visudo --check \
+    && test "$(runuser --user runner -- sudo --non-interactive id -u)" = 0 \
     && chown -R runner:runner /opt/actions-runner \
     && chmod 0755 \
         /usr/local/bin/yieldd-configure-runner \
