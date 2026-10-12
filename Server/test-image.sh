@@ -10,7 +10,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[[ "$(docker image inspect --format '{{.Config.User}}' "$image")" == '65532:65532' ]]
+[[ "$(docker image inspect --format '{{.Config.User}}' "$image")" == '65532:65532' ]] || exit 1
 docker run --rm --network none --read-only "$image" --help
 
 for limit in 0 17; do
@@ -18,7 +18,7 @@ for limit in 0 17; do
         echo "Invalid fallback limit was accepted: $limit" >&2
         exit 1
     fi
-    [[ "$output" == *'max-fallback-runners must be between 1 and 16'* ]]
+    [[ "$output" == *'max-fallback-runners must be between 1 and 16'* ]] || exit 1
 done
 
 owners=()
@@ -34,7 +34,7 @@ for attempt in 1 2; do
         --state-dir /var/lib/yieldd --recover)"
     containers+=("$instance")
     docker start --attach "$instance"
-    [[ "$(docker inspect --format '{{.State.ExitCode}}' "$instance")" == 0 ]]
+    [[ "$(docker inspect --format '{{.State.ExitCode}}' "$instance")" == 0 ]] || exit 1
     current_owners=()
     for repository in glasseq yieldd infrastructure glasseqserver; do
         for platform in linux macos; do
@@ -47,12 +47,12 @@ for attempt in 1 2; do
             current_owners+=("$current_owner")
         done
     done
-    [[ "$(printf '%s\n' "${current_owners[@]}" | sort -u | wc -l)" -eq 8 ]]
+    [[ "$(printf '%s\n' "${current_owners[@]}" | sort -u | wc -l)" -eq 8 ]] || exit 1
     if [[ "$attempt" == 1 ]]; then
         owners=("${current_owners[@]}")
     else
         # Both arrays follow the same repository/platform order.
-        [[ "${current_owners[*]}" == "${owners[*]}" ]]
+        [[ "${current_owners[*]}" == "${owners[*]}" ]] || exit 1
     fi
 done
 
