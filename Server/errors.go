@@ -12,33 +12,25 @@ import (
 var runnerStillBusy = errors.New("runner is still busy; cleanup obligation retained")
 
 func transientFailure(err error) bool {
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := joined.Unwrap()
-		if len(causes) == 0 {
-			return false
-		}
-		for _, cause := range causes {
-			if !transientFailure(cause) {
-				return false
-			}
-		}
-		return true
-	}
+	return !isJournalWrite(err) && allCauses(err, transientCause)
+}
+
+func transientCause(err error) bool {
 	if err == context.DeadlineExceeded || err == io.EOF || err == runnerStillBusy {
 		return true
 	}
 	if _, ok := err.(net.Error); ok {
 		return true
 	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return transientFailure(wrapped.Unwrap())
-	}
-	var api *apiError
-	return errors.As(err, &api) && (api.status == 429 || api.status >= 500)
+	api, ok := err.(*apiError)
+	return ok && (api.status == 429 || api.status >= 500)
 }
 
-func onlyCancellation(err error) bool {
-	if err == context.Canceled {
+func allCauses(err error, matches func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if matches(err) {
 		return true
 	}
 	switch e := err.(type) {
@@ -48,16 +40,20 @@ func onlyCancellation(err error) bool {
 			return false
 		}
 		for _, cause := range causes {
-			if !onlyCancellation(cause) {
+			if !allCauses(cause, matches) {
 				return false
 			}
 		}
 		return true
 	case interface{ Unwrap() error }:
-		return onlyCancellation(e.Unwrap())
+		return allCauses(e.Unwrap(), matches)
 	default:
 		return false
 	}
+}
+
+func onlyCancellation(err error) bool {
+	return !isJournalWrite(err) && allCauses(err, func(err error) bool { return err == context.Canceled })
 }
 
 // SDK errors can contain credential-bearing response bodies. Keep their identity, not their text.

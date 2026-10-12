@@ -57,10 +57,34 @@ func TestOnlyCancellationDoesNotHideJoinedFailures(t *testing.T) {
 		{"joined-failure", errors.Join(context.Canceled, failure), false},
 		{"nested-provisioning-failure", fmt.Errorf("listener: %w", &callbackError{errors.Join(context.Canceled, failure)}), false},
 		{"joined-deadline", errors.Join(context.Canceled, context.DeadlineExceeded), false},
+		{"journal-cancellation", &journalWriteError{context.Canceled}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := onlyCancellation(tc.err); got != tc.only {
 				t.Fatalf("onlyCancellation = %v, want %v", got, tc.only)
+			}
+		})
+	}
+}
+
+func TestVerificationRetryClassifiesEveryCause(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{"nil", nil, false},
+		{"identity", fmt.Errorf("runner: %w", bootstrapIdentityMismatch), true},
+		{"identity and transient", errors.Join(bootstrapIdentityMismatch, &apiError{502}), true},
+		{"rate limited", &apiError{429}, true},
+		{"network wrapper", &url.Error{Err: io.ErrClosedPipe}, true},
+		{"permanent sibling", errors.Join(bootstrapIdentityMismatch, &apiError{403}), false},
+		{"cancelled", errors.Join(bootstrapIdentityMismatch, context.Canceled), false},
+		{"journal timeout", &journalWriteError{context.DeadlineExceeded}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryableBootstrapVerification(test.err); got != test.retry {
+				t.Fatal("retry classification", got, "want", test.retry)
 			}
 		})
 	}
