@@ -56,11 +56,13 @@ type coordinator struct {
 	identityRetryAt    time.Time
 	identityRetryDelay time.Duration
 	maxFallbackRunners int
+	lastHostedCleanup  string
 }
 
 type assignment struct {
 	*coordinator
-	lease *lease
+	lease              *lease
+	deferHostedCleanup bool
 }
 
 type journalWriteError struct{ cause error }
@@ -255,7 +257,16 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		// blocked on GitHub. Rejoin after reconciliation if it still needs a Mac.
 		c.device.forget(c.state.Owner)
 	}
+	if a := c.nextHostedCleanup(); a != nil {
+		c.lastHostedCleanup = a.lease.Name
+		_, err := a.finishCleanup(ctx, false)
+		if err == nil && c.nextHostedCleanup() != nil {
+			c.device.redrive(c.state.Owner)
+		}
+		return err
+	}
 	completed := false
+	hostedCleanupAttempted, hostedCleanupCompleted := false, false
 	hostedProvisioned := false
 	verificationPending := false
 	retryLater := c.identityPaused() && time.Now().Before(c.identityRetryAt)
@@ -287,6 +298,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			return err
 		}
 		a := c.assigned(name)
+		a.deferHostedCleanup = hostedCleanupAttempted
 		l := a.lease
 		local := l.Local
 		if retryLater && l.DispatchIntent && !l.CleanupIntent {
@@ -305,6 +317,10 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		}
 		recoverOnly := (surplus[name] || provisioningPaused || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
 		done, err := a.reconcileWithRun(ctx, recoverOnly, runs[name])
+		if local == nil && !a.deferHostedCleanup && (done || a.lease != nil && a.lease.CleanupIntent) {
+			hostedCleanupAttempted, hostedCleanupCompleted = true, done
+			c.lastHostedCleanup = name
+		}
 		provisioningPaused = provisioningPaused || errors.Is(err, bootstrapIdentityMismatch)
 		hostedProvisioned = hostedProvisioned || (!l.DispatchIntent && a.lease != nil && a.lease.DispatchIntent)
 		if errors.Is(err, bootstrapIdentityMismatch) || (transientFailure(err) && slices.Contains(c.identityRunners, name)) {
@@ -331,6 +347,9 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if hostedCleanupCompleted && c.nextHostedCleanup() != nil {
+		c.device.redrive(c.state.Owner)
 	}
 	c.identityRunners = identityRunners
 	if err := errors.Join(failures...); err != nil {
@@ -426,6 +445,23 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	// Give device requests a turn before the next provisioning operation.
 	c.device.redrive(c.state.Owner)
 	return nil
+}
+
+func (c *coordinator) nextHostedCleanup() *assignment {
+	var first *assignment
+	for _, name := range c.names() {
+		l := c.state.Leases[name]
+		if l.Local != nil || !l.CleanupIntent {
+			continue
+		}
+		if first == nil {
+			first = c.assigned(name)
+		}
+		if name > c.lastHostedCleanup {
+			return c.assigned(name)
+		}
+	}
+	return first
 }
 
 type bootstrapRunResult struct {
@@ -642,6 +678,9 @@ func (a *assignment) beginCleanup(conclusion string) error {
 
 func (a *assignment) finishCleanup(ctx context.Context, recoverOnly bool) (bool, error) {
 	l := a.lease
+	if l.Local == nil && a.deferHostedCleanup {
+		return false, nil
+	}
 	if err := a.cleanup(ctx); err != nil {
 		return false, err
 	}

@@ -50,11 +50,11 @@ func (s *coordinatorLoop) run() error {
 			deadline = s.worker.identityRetryAt
 		}
 		for _, l := range s.worker.state.Leases {
-			if l.Local == nil {
-				continue
-			}
 			if l.CleanupIntent {
 				retryPending = true
+				continue
+			}
+			if l.Local == nil {
 				continue
 			}
 			if l.Local.Phase == localAccepted || l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered) {
