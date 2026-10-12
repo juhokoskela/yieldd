@@ -45,7 +45,10 @@ func (s *coordinatorLoop) run() error {
 		var expired <-chan time.Time
 
 		var deadline time.Time
-		retryPending := onlyBootstrapIdentityErrors(s.worker.paused)
+		retryPending := false
+		if s.worker.identityPaused() {
+			deadline = s.worker.identityRetryAt
+		}
 		for _, l := range s.worker.state.Leases {
 			if l.Local == nil {
 				continue

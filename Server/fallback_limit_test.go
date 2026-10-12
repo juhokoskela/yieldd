@@ -38,18 +38,18 @@ func (w *multipleBootstrapWorld) getRun(_ context.Context, id int64) (*workflowR
 	return &snapshot, nil
 }
 
-func multipleFallbackFixture(t *testing.T) (*coordinator, *multipleBootstrapWorld, *stateStore) {
+func multipleFallbackFixture(t *testing.T, limit int) (*coordinator, *multipleBootstrapWorld, *stateStore) {
 	t.Helper()
 	c, world, store := concurrentFixture(t, 0)
 	w := &multipleBootstrapWorld{concurrentWorld: world, runs: make(map[int64]*workflowRun)}
 	c.bootstrap = w
+	c.maxFallbackRunners = limit
 	w.assignedJobs = maximumAssignments
 	return c, w, store
 }
 
 func TestFallbackLimitCanIncreaseAndDecreaseWithoutChangingJournals(t *testing.T) {
-	c, w, store := multipleFallbackFixture(t)
-	c.maxFallbackRunners = 3
+	c, w, store := multipleFallbackFixture(t, 3)
 	for want := 1; want <= 3; want++ {
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), maximumAssignments); err != nil || n != want {
 			t.Fatal("fallback did not scale one assignment per pass", n, want, err)
@@ -84,39 +84,54 @@ func TestFallbackLimitCanIncreaseAndDecreaseWithoutChangingJournals(t *testing.T
 }
 
 func TestExpiredLocalOffersUseTheConfiguredFallbackLimit(t *testing.T) {
-	c, w, _ := multipleFallbackFixture(t)
-	c.maxFallbackRunners = 2
+	c, w, _ := multipleFallbackFixture(t, 2)
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
 		t.Fatal(err)
 	}
-	for want := 2; want <= 3; want++ {
+	c.device.pollNow(0)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
+		t.Fatal(err)
+	}
+	offer := c.device.pollNow(0)
+	if offer == nil {
+		t.Fatal("local capacity was not preferred below the cap")
+	}
+	if err := c.declineDevice(requestFor(offer)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 2 || w.dispatched != 2 || c.state.Leases[offer.Runner].RunID == 0 {
+		t.Fatal("declined offer was not converted below the cap", n, err, w.dispatched)
+	}
+	c.device.pollNow(0)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
+		t.Fatal(err)
+	}
+	offer = c.device.pollNow(0)
+	if offer == nil {
+		t.Fatal("local capacity was not preferred above the cap")
+	}
+	if err := c.declineDevice(requestFor(offer)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 2 || w.dispatched != 2 || c.state.Leases[offer.Runner] != nil {
+		t.Fatal("declined offer was retained above the cap", n, err, w.dispatched)
+	}
+}
+
+func TestHostedProvisioningLeavesTheEventLoopBetweenAssignments(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 3)
 		c.device.pollNow(0)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
 			t.Fatal(err)
 		}
 		offer := c.device.pollNow(0)
 		if offer == nil {
-			t.Fatal("local capacity was not preferred", want)
+			t.Fatal("offer missing")
 		}
 		if err := c.declineDevice(requestFor(offer)); err != nil {
 			t.Fatal(err)
 		}
-		if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 2 || w.dispatched != 2 {
-			t.Fatal("decline did not honor the fallback cap", n, err, w.dispatched)
-		}
-		if want == 2 && c.state.Leases[offer.Runner].RunID == 0 {
-			t.Fatal("declined offer was not converted below the cap")
-		}
-		if want == 3 && c.state.Leases[offer.Runner] != nil {
-			t.Fatal("declined offer was retained above the cap")
-		}
-	}
-}
-
-func TestHostedProvisioningLeavesTheEventLoopBetweenAssignments(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		c, w, _ := multipleFallbackFixture(t)
-		c.maxFallbackRunners = 3
 		w.beforeGenerate = func() { time.Sleep(40 * time.Second) }
 		for want := 1; want <= 3; want++ {
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -131,8 +146,7 @@ func TestHostedProvisioningLeavesTheEventLoopBetweenAssignments(t *testing.T) {
 }
 
 func TestLocalOnlyQueueIgnoresRaisedFallbackLimit(t *testing.T) {
-	c, w, _ := multipleFallbackFixture(t)
-	c.maxFallbackRunners = maximumAssignments
+	c, w, _ := multipleFallbackFixture(t, maximumAssignments)
 	c.state.Config.LocalOnly, c.state.Config.Fallback = true, ""
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), maximumAssignments); err != nil || n != 0 || w.dispatched != 0 || len(w.runners) != 0 {
 		t.Fatal("local-only queue used paid capacity", n, err, w.events)
@@ -140,35 +154,37 @@ func TestLocalOnlyQueueIgnoresRaisedFallbackLimit(t *testing.T) {
 }
 
 func TestIdentityRecoveryVerifiesEveryAffectedFallback(t *testing.T) {
-	c, w, _ := multipleFallbackFixture(t)
-	c.maxFallbackRunners = 2
-	for range 2 {
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 2)
+		for range 2 {
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	names := c.names()
-	first, second := c.state.Leases[names[0]], c.state.Leases[names[1]]
-	w.runs[first.RunID].ID++
-	w.runs[second.RunID].DisplayTitle = "Pending bootstrap metadata"
-	w.runs[second.RunID].Status, w.runs[second.RunID].Conclusion = "completed", "success"
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused == nil {
-		t.Fatal("identity errors were not retained", err)
-	}
-	w.runs[first.RunID].ID = first.RunID
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused == nil || len(c.state.Leases) != 2 {
-		t.Fatal("one verified run cleared another assignment's pause", err)
-	}
-	w.runs[second.RunID].DisplayTitle = "Bootstrap " + second.Name
-	if n, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || n != 1 || c.paused != nil || c.state.Leases[first.Name] == nil || w.dispatched != 2 || slices.Contains(w.events, "cancel") {
-		t.Fatal("verified recovery canceled or redispatched ongoing execution", n, err, w.events)
-	}
+		names := c.names()
+		first, second := c.state.Leases[names[0]], c.state.Leases[names[1]]
+		w.runs[first.RunID].ID++
+		w.runs[second.RunID].DisplayTitle = "Pending bootstrap metadata"
+		w.runs[second.RunID].Status, w.runs[second.RunID].Conclusion = "completed", "success"
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused == nil {
+			t.Fatal("identity errors were not retained", err)
+		}
+		w.runs[first.RunID].ID = first.RunID
+		time.Sleep(5 * time.Second)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused == nil || len(c.state.Leases) != 2 {
+			t.Fatal("one verified run cleared another assignment's pause", err)
+		}
+		w.runs[second.RunID].DisplayTitle = "Bootstrap " + second.Name
+		time.Sleep(10 * time.Second)
+		if n, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || n != 1 || c.paused != nil || c.state.Leases[first.Name] == nil || w.dispatched != 2 || slices.Contains(w.events, "cancel") {
+			t.Fatal("verified recovery canceled or redispatched ongoing execution", n, err, w.events)
+		}
+	})
 }
 
 func TestFallbackCapacityFillsWithoutAnotherDemandCallback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c, w, _ := multipleFallbackFixture(t)
-		c.maxFallbackRunners = 3
+		c, w, _ := multipleFallbackFixture(t, 3)
 		ctx, cancel := context.WithCancel(t.Context())
 		loop := newCoordinatorLoop(ctx, c)
 		if _, err := newDeviceRouter(testDevice, []*coordinatorLoop{loop}); err != nil {
