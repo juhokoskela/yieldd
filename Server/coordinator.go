@@ -269,7 +269,20 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if !retryLater {
 		runs = c.lookupBootstrapRuns(ctx)
 	}
-	for _, name := range c.names() {
+	// Verify dispatched identities before any sibling can resume provisioning.
+	names := c.names()
+	slices.SortStableFunc(names, func(a, b string) int {
+		first, second := c.state.Leases[a].DispatchIntent, c.state.Leases[b].DispatchIntent
+		if first == second {
+			return 0
+		}
+		if first {
+			return -1
+		}
+		return 1
+	})
+	provisioningPaused := c.paused != nil
+	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -290,8 +303,9 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 				return err
 			}
 		}
-		recoverOnly := (surplus[name] || c.paused != nil || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
+		recoverOnly := (surplus[name] || provisioningPaused || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
 		done, err := a.reconcileWithRun(ctx, recoverOnly, runs[name])
+		provisioningPaused = provisioningPaused || errors.Is(err, bootstrapIdentityMismatch)
 		hostedProvisioned = hostedProvisioned || (!l.DispatchIntent && a.lease != nil && a.lease.DispatchIntent)
 		if errors.Is(err, bootstrapIdentityMismatch) || (transientFailure(err) && slices.Contains(c.identityRunners, name)) {
 			identityRunners = append(identityRunners, name)
