@@ -45,13 +45,13 @@ func (s *coordinatorLoop) run() error {
 		var expired <-chan time.Time
 
 		var deadline time.Time
-		cleanupPending := false
+		retryPending := onlyBootstrapIdentityErrors(s.worker.paused)
 		for _, l := range s.worker.state.Leases {
 			if l.Local == nil {
 				continue
 			}
 			if l.CleanupIntent {
-				cleanupPending = true
+				retryPending = true
 				continue
 			}
 			if l.Local.Phase == localAccepted || l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered) {
@@ -64,7 +64,7 @@ func (s *coordinatorLoop) run() error {
 				}
 			}
 		}
-		if cleanupPending {
+		if retryPending {
 			if retryAt.IsZero() {
 				retryAt = time.Now().Add(cleanupRetryDelay)
 			}

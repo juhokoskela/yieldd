@@ -195,9 +195,17 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 
 func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
 	err := c.reconcileAndProvision(ctx, count)
+	if onlyBootstrapIdentityErrors(err) && (c.paused == nil || onlyBootstrapIdentityErrors(c.paused)) {
+		if c.paused == nil {
+			c.logger.Warn("Bootstrap identity unverified; provisioning paused for automatic retry", "retry_delay", cleanupRetryDelay, "error", err)
+		}
+		c.paused = err
+		c.device.forget(c.state.Owner)
+		return len(c.state.Leases), nil
+	}
 	if err != nil && !isJournalWrite(err) && !onlyCancellation(err) && c.hasIssuedLocal() {
 		// Stop provisioning, not renewal or completion of already issued siblings.
-		if c.paused == nil {
+		if c.paused == nil || onlyBootstrapIdentityErrors(c.paused) {
 			c.logger.Error("Queue provisioning paused; issued local runners can finish. Resolve the error and restart to resume", "error", err)
 			c.paused = err
 		}
@@ -255,10 +263,15 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		return err
 	}
 	if c.paused != nil {
-		if c.hasIssuedLocal() {
-			return nil
+		if onlyBootstrapIdentityErrors(c.paused) {
+			c.paused = nil
+			c.logger.Info("Bootstrap identities verified; provisioning resumed")
+		} else {
+			if c.hasIssuedLocal() {
+				return nil
+			}
+			return c.paused
 		}
-		return c.paused
 	}
 	if c.demandUnavailable {
 		c.device.forget(c.state.Owner)
@@ -426,7 +439,7 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 			return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, retry reconciliation later without redispatching", l.Name)
 		}
 		if !run.matches(l) {
-			return false, bootstrapIdentityMismatch
+			return false, identityMismatch(l, run)
 		}
 	} else {
 		run, err = a.bootstrap.getRun(ctx, l.RunID)
@@ -447,14 +460,17 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 	}
 	l = a.lease
 	if run == nil || run.ID != l.RunID {
-		return false, bootstrapIdentityMismatch
+		return false, identityMismatch(l, run)
 	}
 	// Nonterminal metadata may lag dispatch. Never wait on the device request owner.
 	if run.Status != "completed" && !recoverOnly {
+		if onlyBootstrapIdentityErrors(a.paused) && !run.matches(l) {
+			return false, identityMismatch(l, run)
+		}
 		return false, nil
 	}
 	if !run.matches(l) {
-		return false, bootstrapIdentityMismatch
+		return false, identityMismatch(l, run)
 	}
 	if run.Status != "completed" {
 		err := a.bootstrap.cancelRun(ctx, l.RunID)
@@ -470,7 +486,7 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 			return false, fmt.Errorf("recheck bootstrap after cancellation conflict: %w", err)
 		}
 		if !run.matches(l) {
-			return false, bootstrapIdentityMismatch
+			return false, identityMismatch(l, run)
 		}
 		if run.Status != "completed" {
 			return false, nil
