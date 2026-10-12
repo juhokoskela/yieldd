@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 var testConfig = config{Repository: "example/application", Infrastructure: "example/infrastructure", Fallback: `"ubuntu-24.04"`}
 
 type fakeWorld struct {
+	getRunMu                                       sync.Mutex
 	events                                         []string
 	runner                                         *scaleset.RunnerReference
 	run                                            *workflowRun
@@ -104,6 +106,8 @@ func (f *fakeWorld) findRun(context.Context, *lease) (*workflowRun, error) {
 	return &copy, nil
 }
 func (f *fakeWorld) getRun(context.Context, int64) (*workflowRun, error) {
+	f.getRunMu.Lock()
+	defer f.getRunMu.Unlock()
 	f.getCalls++
 	if f.getErr != nil {
 		return nil, f.getErr

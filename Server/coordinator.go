@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -25,6 +26,7 @@ type bootstrapAPI interface {
 	deleteSecret(context.Context, string) error
 	dispatch(context.Context, *lease, string) (int64, error)
 	findRun(context.Context, *lease) (*workflowRun, error)
+	// Status reads may run concurrently; all other operations stay serialized.
 	getRun(context.Context, int64) (*workflowRun, error)
 	cancelRun(context.Context, int64) error
 	runnerBusy(context.Context, string, int) (bool, error)
@@ -72,7 +74,7 @@ func isJournalWrite(err error) bool {
 }
 
 func (c *coordinator) identityPaused() bool {
-	return onlyBootstrapIdentityErrors(c.paused)
+	return errors.Is(c.paused, bootstrapIdentityMismatch) && retryableBootstrapVerification(c.paused)
 }
 
 func (c *coordinator) fallbackFull() bool {
@@ -220,7 +222,7 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 	}
 	retryable := c.paused == nil || identityPaused
 	switch {
-	case retryable && (onlyBootstrapIdentityErrors(err) || identityPaused && retryableBootstrapVerification(err)):
+	case retryable && (identityPaused || errors.Is(err, bootstrapIdentityMismatch)) && retryableBootstrapVerification(err):
 		if !identityPaused || retryDue {
 			c.identityRetryDelay = min(max(cleanupRetryDelay, c.identityRetryDelay*2), identityMaximumRetryDelay)
 			c.identityRetryAt = time.Now().Add(c.identityRetryDelay)
@@ -228,7 +230,7 @@ func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (
 		if !identityPaused || !slices.Equal(previousRunners, c.identityRunners) || retryDue && c.identityRetryDelay == identityMaximumRetryDelay {
 			c.logger.Warn("Bootstrap identity unverified; provisioning paused for automatic retry", "runners", c.identityRunners, "retry_delay", c.identityRetryDelay, "error", err)
 		}
-		if onlyBootstrapIdentityErrors(err) {
+		if errors.Is(err, bootstrapIdentityMismatch) {
 			c.paused = err
 		}
 	case err != nil && !isJournalWrite(err) && !onlyCancellation(err) && c.hasIssuedLocal():
@@ -263,6 +265,10 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if !c.demandUnavailable {
 		surplus = c.surplusAssignments(count)
 	}
+	var runs map[string]*bootstrapRunResult
+	if !retryLater {
+		runs = c.lookupBootstrapRuns(ctx)
+	}
 	for _, name := range c.names() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -285,7 +291,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			}
 		}
 		recoverOnly := (surplus[name] || c.paused != nil || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
-		done, err := a.reconcile(ctx, recoverOnly)
+		done, err := a.reconcileWithRun(ctx, recoverOnly, runs[name])
 		hostedProvisioned = hostedProvisioned || (!l.DispatchIntent && a.lease != nil && a.lease.DispatchIntent)
 		if errors.Is(err, bootstrapIdentityMismatch) || (transientFailure(err) && slices.Contains(c.identityRunners, name)) {
 			identityRunners = append(identityRunners, name)
@@ -408,6 +414,29 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	return nil
 }
 
+type bootstrapRunResult struct {
+	run *workflowRun
+	err error
+}
+
+func (c *coordinator) lookupBootstrapRuns(ctx context.Context) map[string]*bootstrapRunResult {
+	runs := make(map[string]*bootstrapRunResult)
+	api := c.bootstrap
+	var pending sync.WaitGroup
+	for name, l := range c.state.Leases {
+		if l.Local != nil || l.CleanupIntent || l.RunID == 0 {
+			continue
+		}
+		id, result := l.RunID, new(bootstrapRunResult)
+		runs[name] = result
+		// The queue has at most 16 leases. Only immutable status reads run
+		// concurrently; the owner waits before validating or changing any lease.
+		pending.Go(func() { result.run, result.err = api.getRun(ctx, id) })
+	}
+	pending.Wait()
+	return runs
+}
+
 func (a *assignment) register(ctx context.Context) error {
 	l := a.lease
 	generated, err := a.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, a.state.ScaleSetID)
@@ -471,6 +500,10 @@ func (a *assignment) prepare(ctx context.Context) error {
 }
 
 func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, error) {
+	return a.reconcileWithRun(ctx, recoverOnly, nil)
+}
+
+func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, observed *bootstrapRunResult) (bool, error) {
 	l := a.lease
 	if l == nil {
 		return true, nil
@@ -504,7 +537,11 @@ func (a *assignment) reconcile(ctx context.Context, recoverOnly bool) (bool, err
 			return false, identityMismatch(l, run)
 		}
 	} else {
-		run, err = a.bootstrap.getRun(ctx, l.RunID)
+		if observed != nil {
+			run, err = observed.run, observed.err
+		} else {
+			run, err = a.bootstrap.getRun(ctx, l.RunID)
+		}
 		var missing *missingWorkflowRun
 		if errors.As(err, &missing) {
 			return a.recoverMissingRun(ctx, recoverOnly)

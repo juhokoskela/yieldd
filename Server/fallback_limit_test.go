@@ -26,6 +26,8 @@ func (w *multipleBootstrapWorld) dispatch(ctx context.Context, l *lease, fallbac
 }
 
 func (w *multipleBootstrapWorld) getRun(_ context.Context, id int64) (*workflowRun, error) {
+	w.getRunMu.Lock()
+	defer w.getRunMu.Unlock()
 	w.getCalls++
 	if w.getErr != nil {
 		return nil, w.getErr

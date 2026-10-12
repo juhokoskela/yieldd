@@ -28,10 +28,6 @@ func identityMismatch(l *lease, run *workflowRun) error {
 	return fmt.Errorf("%w: runner=%s expected_run=%d observed_run=%d status=%s title=%s", bootstrapIdentityMismatch, l.Name, l.RunID, observed.ID, status, title)
 }
 
-func onlyBootstrapIdentityErrors(err error) bool {
-	return !isJournalWrite(err) && allCauses(err, func(err error) bool { return err == bootstrapIdentityMismatch })
-}
-
 func retryableBootstrapVerification(err error) bool {
 	return !isJournalWrite(err) && allCauses(err, func(err error) bool {
 		return err == bootstrapIdentityMismatch || transientCause(err)

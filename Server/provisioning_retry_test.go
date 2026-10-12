@@ -56,12 +56,12 @@ func TestIdentityPauseSurvivesTransientVerificationFailures(t *testing.T) {
 						t.Fatal(err)
 					}
 					w.run.ID++
-					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !onlyBootstrapIdentityErrors(c.paused) {
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !c.identityPaused() {
 						t.Fatal("identity pause missing", err, c.paused)
 					}
 					time.Sleep(5 * time.Second)
 					w.getErr = failure
-					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !onlyBootstrapIdentityErrors(c.paused) {
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !c.identityPaused() {
 						t.Fatal("transient failure ended identity recovery", err, c.paused)
 					}
 					w.getErr = nil
