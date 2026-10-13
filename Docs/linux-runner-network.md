@@ -24,7 +24,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app
 
 Use your configured volume path instead of `/Volumes/YielddRunners`. The build script creates an ad-hoc-signed development installer; it does not install or restart services. It verifies the pinned source revision and patch before compilation. Unexpected cache edits are rejected without being discarded.
 
-The fork also fixes process-signal forwarding: the Container CLI encodes the signal as the string expected by the API server and guest runtime. Without this fix, interrupting a timed-out guest command can report `missing signal in xpc message`. Updating yieldd alone does not replace the installed Container CLI; rebuild and install the package above after jobs and cleanup finish.
+The fork also fixes process-signal forwarding: the Container CLI sends the host-platform signal name, which the API server forwards to the host-side `container-runtime-linux` helper for Linux signal parsing. A numeric Darwin signal would misidentify signals such as SIGUSR1 and SIGUSR2 on Linux. The original integer encoding could instead report `missing signal in xpc message` when interrupting a timed-out guest command. Updating yieldd alone does not replace the installed Container CLI; rebuild and install the package above after jobs and cleanup finish.
 
 The guest image and `connect` arguments are unchanged. Restart connected workers only after `machine-test` passes. Keep any failed cleanup records and resolve them before changing Container again.
 

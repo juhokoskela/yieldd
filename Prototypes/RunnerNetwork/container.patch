@@ -25,7 +25,7 @@ index 93b93c4..85f5522 100644
          .executableTarget(
              name: "container",
              dependencies: [
-@@ -290,6 +306,7 @@ let package = Package(
+@@ -293,6 +309,7 @@ let package = Package(
                  "ContainerAPIClient",
                  "ContainerPersistence",
                  "ContainerTestSupport",
@@ -36,12 +36,17 @@ index 93b93c4..85f5522 100644
 diff --git a/Sources/Services/ContainerAPIService/Client/ClientProcess.swift b/Sources/Services/ContainerAPIService/Client/ClientProcess.swift
 --- a/Sources/Services/ContainerAPIService/Client/ClientProcess.swift
 +++ b/Sources/Services/ContainerAPIService/Client/ClientProcess.swift
-@@ -80,7 +80,7 @@ struct ClientProcessImpl: ClientProcess, Sendable {
+@@ -79,8 +79,12 @@ struct ClientProcessImpl: ClientProcess, Sendable {
+     public func kill(_ signal: Int32) async throws {
++        guard let name = Signal.platformName(signal) else {
++            throw ContainerizationError(.invalidArgument, message: "Unknown host signal \(signal)")
++        }
++
          let request = XPCMessage(route: .containerKill)
          request.set(key: .id, value: containerId)
          request.set(key: .processIdentifier, value: id)
 -        request.set(key: .signal, value: Int64(signal))
-+        request.set(key: .signal, value: String(signal))
++        request.set(key: .signal, value: name)
 
          try await xpcClient.send(request)
      }
@@ -49,7 +54,7 @@ diff --git a/Tests/ContainerAPIClientTests/ClientProcessSignalTests.swift b/Test
 new file mode 100644
 --- /dev/null
 +++ b/Tests/ContainerAPIClientTests/ClientProcessSignalTests.swift
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,77 @@
 +//===----------------------------------------------------------------------===//
 +// Copyright © 2026 Apple Inc. and the container project authors.
 +//
@@ -69,13 +74,29 @@ new file mode 100644
 +import Containerization
 +import ContainerXPC
 +import Foundation
++import Synchronization
 +import Testing
 +
 +@testable import ContainerAPIClient
 +
 +struct ClientProcessSignalTests {
-+    @Test(arguments: [Int32(2), 9, 15], [nil, "exec-process"] as [String?])
-+    func killEncodesSignalForServer(signal: Int32, processID: String?) async throws {
++    struct SignalCase: Sendable {
++        let host: Int32
++        let name: String
++        let linux: Int32
++    }
++
++    static let signals = [
++        SignalCase(host: SIGINT, name: "INT", linux: 2),
++        SignalCase(host: SIGKILL, name: "KILL", linux: 9),
++        SignalCase(host: SIGTERM, name: "TERM", linux: 15),
++        SignalCase(host: SIGUSR1, name: "USR1", linux: 10),
++        SignalCase(host: SIGUSR2, name: "USR2", linux: 12),
++    ]
++
++    @Test(arguments: signals, [nil, "exec-process"] as [String?])
++    func killEncodesHostSignalNameForLinuxRuntime(signal: SignalCase, processID: String?) async throws {
++        let observed = Mutex<XPCMessage?>(nil)
 +        let listener = try #require(xpc_connection_create(nil, nil))
 +        defer { xpc_connection_cancel(listener) }
 +        xpc_connection_set_event_handler(listener) { event in
@@ -84,16 +105,13 @@ new file mode 100644
 +            xpc_connection_set_event_handler(peer) { object in
 +                guard xpc_get_type(object) == XPC_TYPE_DICTIONARY else { return }
 +                let request = XPCMessage(object: object)
-+                #expect(request.string(key: XPCMessage.routeKey) == XPCRoute.containerKill.rawValue)
-+                #expect(request.string(key: .id) == "guest")
-+                #expect(request.string(key: .processIdentifier) == (processID ?? "guest"))
-+                let encoded = request.string(key: .signal)
-+                #expect(encoded == String(signal))
-+                if let encoded {
-+                    do { #expect(try Signal(encoded).rawValue == signal) }
-+                    catch { Issue.record("Runtime could not parse signal: \(error)") }
++                let reply = request.reply()
++                for key in [XPCKeys.id, .processIdentifier, .signal] {
++                    reply.set(key: key, value: request.string(key: key) ?? "")
 +                }
-+                xpc_connection_send_message(xpc_dictionary_get_remote_connection(object)!, request.reply().underlying)
++                reply.set(key: XPCMessage.routeKey, value: request.string(key: XPCMessage.routeKey) ?? "")
++                observed.withLock { $0 = reply }
++                xpc_connection_send_message(xpc_dictionary_get_remote_connection(object)!, reply.underlying)
 +            }
 +            xpc_connection_activate(peer)
 +        }
@@ -103,7 +121,15 @@ new file mode 100644
 +        let client = XPCClient(connection: connection, label: "client-process-signal-test")
 +        defer { client.close() }
 +        let process = ClientProcessImpl(containerId: "guest", processId: processID, xpcClient: client)
-+        try await process.kill(signal)
++        try await process.kill(signal.host)
++
++        let reply = try #require(observed.withLock { $0 })
++        #expect(reply.string(key: XPCMessage.routeKey) == XPCRoute.containerKill.rawValue)
++        #expect(reply.string(key: .id) == "guest")
++        #expect(reply.string(key: .processIdentifier) == (processID ?? "guest"))
++        let encoded = try #require(reply.string(key: .signal))
++        #expect(encoded == signal.name)
++        #expect(try Signal(encoded).rawValue == signal.linux)
 +    }
 +}
 diff --git a/Sources/ContainerCommands/Machine/MachineBoot.swift b/Sources/ContainerCommands/Machine/MachineBoot.swift
