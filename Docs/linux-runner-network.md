@@ -24,11 +24,13 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app
 
 Use your configured volume path instead of `/Volumes/YielddRunners`. The build script creates an ad-hoc-signed development installer; it does not install or restart services. It verifies the pinned source revision and patch before compilation. Unexpected cache edits are rejected without being discarded.
 
+The fork also fixes process-signal forwarding: the Container CLI encodes the signal as the string expected by the API server and guest runtime. Without this fix, interrupting a timed-out guest command can report `missing signal in xpc message`. Updating yieldd alone does not replace the installed Container CLI; rebuild and install the package above after jobs and cleanup finish.
+
 The guest image and `connect` arguments are unchanged. Restart connected workers only after `machine-test` passes. Keep any failed cleanup records and resolve them before changing Container again.
 
 ## Validation boundary
 
-Automated checks cover the create/inspect/boot ordering, rejection of missing or mismatched socket settings, relay failure during a running host process, bounded shutdown, and crash-directory cleanup. CI builds the patched CLI, services, and installer without installing them, and checks that headless boot is exposed by the CLI. It does not prove the installed machine CLI's first-boot user setup or GitHub-job execution.
+Automated checks cover the create/inspect/boot ordering, rejection of missing or mismatched socket settings, relay failure during a running host process, bounded shutdown, and crash-directory cleanup. A local XPC test checks process-signal encoding without starting a guest. CI builds the patched CLI, services, and installer without installing them, and checks that headless boot is exposed by the CLI. It does not prove the installed machine CLI's first-boot user setup or GitHub-job execution.
 
 Before deploying, repeat public DNS/HTTPS and controlled host/LAN denial checks through a real Linux machine, with positive controls showing that the host endpoint and public transport work. Also verify owner interruption, machine deletion, and recovery against the installed fork. Earlier Linux runtime probes bypassed the machine service and CLI, so they are not evidence for this integration.
 

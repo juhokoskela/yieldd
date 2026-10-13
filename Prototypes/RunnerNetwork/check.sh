@@ -19,7 +19,7 @@ swift build --package-path "$container_source" --product container -j 6
 "$container_source/.build/debug/container" machine create --help | grep -q -- --network-socket
 "$container_source/.build/debug/container" machine boot --help | grep -q 'without terminal input'
 swift test --package-path "$container_source" \
-    --filter 'MacProbeLifecycleTests|MachineConfigTests|ContainerConfigurationResourcesTests' -j 6
+    --filter 'MacProbeLifecycleTests|MachineConfigTests|ContainerConfigurationResourcesTests|ClientProcessSignalTests' -j 6
 codesign --verify --strict "$repo_root/.build/mac-network-probe"
 codesign --verify --strict "$container_source/.build/debug/yieldd-linux-network-probe"
 echo "Prototype checks passed. No VMs or installed services were started."
