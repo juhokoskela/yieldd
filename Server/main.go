@@ -24,7 +24,7 @@ func main() {
 
 func run() error {
 	var cfg config
-	var directory, clientListen, macOSFallback, repositories, localOnly string
+	var directory, clientListen, macOSFallback, repositories, localOnly, repositoryRoutes string
 	var recoverOnly, allowNonLoopbackClientListen bool
 	var maxFallbackRunners int
 	flag.StringVar(&repositories, "repositories", "", "Comma-separated application repositories (OWNER/REPOSITORY)")
@@ -32,6 +32,7 @@ func run() error {
 	flag.StringVar(&cfg.Infrastructure, "infrastructure", "", "Infrastructure repository (OWNER/REPOSITORY)")
 	flag.StringVar(&cfg.Fallback, "fallback-runner", "", "Linux fallback target as a JSON label string or array")
 	flag.StringVar(&macOSFallback, "macos-fallback-runner", "", "Enable yieldd-macos with this fallback target as a JSON label string or array")
+	flag.StringVar(&repositoryRoutes, "repository-routes", "", "JSON array of per-repository infrastructure and Linux fallback overrides")
 	flag.IntVar(&maxFallbackRunners, "max-fallback-runners", defaultMaxFallbackRunners, fmt.Sprintf("Maximum active hosted bootstraps per repository/platform queue (1-%d)", maximumAssignments))
 	flag.StringVar(&directory, "state-dir", "", "Absolute private state directory")
 	flag.BoolVar(&recoverOnly, "recover", false, "Clean up recorded assignments and exit without provisioning")
@@ -45,7 +46,7 @@ func run() error {
 	if maxFallbackRunners < 1 || maxFallbackRunners > maximumAssignments {
 		return fmt.Errorf("max-fallback-runners must be between 1 and %d", maximumAssignments)
 	}
-	configs, err := repositoryConfigs(cfg, repositories, localOnly, macOSFallback)
+	configs, err := repositoryConfigs(cfg, repositories, localOnly, macOSFallback, repositoryRoutes)
 	if err != nil {
 		return err
 	}
