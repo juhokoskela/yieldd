@@ -22,6 +22,7 @@ for limit in 0 17; do
 done
 
 owners=()
+routes='[{"repository":"example/glasseqserver","infrastructure":"company/bootstrap","fallback":["self-hosted","disposable","ARM64"]}]'
 for attempt in 1 2; do
     instance="$(docker create --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges --mount "type=volume,src=$volume,dst=/var/lib/yieldd" \
@@ -30,6 +31,7 @@ for attempt in 1 2; do
         --local-only-repositories example/infrastructure --infrastructure example/infrastructure \
         --device-id 01234567-89ab-4def-8123-456789abcdef \
         --fallback-runner '"ubuntu-24.04"' --macos-fallback-runner '"macos-26"' \
+        --repository-routes "$routes" \
         --max-fallback-runners "$attempt" \
         --state-dir /var/lib/yieldd --recover)"
     containers+=("$instance")
@@ -43,6 +45,8 @@ for attempt in 1 2; do
             jq -e --arg repository "example/$repository" --arg platform "$platform" \
                 '.leases == null and .config.repository == $repository and
                 (.config.platform // "linux") == $platform and
+                .config.infrastructure == (if $repository == "example/glasseqserver" then "company/bootstrap" else "example/infrastructure" end) and
+                .config.fallback == (if $repository == "example/infrastructure" then "" elif $platform == "macos" then "\"macos-26\"" elif $repository == "example/glasseqserver" then "[\"self-hosted\",\"disposable\",\"ARM64\"]" else "\"ubuntu-24.04\"" end) and
                 (.config.local_only // false) == ($repository == "example/infrastructure")' <<< "$state" >/dev/null
             current_owners+=("$current_owner")
         done

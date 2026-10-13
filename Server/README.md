@@ -14,9 +14,9 @@ When upgrading from the single-repository version, finish its jobs and recovery 
 
 When upgrading from the one-runner-per-queue version, finish all jobs and recovery with the previous coordinator and Mac client first. Stop both before updating them together. Empty multi-repository journals can be reused without changing queue or scale-set identities; active single-assignment journals are rejected rather than migrated. Do not delete unresolved state. The `connect` command and coordinator environment variables are unchanged.
 
-The infrastructure repository must contain the `runner-bootstrap.yml` workflow and the per-bootstrap credential selector on `main`. The coordinator generates names such as `yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef`; the workflow reads the corresponding `YIELDD_JIT_0123456789ABCDEF0123456789ABCDEF` secret. The old shared `YIELDD_BOOTSTRAP_JIT` secret is not used.
+Each selected infrastructure repository must contain the `runner-bootstrap.yml` workflow and the per-bootstrap credential selector on `main`. The coordinator generates names such as `yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef`; the workflow reads the corresponding `YIELDD_JIT_0123456789ABCDEF0123456789ABCDEF` secret. The old shared `YIELDD_BOOTSTRAP_JIT` secret is not used.
 
-Provide `GH_TOKEN` through the coordinator's environment. The token needs runner administration access to every application repository, plus workflow dispatch, cancellation, and repository-secret write access in the infrastructure repository. Keep it on the server. GitHub App enrollment and token rotation are not implemented in this prototype.
+Provide `GH_TOKEN` through the coordinator's environment. The token needs runner administration access to every application repository, plus workflow dispatch, cancellation, and repository-secret write access in every selected infrastructure repository. Keep it on the server. GitHub App enrollment and token rotation are not implemented in this prototype.
 
 From `Server/`:
 
@@ -41,11 +41,19 @@ Repositories listed in `--local-only-repositories` must also appear in `--reposi
 
 The fallback can also be a JSON label array, such as `'["self-hosted","linux","disposable"]'`. It must select a disposable host with that platform's OS and a workload-compatible architecture and support the infrastructure action's Node runtime. The provider must permit nested runners. Arbitrary provider labels cannot establish compatibility; the operator owns that choice. A target containing `yieldd`, `yieldd-linux`, or `yieldd-macos` is rejected to avoid routing back to this coordinator.
 
+Use `--repository-routes` to override the infrastructure repository and Linux fallback for selected application repositories. It accepts a JSON array; each entry requires `repository`, `infrastructure`, and `fallback`. The fallback is a label string or array. Repository names are case-insensitive, and each routed repository must appear in `--repositories` and cannot be local-only. Other repositories keep the default flags. The infrastructure override applies to both platforms; macOS keeps the target from `--macos-fallback-runner`. Enable each provider for the infrastructure repository where its bootstrap workflow runs, not just the application repository.
+
+For example, include `SPLCompanyOy/LibreChat` in `--repositories` and add:
+
+```sh
+--repository-routes '[{"repository":"SPLCompanyOy/LibreChat","infrastructure":"SPLCompanyOy/yieldd-infra","fallback":"blacksmith-4vcpu-ubuntu-2404-arm"}]'
+```
+
 Use trusted workloads and private repositories. The outer bootstrap and nested job share an operating-system account; neither the private HOME nor the reduced environment is a security sandbox. Repository access to the infrastructure workflow and secrets must be restricted accordingly.
 
 The state directory is created with mode `0700`; existing permissive directories are rejected. Each queue stores its identity and runner-keyed assignment map at `queues/owner/repository/linux/state.json` or `queues/owner/repository/macos/state.json`, using lowercase repository names. Reordering the repository list does not change those identities. Files are atomically replaced with mode `0600` and synced to disk. They temporarily contain JIT credentials until delivery or encrypted upload succeeds. Keep the directory private, outside version control, on persistent local storage. A deployment-wide ownership lock excludes another process using that root; queue locks also protect individual journals. The locks do not coordinate separate hosts or different state directories.
 
-Startup refuses to omit any saved queue. Before removing a repository or platform, finish its work, stop the Mac and coordinator, run recovery with the original configuration, then archive that queue's directory. Changing a queue's fallback or local-only policy also requires completed recovery and a fresh queue directory. Changing `--device-id` changes every queue's configuration, so recover all queues with the old device ID before choosing a fresh state directory. Never remove a journal to bypass an unresolved assignment.
+Startup refuses to omit any saved queue. Before removing a repository or platform, finish its work, stop the Mac and coordinator, run recovery with the original configuration, then archive that queue's directory. Changing a queue's infrastructure repository, fallback, or local-only policy also requires completed recovery and a fresh queue directory. Routing overrides do not redirect old credentials, dispatches, or cleanup to a different repository. Changing `--device-id` changes every queue's configuration, so recover all queues with the old device ID before choosing a fresh state directory. Never remove a journal to bypass an unresolved assignment.
 
 ## Container deployment on Linux
 
@@ -75,6 +83,19 @@ YIELDD_MACOS_FALLBACK_RUNNER='"macos-26"'
 ```
 
 The fallback remains required for the application queues and may instead be a JSON label array. `yieldd-infra` is local-only in this example; the other three repositories retain fallback. Credentials are injected at runtime, never copied into the build context or image. Docker administrators can inspect container environment variables; restrict access to the daemon and the environment file. Avoid printing `docker compose config` with real credentials.
+
+For personal repositories on Avrea and LibreChat on the organization's Blacksmith bootstrap, use these routing values after recovering affected queues with their old configuration:
+
+```dotenv
+YIELDD_REPOSITORIES=juhokoskela/GlassEQ,juhokoskela/yieldd,juhokoskela/yieldd-infra,juhokoskela/GlassEQServer,SPLCompanyOy/LibreChat
+YIELDD_LOCAL_ONLY_REPOSITORIES=juhokoskela/yieldd-infra
+YIELDD_INFRASTRUCTURE=juhokoskela/yieldd-infra
+YIELDD_FALLBACK_RUNNER='"avrea-ubuntu-latest-arm-2-vcpu"'
+YIELDD_MACOS_FALLBACK_RUNNER='"avrea-macos-26-8-vcpu"'
+YIELDD_REPOSITORY_ROUTES='[{"repository":"SPLCompanyOy/LibreChat","infrastructure":"SPLCompanyOy/yieldd-infra","fallback":"blacksmith-4vcpu-ubuntu-2404-arm"}]'
+```
+
+Leave `YIELDD_REPOSITORY_ROUTES` unset to use only the default routes. Keep the existing device ID, shared token, local-only list, and state volume. Changing the global Linux fallback affects every non-local-only Linux queue without an override; changing LibreChat's infrastructure affects both of its platform queues. Archive only recovered queue directories, with their backups intact, before starting their new configuration. The Mac's `connect` arguments and binary are unchanged.
 
 This release replaces `--repository` / `YIELDD_REPOSITORY` and the single-repository state layout. Before upgrading an existing deployment, finish local jobs and their cleanup acknowledgements, stop the Mac client, and recover the old coordinator with its original binary, configuration, and volume. Stop the old coordinator before launching the new one. Keep its volume intact and explicitly select a fresh `YIELDD_STATE_VOLUME`, as above. The new version refuses old `state.json` or `macos/state.json` layouts; it does not migrate unresolved leases. Existing GitHub scale sets are discovered by name. Reconnect the Mac to the same HTTPS origin after startup; its arguments and token are unchanged.
 
@@ -121,6 +142,7 @@ docker compose --env-file /etc/yieldd/coordinator.env run --rm coordinator \
   --infrastructure "$YIELDD_INFRASTRUCTURE" \
   --fallback-runner "$YIELDD_FALLBACK_RUNNER" \
   --macos-fallback-runner "${YIELDD_MACOS_FALLBACK_RUNNER:-}" \
+  --repository-routes "${YIELDD_REPOSITORY_ROUTES:-}" \
   --device-id "$YIELDD_DEVICE_ID" \
   --state-dir /var/lib/yieldd \
   --recover
@@ -180,7 +202,7 @@ go run . \
   --recover
 ```
 
-If setup included `--macos-fallback-runner '"macos-26"'`, include it in this recovery command too. Keep the complete repository list, local-only policy, device ID, fallback targets, and state directory unchanged. `--client-listen` is not needed during recovery.
+If setup included `--macos-fallback-runner '"macos-26"'` or `--repository-routes`, include the same values in this recovery command too. Keep the complete repository list, local-only policy, device ID, fallback targets, and state directory unchanged. `--client-listen` is not needed during recovery.
 
 Recovery visits every configured queue independently. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. Changing a queue's configuration requires recovering its old state with the original arguments and choosing a fresh queue directory. Never delete an active lease to force a retry.
 
