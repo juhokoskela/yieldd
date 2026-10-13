@@ -251,6 +251,177 @@ func connectedRunnerCleansUpBeforePropagatingFailure(_ stage: String) throws {
     #expect(try fixture.store.load() == nil)
 }
 
+@Test(arguments: ["timeout", "exit", "signal", "status", "relay"])
+func connectedRunnerContainsGuestFailureAfterConfirmedCleanup(_ kind: String) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    backend.statusFailure = connectedGuestFailure(kind)
+    var events: [RunnerSessionState] = []
+    var releases = 0
+    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ throws in
+        #expect(backend.destroyed && releases == 1)
+        #expect(try fixture.store.load() != nil)
+    })
+    runner.stateChanged = { events.append($0) }
+    try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
+    #expect(backend.destroyed && releases == 1)
+    #expect(try fixture.store.load() == nil)
+    #expect(events.contains(.executionStopped(RunnerID(value: connectedOffer.runner),
+                                             reason: describeError(connectedGuestFailure(kind)))))
+    #expect(events.last == .cleanupCompleted(RunnerID(value: connectedOffer.runner)))
+}
+
+@Test(arguments: ["destroy", "acknowledge", "journal"])
+func connectedGuestFailureDoesNotHideCleanupFailure(_ stage: String) throws {
+    let fixture = try ConnectedFixture()
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.directory.path)
+        fixture.remove()
+    }
+    let backend = ConnectedBackend(failure: stage == "destroy" ? .destroy : nil)
+    backend.statusFailure = connectedGuestFailure("timeout")
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
+        if stage == "acknowledge" { throw ConnectedRunnerError.http(403) }
+        if stage == "journal" {
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.directory.path)
+        }
+    })
+    var releases = 0
+    do {
+        try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
+        Issue.record("Cleanup failure must stop the worker")
+    } catch let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) {
+        let failure = try #require(operation as? ConnectedAssignmentFailure)
+        #expect(describeError(failure.underlying) == describeError(connectedGuestFailure("timeout")))
+        #expect(cleanup.map(\.step) == [stage == "destroy" ? .machine : stage == "acknowledge" ? .githubRunner : .leaseRecord])
+    }
+    #expect(releases == (stage == "destroy" ? 0 : 1))
+    #expect(ConnectedRunnerStore.hasRecovery(in: fixture.directory))
+    #expect(try fixture.store.load()?.offer == connectedOffer)
+}
+
+@Test
+func connectedGuestFailureWaitsForAcknowledgementBeforePollingAnotherAssignment() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    backend.statusFailure = connectedGuestFailure("timeout")
+    let next = try ConnectedOffer(owner: connectedOffer.owner,
+        runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: connectedOffer.repository,
+        platform: "linux", architecture: "arm64")
+    var acknowledgements = 0
+    var polls = 0
+    var releases = 0
+    let runner = fixture.runner(backend: backend, accept: { offer in
+        try connectedJIT(settings: ["AgentName": offer.runner, "WorkFolder": "_work", "Ephemeral": true])
+    }, complete: { _ in
+        acknowledgements += 1
+        if acknowledgements == 1 { throw ConnectedRunnerError.transport }
+    })
+    #expect(throws: CancellationError.self) {
+        try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
+            acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in releases += 1 }, poll: {
+                polls += 1
+                if polls == 1 { return connectedOffer }
+                #expect(acknowledgements >= 2)
+                #expect(try fixture.store.load() == nil)
+                backend.statusFailure = nil
+                if polls == 2 { return next }
+                throw CancellationError()
+            }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
+                try runner.run(offer, memory: memory, releaseCapacity: release)
+            }, wait: { _ in }, retrying: {})
+    }
+    #expect(polls == 3 && backend.creates == 2 && releases == 2 && acknowledgements == 3)
+    #expect(try fixture.store.load() == nil)
+}
+
+@Test
+func connectedGuestTimeoutDoesNotCancelHealthySibling() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let directory = fixture.directory
+    let overlap = ConnectedWorkerOverlap(expected: 2)
+    let cleaned = DispatchSemaphore(value: 0)
+    let continued = Mutex(false)
+    let offers = try (0..<2).map { slot in
+        try ConnectedOffer(owner: connectedOffer.owner, runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
+            repository: connectedOffer.repository, platform: "linux", architecture: "arm64", slot: slot)
+    }
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: offers) { offer, stop in
+        defer { if offer.slot == 0 { cleaned.signal() } }
+        let backend = ConnectedBackend()
+        backend.onStatus = {
+            try overlap.arrive(check: {})
+            if offer.slot == 1 {
+                try #require(cleaned.wait(timeout: .now() + 5) == .success)
+                try stop.check()
+            }
+        }
+        if offer.slot == 0 { backend.statusFailure = connectedGuestFailure("timeout") }
+        let store = ConnectedRunnerStore(directory: directory, slot: offer.slot)
+        let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/",
+            deviceID: offer.owner, accept: { accepted in
+                try connectedJIT(settings: ["AgentName": accepted.runner, "WorkFolder": "_work", "Ephemeral": true])
+            }, complete: { _ in #expect(backend.destroyed) },
+            authorization: .init(renew: { _, _ in true }, checkCancellation: stop.check), wait: stop.wait)
+        var polled = false
+        do {
+            try runConnectedClient(checkCancellation: stop.check, recover: { try runner.recover() },
+                acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in }, poll: {
+                    if polled {
+                        #expect(try store.load() == nil)
+                        if offer.slot == 0 { continued.withLock { $0 = true }; cleaned.signal() }
+                        throw CancellationError()
+                    }
+                    polled = true
+                    return offer
+                }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
+                    try runner.run(offer, memory: memory, releaseCapacity: release)
+                }, wait: stop.wait, retrying: {})
+        } catch is CancellationError {}
+        #expect(backend.creates == 1 && backend.destroyed)
+    }
+    #expect(continued.withLock { $0 })
+    #expect(!ConnectedRunnerStore.hasRecovery(in: directory))
+}
+
+private func connectedGuestFailure(_ kind: String) -> any Error {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/container"),
+        arguments: ["machine", "run", "--", "yieldd-runner-control", "status"], timeout: 10)
+    switch kind {
+    case "exit": return ProcessExecutionError.nonZeroExit(request: request, result: processResult(status: 1))
+    case "signal": return ProcessExecutionError.terminatedBySignal(request: request, result: processResult(status: 9))
+    case "status": return RunnerAssignmentError.invalidStatus
+    case "relay": return RunnerNetworkRelayError.exited(status: 1)
+    default: return ProcessExecutionError.timedOut(request: request, result: processResult())
+    }
+}
+
+@Test(arguments: ["startup", "authorization", "cancel", "host"])
+func connectedAssignmentIsolationPreservesFatalFailures(_ stage: String) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/container"), arguments: [])
+    let failure: any Error
+    switch stage {
+    case "authorization": failure = ConnectedRunnerError.http(401)
+    case "cancel": failure = ProcessExecutionError.cancelled(request: request, result: processResult(), underlying: CancellationError())
+    case "host": failure = ProcessExecutionError.launchFailed(request: request, underlying: POSIXError(.ENOENT))
+    default: failure = connectedGuestFailure("timeout")
+    }
+    if stage == "startup" { backend.configurationFailure = failure }
+    else { backend.statusFailure = failure }
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in })
+    let error = try #require(#expect(throws: (any Error).self) { try runner.run(connectedOffer, memory: .full) })
+    #expect(describeError(error) == describeError(failure))
+    #expect(!(error is ConnectedAssignmentFailure))
+    #expect(backend.destroyed)
+    #expect(try fixture.store.load() == nil)
+}
+
 @Test(arguments: ["destroy", "acknowledge"])
 func connectedRunnerRetainsUnconfirmedCleanupAndNeverReexecutesOnRestart(_ stage: String) throws {
     let fixture = try ConnectedFixture()
@@ -905,6 +1076,9 @@ private final class ConnectedBackend: RunnerBackend {
     var configuration: [String] = []
     var payload: Data?
     var onOperation: () throws -> Void = {}
+    var onStatus: () throws -> Void = {}
+    var statusFailure: (any Error)?
+    var configurationFailure: (any Error)?
     var statuses = [#"{"phase":"exited","jobStarted":true,"exitStatus":0}"#]
     init(failure: Failure? = nil) { self.failure = failure }
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws { try onOperation(); creates += 1 }
@@ -915,10 +1089,13 @@ private final class ConnectedBackend: RunnerBackend {
         if arguments.first == "yieldd-configure-runner" {
             configuration = arguments
             payload = standardInput
+            if let configurationFailure { throw configurationFailure }
             if failure == .configure { throw TestFailure.runnerJob }
         }
         if failure == .run, arguments.last == "start" { throw TestFailure.runnerJob }
         if arguments.last == "status" {
+            try onStatus()
+            if let statusFailure { throw statusFailure }
             guard !statuses.isEmpty else { throw TestFailure.unexpectedBackendCall }
             return processResult(stdout: statuses.removeFirst())
         }

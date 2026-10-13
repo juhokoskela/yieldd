@@ -45,14 +45,19 @@ struct ConnectedRunner {
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
                              timeout: EphemeralRunnerSession.configurationTimeout, on: id)
-            try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
-                                  stateChanged: stateChanged, currentTime: currentTime)
-                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
+            do {
+                try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
+                                      stateChanged: stateChanged, currentTime: currentTime)
+                    .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
+            } catch {
+                if let assignmentFailure = ConnectedAssignmentFailure(error) { throw assignmentFailure }
+                throw error
+            }
         } catch {
             failure = authorization.failure ?? error
         }
         authorization.stop()
-        if let failure = failure as? ConnectedExecutionError {
+        if let failure, failure is ConnectedExecutionError || failure is ConnectedAssignmentFailure {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         if machineMayExist {
@@ -64,7 +69,8 @@ struct ConnectedRunner {
         try cleanUp(step: .githubRunner, after: failure) { try acknowledgeConnectedRunner(offer, complete: complete) }
         try cleanUp(step: .leaseRecord, after: failure) { try store.clear() }
         stateChanged(.cleanupCompleted(id))
-        if let failure, !(failure is ConnectedExecutionError), (failure as? ConnectedRunnerError) != .http(410) { throw failure }
+        if let failure, !(failure is ConnectedExecutionError), !(failure is ConnectedAssignmentFailure),
+           (failure as? ConnectedRunnerError) != .http(410) { throw failure }
     }
 
     private func cleanUp(step: RunnerSessionCleanupStep, after failure: (any Error)?, operation: () throws -> Void) throws {
@@ -73,6 +79,25 @@ struct ConnectedRunner {
             throw RunnerSessionError.operationAndCleanupFailed(operation: failure, cleanup: [.init(step: step, error: error)])
         }
     }
+}
+
+// Only job execution creates this marker. Startup and host/control-plane errors stay fatal.
+// It is contained only after destruction, acknowledgement, and journal cleanup succeed.
+struct ConnectedAssignmentFailure: Error, LocalizedError {
+    let underlying: any Error
+
+    init?(_ error: any Error) {
+        switch error {
+        case ProcessExecutionError.timedOut, ProcessExecutionError.nonZeroExit, ProcessExecutionError.terminatedBySignal,
+             RunnerAssignmentError.pickupTimedOut, RunnerAssignmentError.executionTimedOut,
+             RunnerAssignmentError.invalidStatus, RunnerAssignmentError.exitedWithoutJob, RunnerAssignmentError.listenerFailed,
+             RunnerNetworkRelayError.exited:
+            underlying = error
+        default: return nil
+        }
+    }
+
+    var errorDescription: String? { underlying.localizedDescription }
 }
 
 func recoverConnectedRunner(
