@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,7 +12,7 @@ import (
 	"strings"
 )
 
-func repositoryConfigs(base config, repositories, localOnly, macOSFallback string) ([]config, error) {
+func repositoryConfigs(base config, repositories, localOnly, macOSFallback, routesJSON string) ([]config, error) {
 	names, err := repositoryList(repositories)
 	if err != nil {
 		return nil, err
@@ -27,10 +29,17 @@ func repositoryConfigs(base config, repositories, localOnly, macOSFallback strin
 			return nil, errors.New("local-only repositories must also appear in --repositories")
 		}
 	}
+	routes, err := parseRepositoryRoutes(routesJSON, names, local)
+	if err != nil {
+		return nil, err
+	}
 	var configs []config
 	for _, name := range names {
 		c := base
 		c.Repository, c.LocalOnly = name, slices.Contains(local, name)
+		if route, ok := routes[name]; ok {
+			c.Infrastructure, c.Fallback = route.Infrastructure, string(route.Fallback)
+		}
 		platforms := []config{c}
 		if macOSFallback != "" {
 			mac := c
@@ -48,6 +57,46 @@ func repositoryConfigs(base config, repositories, localOnly, macOSFallback strin
 		}
 	}
 	return configs, nil
+}
+
+type repositoryRoute struct {
+	Repository     string          `json:"repository"`
+	Infrastructure string          `json:"infrastructure"`
+	Fallback       json.RawMessage `json:"fallback"`
+}
+
+func parseRepositoryRoutes(value string, repositories, localOnly []string) (map[string]repositoryRoute, error) {
+	if value == "" {
+		return nil, nil
+	}
+	var entries []repositoryRoute
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&entries); err != nil {
+		return nil, fmt.Errorf("parse repository-routes: %w", err)
+	}
+	if entries == nil {
+		return nil, errors.New("repository-routes must be a JSON array")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, errors.New("unexpected trailing repository-routes data")
+	}
+	routes := make(map[string]repositoryRoute, len(entries))
+	for _, entry := range entries {
+		entry.Repository = strings.ToLower(strings.TrimSpace(entry.Repository))
+		entry.Infrastructure = strings.ToLower(strings.TrimSpace(entry.Infrastructure))
+		if !slices.Contains(repositories, entry.Repository) {
+			return nil, fmt.Errorf("repository route %q must also appear in --repositories", entry.Repository)
+		}
+		if slices.Contains(localOnly, entry.Repository) {
+			return nil, fmt.Errorf("local-only repository %s cannot configure a hosted route", entry.Repository)
+		}
+		if _, ok := routes[entry.Repository]; ok {
+			return nil, fmt.Errorf("duplicate repository route %s", entry.Repository)
+		}
+		routes[entry.Repository] = entry
+	}
+	return routes, nil
 }
 
 func repositoryList(value string) ([]string, error) {
