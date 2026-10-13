@@ -251,24 +251,29 @@ func connectedRunnerCleansUpBeforePropagatingFailure(_ stage: String) throws {
     #expect(try fixture.store.load() == nil)
 }
 
-@Test(arguments: ["timeout", "exit", "signal", "status", "relay"])
-func connectedRunnerContainsGuestFailureAfterConfirmedCleanup(_ kind: String) throws {
+@Test(arguments: ConnectedFailureKind.allCases)
+func connectedRunnerContainsFailureOnlyAfterJobStartAndConfirmedCleanup(_ kind: ConnectedFailureKind) throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     let backend = ConnectedBackend()
-    backend.statusFailure = connectedGuestFailure(kind)
+    if kind == .listener {
+        backend.statuses = [#"{"phase":"listening","jobStarted":true}"#, #"{"phase":"exited","jobStarted":true,"exitStatus":1}"#]
+        backend.replayExitStatus = 1
+    } else {
+        backend.failAfterJobStart(kind.error)
+    }
     var events: [RunnerSessionState] = []
     var releases = 0
     var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ throws in
         #expect(backend.destroyed && releases == 1)
         #expect(try fixture.store.load() != nil)
-    })
+    }, wait: { #expect($0 == 0.5) })
     runner.stateChanged = { events.append($0) }
     try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
     #expect(backend.destroyed && releases == 1)
     #expect(try fixture.store.load() == nil)
     #expect(events.contains(.executionStopped(RunnerID(value: connectedOffer.runner),
-                                             reason: describeError(connectedGuestFailure(kind)))))
+                                             reason: describeError(kind.error))))
     #expect(events.last == .cleanupCompleted(RunnerID(value: connectedOffer.runner)))
 }
 
@@ -280,20 +285,20 @@ func connectedGuestFailureDoesNotHideCleanupFailure(_ stage: String) throws {
         fixture.remove()
     }
     let backend = ConnectedBackend(failure: stage == "destroy" ? .destroy : nil)
-    backend.statusFailure = connectedGuestFailure("timeout")
+    backend.failAfterJobStart(ConnectedFailureKind.timeout.error)
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
         if stage == "acknowledge" { throw ConnectedRunnerError.http(403) }
         if stage == "journal" {
             try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.directory.path)
         }
-    })
+    }, wait: { #expect($0 == 0.5) })
     var releases = 0
     do {
         try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
         Issue.record("Cleanup failure must stop the worker")
     } catch let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) {
         let failure = try #require(operation as? ConnectedAssignmentFailure)
-        #expect(describeError(failure.underlying) == describeError(connectedGuestFailure("timeout")))
+        #expect(describeError(failure.underlying) == describeError(ConnectedFailureKind.timeout.error))
         #expect(cleanup.map(\.step) == [stage == "destroy" ? .machine : stage == "acknowledge" ? .githubRunner : .leaseRecord])
     }
     #expect(releases == (stage == "destroy" ? 0 : 1))
@@ -306,34 +311,39 @@ func connectedGuestFailureWaitsForAcknowledgementBeforePollingAnotherAssignment(
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     let backend = ConnectedBackend()
-    backend.statusFailure = connectedGuestFailure("timeout")
+    backend.failAfterJobStart(ConnectedFailureKind.timeout.error)
     let next = try ConnectedOffer(owner: connectedOffer.owner,
         runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: connectedOffer.repository,
         platform: "linux", architecture: "arm64")
     var acknowledgements = 0
     var polls = 0
     var releases = 0
+    var retries = 0
     let runner = fixture.runner(backend: backend, accept: { offer in
         try connectedJIT(settings: ["AgentName": offer.runner, "WorkFolder": "_work", "Ephemeral": true])
     }, complete: { _ in
         acknowledgements += 1
         if acknowledgements == 1 { throw ConnectedRunnerError.transport }
-    })
-    #expect(throws: CancellationError.self) {
+        if acknowledgements == 2 { throw ConnectedRunnerError.http(503) }
+    }, wait: { #expect($0 == 0.5) })
+    #expect(throws: ConnectedLoopTestStop.finished) {
         try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
             acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in releases += 1 }, poll: {
                 polls += 1
                 if polls == 1 { return connectedOffer }
-                #expect(acknowledgements >= 2)
+                #expect(acknowledgements >= 3)
                 #expect(try fixture.store.load() == nil)
-                backend.statusFailure = nil
-                if polls == 2 { return next }
-                throw CancellationError()
+                if polls == 2 {
+                    backend.statusFailure = nil
+                    backend.statuses = [#"{"phase":"exited","jobStarted":true,"exitStatus":0}"#]
+                    return next
+                }
+                throw ConnectedLoopTestStop.finished
             }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
                 try runner.run(offer, memory: memory, releaseCapacity: release)
-            }, wait: { _ in }, retrying: {})
+            }, wait: { #expect($0 == 5) }, retrying: { retries += 1 })
     }
-    #expect(polls == 3 && backend.creates == 2 && releases == 2 && acknowledgements == 3)
+    #expect(polls == 3 && backend.creates == 2 && releases == 2 && acknowledgements == 4 && retries == 1)
     #expect(try fixture.store.load() == nil)
 }
 
@@ -345,6 +355,7 @@ func connectedGuestTimeoutDoesNotCancelHealthySibling() throws {
     let overlap = ConnectedWorkerOverlap(expected: 2)
     let cleaned = DispatchSemaphore(value: 0)
     let continued = Mutex(false)
+    let siblingFinished = Mutex(false)
     let offers = try (0..<2).map { slot in
         try ConnectedOffer(owner: connectedOffer.owner, runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
             repository: connectedOffer.repository, platform: "linux", architecture: "arm64", slot: slot)
@@ -352,20 +363,23 @@ func connectedGuestTimeoutDoesNotCancelHealthySibling() throws {
     try RunnerPool(stop: RunnerPoolStop()).run(slots: offers) { offer, stop in
         defer { if offer.slot == 0 { cleaned.signal() } }
         let backend = ConnectedBackend()
-        backend.onStatus = {
+        backend.onStatus = { [unowned backend] in
+            guard backend.statusPolls == 2 else { return }
             try overlap.arrive(check: {})
             if offer.slot == 1 {
                 try #require(cleaned.wait(timeout: .now() + 5) == .success)
                 try stop.check()
             }
         }
-        if offer.slot == 0 { backend.statusFailure = connectedGuestFailure("timeout") }
+        if offer.slot == 0 { backend.failAfterJobStart(ConnectedFailureKind.timeout.error) }
+        else { backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0) }
         let store = ConnectedRunnerStore(directory: directory, slot: offer.slot)
         let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/",
             deviceID: offer.owner, accept: { accepted in
                 try connectedJIT(settings: ["AgentName": accepted.runner, "WorkFolder": "_work", "Ephemeral": true])
             }, complete: { _ in #expect(backend.destroyed) },
-            authorization: .init(renew: { _, _ in true }, checkCancellation: stop.check), wait: stop.wait)
+            authorization: .init(renew: { _, _ in true }, checkCancellation: stop.check),
+            wait: { #expect($0 == 0.5); try stop.check() })
         var polled = false
         do {
             try runConnectedClient(checkCancellation: stop.check, recover: { try runner.recover() },
@@ -373,33 +387,45 @@ func connectedGuestTimeoutDoesNotCancelHealthySibling() throws {
                     if polled {
                         #expect(try store.load() == nil)
                         if offer.slot == 0 { continued.withLock { $0 = true }; cleaned.signal() }
-                        throw CancellationError()
+                        throw ConnectedLoopTestStop.finished
                     }
                     polled = true
                     return offer
                 }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
                     try runner.run(offer, memory: memory, releaseCapacity: release)
-                }, wait: stop.wait, retrying: {})
-        } catch is CancellationError {}
+                    if offer.slot == 1 { siblingFinished.withLock { $0 = true } }
+                }, wait: { _ in Issue.record("Unexpected client backoff") }, retrying: { Issue.record("Unexpected retry") })
+        } catch ConnectedLoopTestStop.finished {}
+        try stop.check()
         #expect(backend.creates == 1 && backend.destroyed)
     }
     #expect(continued.withLock { $0 })
+    #expect(siblingFinished.withLock { $0 })
     #expect(!ConnectedRunnerStore.hasRecovery(in: directory))
 }
 
-private func connectedGuestFailure(_ kind: String) -> any Error {
-    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/container"),
-        arguments: ["machine", "run", "--", "yieldd-runner-control", "status"], timeout: 10)
-    switch kind {
-    case "exit": return ProcessExecutionError.nonZeroExit(request: request, result: processResult(status: 1))
-    case "signal": return ProcessExecutionError.terminatedBySignal(request: request, result: processResult(status: 9))
-    case "status": return RunnerAssignmentError.invalidStatus
-    case "relay": return RunnerNetworkRelayError.exited(status: 1)
-    default: return ProcessExecutionError.timedOut(request: request, result: processResult())
+private enum ConnectedLoopTestStop: Error { case finished }
+
+enum ConnectedFailureKind: CaseIterable {
+    case timeout, exit, signal, status, relay, stoppedVM, failedVM, listener
+
+    var error: any Error {
+        let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/container"),
+            arguments: ["machine", "run", "--", "yieldd-runner-control", "status"], timeout: 10)
+        switch self {
+        case .exit: return ProcessExecutionError.nonZeroExit(request: request, result: processResult(status: 1))
+        case .signal: return ProcessExecutionError.terminatedBySignal(request: request, result: processResult(status: 9))
+        case .status: return RunnerAssignmentError.invalidStatus
+        case .relay: return RunnerNetworkRelayError.exited(status: 1)
+        case .stoppedVM: return MacOSVirtualizationProbeError.stoppedUnexpectedly
+        case .failedVM: return MacOSVirtualizationProbeError.virtualMachineFailed(POSIXError(.EIO))
+        case .listener: return RunnerAssignmentError.listenerFailed(1, output: "")
+        case .timeout: return ProcessExecutionError.timedOut(request: request, result: processResult())
+        }
     }
 }
 
-@Test(arguments: ["startup", "authorization", "cancel", "host"])
+@Test(arguments: ["startup", "cancel", "host"])
 func connectedAssignmentIsolationPreservesFatalFailures(_ stage: String) throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
@@ -407,17 +433,119 @@ func connectedAssignmentIsolationPreservesFatalFailures(_ stage: String) throws 
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/container"), arguments: [])
     let failure: any Error
     switch stage {
-    case "authorization": failure = ConnectedRunnerError.http(401)
     case "cancel": failure = ProcessExecutionError.cancelled(request: request, result: processResult(), underlying: CancellationError())
     case "host": failure = ProcessExecutionError.launchFailed(request: request, underlying: POSIXError(.ENOENT))
-    default: failure = connectedGuestFailure("timeout")
+    default: failure = ConnectedFailureKind.timeout.error
     }
     if stage == "startup" { backend.configurationFailure = failure }
-    else { backend.statusFailure = failure }
-    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in })
+    else { backend.failAfterJobStart(failure) }
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in }, wait: { #expect($0 == 0.5) })
     let error = try #require(#expect(throws: (any Error).self) { try runner.run(connectedOffer, memory: .full) })
     #expect(describeError(error) == describeError(failure))
-    #expect(!(error is ConnectedAssignmentFailure))
+    #expect(backend.destroyed)
+    #expect(try fixture.store.load() == nil)
+}
+
+enum ConnectedPreJobFailure: CaseIterable {
+    case start, transport, pickup, noJob, listener, status, stoppedVM
+}
+
+@Test(arguments: ConnectedPreJobFailure.allCases)
+func connectedPreJobFailuresStopPollingInsteadOfReacceptingDemand(_ stage: ConnectedPreJobFailure) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    var now: TimeInterval = 0
+    let expected: any Error
+    switch stage {
+    case .start:
+        expected = ConnectedFailureKind.timeout.error
+        backend.startFailure = expected
+    case .transport:
+        expected = ConnectedFailureKind.timeout.error
+        backend.statusFailure = expected
+    case .pickup:
+        expected = RunnerAssignmentError.pickupTimedOut
+        backend.statuses = Array(repeating: #"{"phase":"listening","jobStarted":false}"#, count: 2)
+        backend.onStatus = { [unowned backend] in now = backend.statusPolls == 1 ? 290 : 301 }
+    case .noJob, .listener:
+        backend.replayExitStatus = stage == .listener ? 1 : 0
+        backend.statuses = ["{\"phase\":\"exited\",\"jobStarted\":false,\"exitStatus\":\(backend.replayExitStatus)}"]
+        expected = stage == .listener ? RunnerAssignmentError.listenerFailed(1, output: "") : RunnerAssignmentError.exitedWithoutJob
+    case .stoppedVM:
+        expected = MacOSVirtualizationProbeError.stoppedUnexpectedly
+        backend.statusFailure = expected
+    case .status:
+        expected = RunnerAssignmentError.invalidStatus
+        backend.statuses = ["invalid status"]
+    }
+    var acknowledged = false
+    var waits: [TimeInterval] = []
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in acknowledged = true },
+        wait: { waits.append($0) }, currentTime: { now })
+    var polls = 0
+    let error = try #require(#expect(throws: (any Error).self) {
+        try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
+            acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in }, poll: {
+                polls += 1
+                if polls > 1 { throw ConnectedLoopTestStop.finished }
+                return connectedOffer
+            }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
+                try runner.run(offer, memory: memory, releaseCapacity: release)
+            }, wait: { _ in Issue.record("Unexpected client backoff") }, retrying: { Issue.record("Unexpected retry") })
+    })
+    #expect(describeError(error) == describeError(expected))
+    #expect(polls == 1 && backend.destroyed && acknowledged)
+    #expect(waits == (stage == .pickup ? [0.5, 0] : []))
+    #expect(try fixture.store.load() == nil)
+}
+
+@Test
+func connectedPermanentRenewalErrorIsNotContainedAfterJobStart() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
+    var now: TimeInterval = 0
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
+        wait: { #expect($0 == 0.5) }, renew: { _, _ in
+            if now >= 30 { throw ConnectedRunnerError.http(401) }
+            return true
+        }, currentTime: { now })
+    let authorization = runner.authorization
+    backend.onStatus = { [unowned backend] in
+        if backend.statusPolls == 2 { now = 31; try authorization.check() }
+    }
+    #expect(throws: ConnectedRunnerError.http(401)) { try runner.run(connectedOffer, memory: .full) }
+    #expect(backend.destroyed)
+    #expect(try fixture.store.load() == nil)
+}
+
+@Test(arguments: [ConnectedExecutionError.expired, .revoked])
+func connectedAuthorizationFailureTakesPrecedenceOverCancelledGuestCommand(_ expected: ConnectedExecutionError) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
+    var now: TimeInterval = 0
+    var events: [RunnerSessionState] = []
+    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
+        wait: { #expect($0 == 0.5) }, renew: { _, _ in now == 0 }, currentTime: { now })
+    runner.stateChanged = { events.append($0) }
+    let authorization = runner.authorization
+    backend.onStatus = { [unowned backend] in
+        guard backend.statusPolls == 2 else { return }
+        now = expected == .expired ? 301 : 31
+        do {
+            try authorization.check()
+            Issue.record("Expected execution authorization to end")
+        } catch {
+            let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/container"), arguments: [])
+            throw ProcessExecutionError.cancelled(request: request, result: processResult(), underlying: error)
+        }
+    }
+    try runner.run(connectedOffer, memory: .full)
+    #expect(events.contains(.executionStopped(RunnerID(value: connectedOffer.runner), reason: describeError(expected))))
     #expect(backend.destroyed)
     #expect(try fixture.store.load() == nil)
 }
@@ -472,6 +600,36 @@ func expiredConnectedOfferReleasesItsJournalWithoutCreatingAGuest() throws {
     try runner.run(connectedOffer, memory: .full)
     #expect(backend.creates == 0 && !backend.destroyed && acknowledged)
     #expect(try fixture.store.load() == nil)
+}
+
+@Test
+func expiredConnectedOfferCanPollAgainAfterTransientAcknowledgementFailure() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    var acknowledgements = 0
+    var polls = 0
+    var releases = 0
+    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410) },
+        complete: { _ in
+            acknowledgements += 1
+            if acknowledgements == 1 { throw ConnectedRunnerError.transport }
+        })
+    #expect(throws: ConnectedLoopTestStop.finished) {
+        try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
+            acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in releases += 1 }, poll: {
+                polls += 1
+                if polls == 2 {
+                    #expect(acknowledgements == 2 && releases == 1)
+                    #expect(try fixture.store.load() == nil)
+                    throw ConnectedLoopTestStop.finished
+                }
+                return connectedOffer
+            }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
+                try runner.run(offer, memory: memory, releaseCapacity: release)
+            }, wait: { _ in Issue.record("Unexpected backoff") }, retrying: { Issue.record("Unexpected retry") })
+    }
+    #expect(polls == 2 && backend.creates == 0)
 }
 
 @Test
@@ -1078,9 +1236,18 @@ private final class ConnectedBackend: RunnerBackend {
     var onOperation: () throws -> Void = {}
     var onStatus: () throws -> Void = {}
     var statusFailure: (any Error)?
+    var statusFailureOnPoll = 1
+    var statusPolls = 0
+    var startFailure: (any Error)?
+    var replayExitStatus: Int32 = 0
     var configurationFailure: (any Error)?
     var statuses = [#"{"phase":"exited","jobStarted":true,"exitStatus":0}"#]
     init(failure: Failure? = nil) { self.failure = failure }
+    func failAfterJobStart(_ error: any Error) {
+        statuses = [#"{"phase":"listening","jobStarted":true}"#]
+        statusFailure = error
+        statusFailureOnPoll = 2
+    }
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws { try onOperation(); creates += 1 }
     func exec(_ arguments: [String], standardInput: Data?, timeout: TimeInterval?, outputCapture: ProcessOutputCapture,
               as user: RunnerGuestUser, on id: RunnerID) throws -> ProcessResult {
@@ -1093,9 +1260,12 @@ private final class ConnectedBackend: RunnerBackend {
             if failure == .configure { throw TestFailure.runnerJob }
         }
         if failure == .run, arguments.last == "start" { throw TestFailure.runnerJob }
+        if arguments.last == "start", let startFailure { throw startFailure }
+        if arguments.last == "run" { return processResult(status: replayExitStatus) }
         if arguments.last == "status" {
+            statusPolls += 1
             try onStatus()
-            if let statusFailure { throw statusFailure }
+            if let statusFailure, statusPolls >= statusFailureOnPoll { throw statusFailure }
             guard !statuses.isEmpty else { throw TestFailure.unexpectedBackendCall }
             return processResult(stdout: statuses.removeFirst())
         }

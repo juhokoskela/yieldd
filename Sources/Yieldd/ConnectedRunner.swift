@@ -30,6 +30,7 @@ struct ConnectedRunner {
         try store.save(ConnectedLease(server: server, deviceID: deviceID, offer: offer))
         var failure: (any Error)?
         var machineMayExist = false
+        var jobStarted = false
         do {
             try authorization.check()
             let jit = try accept(offer)
@@ -45,19 +46,18 @@ struct ConnectedRunner {
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
                              timeout: EphemeralRunnerSession.configurationTimeout, on: id)
-            do {
-                try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
-                                      stateChanged: stateChanged, currentTime: currentTime)
-                    .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
-            } catch {
-                if let assignmentFailure = ConnectedAssignmentFailure(error) { throw assignmentFailure }
-                throw error
-            }
+            try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
+                                  stateChanged: { state in
+                                      if case .jobStarted = state { jobStarted = true }
+                                      stateChanged(state)
+                                  }, currentTime: currentTime)
+                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
         } catch {
-            failure = authorization.failure ?? error
+            let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
+            failure = authorization.failure ?? operation
         }
         authorization.stop()
-        if let failure, failure is ConnectedExecutionError || failure is ConnectedAssignmentFailure {
+        if let failure, isContainedConnectedFailure(failure), (failure as? ConnectedRunnerError) != .http(410) {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         if machineMayExist {
@@ -69,8 +69,7 @@ struct ConnectedRunner {
         try cleanUp(step: .githubRunner, after: failure) { try acknowledgeConnectedRunner(offer, complete: complete) }
         try cleanUp(step: .leaseRecord, after: failure) { try store.clear() }
         stateChanged(.cleanupCompleted(id))
-        if let failure, !(failure is ConnectedExecutionError), !(failure is ConnectedAssignmentFailure),
-           (failure as? ConnectedRunnerError) != .http(410) { throw failure }
+        if let failure, !isContainedConnectedFailure(failure) { throw failure }
     }
 
     private func cleanUp(step: RunnerSessionCleanupStep, after failure: (any Error)?, operation: () throws -> Void) throws {
@@ -81,23 +80,28 @@ struct ConnectedRunner {
     }
 }
 
-// Only job execution creates this marker. Startup and host/control-plane errors stay fatal.
-// It is contained only after destruction, acknowledgement, and journal cleanup succeed.
+// Created only after observing job start. Runtime transport failures cannot identify
+// whether the guest or host stalled; both require confirmed cleanup before reuse.
 struct ConnectedAssignmentFailure: Error, LocalizedError {
     let underlying: any Error
 
     init?(_ error: any Error) {
         switch error {
         case ProcessExecutionError.timedOut, ProcessExecutionError.nonZeroExit, ProcessExecutionError.terminatedBySignal,
-             RunnerAssignmentError.pickupTimedOut, RunnerAssignmentError.executionTimedOut,
-             RunnerAssignmentError.invalidStatus, RunnerAssignmentError.exitedWithoutJob, RunnerAssignmentError.listenerFailed,
-             RunnerNetworkRelayError.exited:
+             RunnerAssignmentError.invalidStatus, RunnerAssignmentError.listenerFailed,
+             RunnerNetworkRelayError.exited,
+             MacOSVirtualizationProbeError.stoppedUnexpectedly, MacOSVirtualizationProbeError.virtualMachineFailed:
             underlying = error
         default: return nil
         }
     }
 
-    var errorDescription: String? { underlying.localizedDescription }
+    var errorDescription: String? { describeError(underlying) }
+}
+
+func isContainedConnectedFailure(_ error: any Error) -> Bool {
+    error is ConnectedExecutionError || error is ConnectedAssignmentFailure
+        || (error as? ConnectedRunnerError) == .http(410)
 }
 
 func recoverConnectedRunner(
