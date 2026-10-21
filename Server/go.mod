@@ -1,6 +1,6 @@
 module github.com/juhokoskela/yieldd/server
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/actions/scaleset v0.4.0
