@@ -43,6 +43,7 @@ COPY runner-control /usr/local/bin/yieldd-runner-control
 COPY yieldd.slice /etc/systemd/system/yieldd.slice
 COPY docker-daemon.json /etc/docker/daemon.json
 COPY runner.sudoers /etc/sudoers.d/runner
+COPY fstab /etc/fstab
 
 RUN mkdir -p /var/lib/dbus \
     && : > /etc/machine-id \
@@ -68,6 +69,7 @@ RUN mkdir -p /var/lib/dbus \
         /usr/local/bin/yieldd-configure-runner \
         /usr/local/bin/yieldd-runner-control \
     && jq --exit-status . /etc/docker/daemon.json >/dev/null \
+    && findmnt --verify --tab-file /etc/fstab \
     && test "$(gh --version | head -n 1 | cut -d ' ' -f 3)" = "$GH_VERSION" \
     && systemd-analyze verify /etc/systemd/system/yieldd.slice \
     && test "$(readlink -f /sbin/init)" = "$(readlink -f /lib/systemd/systemd)"
