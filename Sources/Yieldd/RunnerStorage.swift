@@ -158,12 +158,20 @@ struct RunnerStorage: Codable, Equatable {
         guard result.terminationReason == .exit, result.terminationStatus == 0 else {
             throw RunnerStorageError.containerUnavailable(detail: result.stderrText)
         }
-        struct Status: Decodable { let status: String; let appRoot: String }
+        struct Status: Decodable {
+            struct Paths: Decodable { let appRoot: String }
+            let status: String
+            let paths: Paths?
+            let appRoot: String?
+        }
         let status: Status
         do { status = try JSONDecoder().decode(Status.self, from: result.stdout) }
         catch { throw RunnerStorageError.containerUnavailable(detail: describeError(error)) }
         guard status.status == "running" else { throw RunnerStorageError.containerUnavailable(detail: status.status) }
-        guard URL(fileURLWithPath: status.appRoot).resolvingSymlinksInPath() == containerURL else {
+        guard let appRoot = status.paths?.appRoot ?? status.appRoot else {
+            throw RunnerStorageError.containerUnavailable(detail: "system status did not report paths.appRoot")
+        }
+        guard URL(fileURLWithPath: appRoot).resolvingSymlinksInPath() == containerURL else {
             throw RunnerStorageError.containerRootMismatch(path: containerURL.path)
         }
     }

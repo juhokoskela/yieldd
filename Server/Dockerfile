@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS build
+FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/golang:1.27.3-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./

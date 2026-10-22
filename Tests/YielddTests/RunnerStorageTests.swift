@@ -209,6 +209,51 @@ func stoppedContainerReportsItsRequiredStartupRoot() throws {
     #expect(describeError(error).contains("service stopped"))
 }
 
+@Test(arguments: [false, true])
+func containerStatusValidatesConfiguredRoot(nestedPaths: Bool) throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let storage = RunnerStorage(volumePath: fixture.directory.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
+    try FileManager.default.createDirectory(at: storage.containerURL, withIntermediateDirectories: true)
+    let matching = nestedPaths
+        ? #"{"status":"running","paths":{"appRoot":"\#(storage.containerURL.path)"}}"#
+        : #"{"status":"running","appRoot":"\#(storage.containerURL.path)"}"#
+    let mismatching = nestedPaths
+        ? #"{"status":"running","paths":{"appRoot":"\#(fixture.directory.path)"}}"#
+        : #"{"status":"running","appRoot":"\#(fixture.directory.path)"}"#
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult(stdout: matching)),
+        .success(processResult(stdout: mismatching)),
+    ])
+    let container = URL(fileURLWithPath: "/test/container")
+    try storage.validateContainer(containerExecutable: container, executor: executor)
+    #expect(throws: RunnerStorageError.containerRootMismatch(path: storage.containerURL.path)) {
+        try storage.validateContainer(containerExecutable: container, executor: executor)
+    }
+}
+
+@Test
+func containerStatusWithNullPathsUsesLegacyRoot() throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let storage = RunnerStorage(volumePath: fixture.directory.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
+    try FileManager.default.createDirectory(at: storage.containerURL, withIntermediateDirectories: true)
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult(
+        stdout: #"{"status":"running","paths":null,"appRoot":"\#(storage.containerURL.path)"}"#))])
+    try storage.validateContainer(containerExecutable: URL(fileURLWithPath: "/test/container"), executor: executor)
+}
+
+@Test(arguments: [#"{"status":"running"}"#, #"{"status":"running","paths":null}"#])
+func containerStatusWithoutRootReportsMissingPath(status: String) throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let storage = RunnerStorage(volumePath: fixture.directory.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: status))])
+    #expect(throws: RunnerStorageError.containerUnavailable(detail: "system status did not report paths.appRoot")) {
+        try storage.validateContainer(containerExecutable: URL(fileURLWithPath: "/test/container"), executor: executor)
+    }
+}
+
 private func plist(_ object: [String: Any]) throws -> Data {
     try PropertyListSerialization.data(fromPropertyList: object, format: .xml, options: 0)
 }

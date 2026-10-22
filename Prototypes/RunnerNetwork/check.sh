@@ -8,6 +8,7 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 
 bash "$repo_root/Scripts/test-prepare-patched-source.sh"
 bash "$prototype_dir/prepare.sh"
+bash "$prototype_dir/test-machine-init.sh" "$container_source/Sources/Plugins/MachineAPIServer/Resources/init"
 cd "$prototype_dir"
 go test -modfile "$relay_module" -race -timeout 90s ./...
 go vet -modfile "$relay_module" ./...
