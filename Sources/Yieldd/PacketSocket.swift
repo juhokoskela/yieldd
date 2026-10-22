@@ -4,6 +4,7 @@ import Virtualization
 
 // One host-owned endpoint per guest, without a vmnet attachment.
 final class PacketSocket: Sendable {
+    static let macAddress = "02:00:00:00:00:02"
     let handle: FileHandle
     private let localPath: String
     private let deviceID: dev_t
@@ -66,7 +67,7 @@ final class PacketSocket: Sendable {
 
     func device() -> VZVirtioNetworkDeviceConfiguration {
         let device = VZVirtioNetworkDeviceConfiguration()
-        device.macAddress = VZMACAddress(string: "02:00:00:00:00:02")!
+        device.macAddress = VZMACAddress(string: Self.macAddress)!
         device.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: handle)
         return device
     }
