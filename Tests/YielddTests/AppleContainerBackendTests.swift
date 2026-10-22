@@ -224,7 +224,7 @@ func stopRunnerRejectsAChangedContainerRoot() throws {
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()), .success(linuxInspection(id: runnerID)), .success(processResult()),
         .success(processResult()), .success(processResult()),
-        .success(processResult(stdout: "{\"status\":\"running\",\"appRoot\":\"\(fixture.directory.path)\"}")),
+        .success(processResult(stdout: "{\"status\":\"running\",\"paths\":{\"appRoot\":\"\(fixture.directory.path)\"}}")),
     ])
     var rootChanged = false
     let backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,

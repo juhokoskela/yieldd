@@ -69,12 +69,12 @@ func storageQuotaStopsWritesButNotRecoveryJournal() throws {
         try storage.validateMacOS(template: fixture.directory, clones: storage.clonesURL)
     }
     let containerStatus = RecordingProcessExecutor(outcomes: [
-        .success(processResult(stdout: "{\"status\":\"running\",\"appRoot\":\"\(storage.containerURL.path)\"}")),
+        .success(processResult(stdout: "{\"status\":\"running\",\"paths\":{\"appRoot\":\"\(storage.containerURL.path)\"}}")),
     ])
     try storage.validateContainer(containerExecutable: URL(fileURLWithPath: "/test/container"),
                                   executor: containerStatus)
     let wrongRoot = RecordingProcessExecutor(outcomes: [
-        .success(processResult(stdout: "{\"status\":\"running\",\"appRoot\":\"\(fixture.directory.path)\"}")),
+        .success(processResult(stdout: "{\"status\":\"running\",\"paths\":{\"appRoot\":\"\(fixture.directory.path)\"}}")),
     ])
     #expect(throws: RunnerStorageError.containerRootMismatch(path: storage.containerURL.path)) {
         try storage.validateContainer(containerExecutable: URL(fileURLWithPath: "/test/container"),
@@ -152,7 +152,7 @@ private final class StorageContainerExecutor: ProcessExecuting {
             startArguments = request.arguments
             return processResult()
         case ["system", "status"]:
-            return processResult(stdout: "{\"status\":\"running\",\"appRoot\":\"\(storage.containerURL.path)\"}")
+            return processResult(stdout: "{\"status\":\"running\",\"paths\":{\"appRoot\":\"\(storage.containerURL.path)\"}}")
         case ["machine", "list"]:
             return processResult(stdout: listed ? id.value : "")
         case ["machine", "delete"]:

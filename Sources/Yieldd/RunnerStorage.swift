@@ -160,25 +160,18 @@ struct RunnerStorage: Codable, Equatable {
         }
         struct Status: Decodable {
             struct Paths: Decodable { let appRoot: String }
-            enum CodingKeys: String, CodingKey { case status, paths, appRoot }
             let status: String
-            let appRoot: String
-
-            init(from decoder: any Decoder) throws {
-                let values = try decoder.container(keyedBy: CodingKeys.self)
-                status = try values.decode(String.self, forKey: .status)
-                if values.contains(.paths) {
-                    appRoot = try values.decode(Paths.self, forKey: .paths).appRoot
-                } else {
-                    appRoot = try values.decode(String.self, forKey: .appRoot)
-                }
-            }
+            let paths: Paths?
+            let appRoot: String?
         }
         let status: Status
         do { status = try JSONDecoder().decode(Status.self, from: result.stdout) }
         catch { throw RunnerStorageError.containerUnavailable(detail: describeError(error)) }
         guard status.status == "running" else { throw RunnerStorageError.containerUnavailable(detail: status.status) }
-        guard URL(fileURLWithPath: status.appRoot).resolvingSymlinksInPath() == containerURL else {
+        guard let appRoot = status.paths?.appRoot ?? status.appRoot else {
+            throw RunnerStorageError.containerUnavailable(detail: "system status did not report paths.appRoot")
+        }
+        guard URL(fileURLWithPath: appRoot).resolvingSymlinksInPath() == containerURL else {
             throw RunnerStorageError.containerRootMismatch(path: containerURL.path)
         }
     }
