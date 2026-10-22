@@ -4,8 +4,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 prototype_dir="$repo_root/Prototypes/RunnerNetwork"
 source "$repo_root/Scripts/prepare-runner-container.sh"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-RELEASE_VERSION=$(git -C "$container_source" describe --tags --exact-match)
-export RELEASE_VERSION
+export RELEASE_VERSION="$container_version"
 export GIT_COMMIT="$container_revision"
 swift build --package-path "$container_source" -c release -j 6
 # Upstream treats the staging directory as a completed target. An interrupted
