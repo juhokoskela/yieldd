@@ -1,6 +1,6 @@
 # Runner network prototype
 
-This directory contains the relay and experimental VM probes. Normal Linux and macOS runner commands use the same relay and socket adapter. Linux requires the [pinned Container fork](../../Docs/linux-runner-network.md); its installed machine CLI has passed a local machine test, while GitHub jobs still need live validation. The manual template probe retains NAT. Do not treat this as a finished sandbox.
+This directory contains the relay and experimental VM probes. Normal Linux and macOS runner commands use the same relay and socket adapter. Linux requires the [pinned Container fork](../../Docs/linux-runner-network.md); its [validation boundary](../../Docs/linux-runner-network.md#validation-boundary) tracks current acceptance coverage. The manual template probe retains NAT. Do not treat this as a finished sandbox.
 
 Each guest gets one `VZFileHandleNetworkDeviceAttachment`, connected to its own host-side relay through a private Unix datagram socket. The relay uses gVisor's TCP/IP stack via `gvisor-tap-vsock`. A small upstream patch lets yieldd check the numeric destination immediately before opening a host TCP or UDP socket. There is no vmnet interface, host-address translation, or guest-accessible HTTP management service.
 
@@ -116,33 +116,6 @@ After the probe process exits, remove only its two newly created directories. On
 
 ## Evidence and remaining work
 
-On 2026-09-20, macOS 27.0, the disposable macOS VM reached public HTTPS (HTTP 200), used pinned SSH through the relay, and could not connect to a controlled listener on the Mac's LAN IPv4 address. The host reached that listener, and the guest reached public HTTPS again immediately after the denial. Stopping the relay removed its SSH endpoint. Starting the probe with a missing relay failed before VM startup and left no clone.
-
-The same day's Linux probe booted the yieldd Ubuntu image through the patched runtime with one Ethernet interface and the relay as its default gateway and DNS server. DNS resolved GitHub; HTTPS returned 200 before and after the host-fixture denial. The host reached that fixture before and after the test. After relay shutdown, a new HTTPS connection to GitHub's already-resolved IP timed out while guest execution remained available over the runtime control channel. The runtime then stopped the VM. A deliberately failing relay executable prevented bundle creation. All test processes and disposable disk/socket directories were removed.
-
-Preparing the live test exposed a runtime assumption that a network interface always has a vmnet allocation. The fork now starts vmnet port forwarders only when an allocation exists and rejects published ports or sockets in relay mode. The successful VM boot exercises the previously crashing path.
-
-The Go race-enabled tests, packet fuzzing (302,237 inputs in the recorded ten-second run), opt-in DNS/HTTPS test, both modified Swift targets, and all 11 `MachineConfigTests` passed. No GitHub job ran. The installed Container service stayed on its original version and quota-backed root.
-
-Final branch checks also passed all seven `PacketSocketTests` (one with two inputs), the expanded Go race-enabled tests, and `go vet`. The dependency scan found no reachable known vulnerabilities; two advisories remain in unused dependency modules. A controlled relay that ignored SIGTERM was forcibly stopped after an intentional pre-boot failure, without waiting for its 30-second lifetime. No VM was needed for that cleanup check. The new CI workflow has been checked locally, not run on GitHub.
-
-Those VM runs predated the DNS fix: their DNS queries still used the Mac's resolver, so the host-fixture denial did not prove DNS isolation. The replacement public DNS path subsequently passed controlled UDP/TCP guest tests and the live packet-level DNS/HTTPS check. The VM probes have not been rerun with the DNS fix and typed attachment field.
-
-After these corrections, the full check also passed with an alternate `TMPDIR`: Go race tests and vet, both probe builds, the machine service build, signatures, and 21 Swift tests covering sockets and configuration. Generated copies refreshed without manual deletion. Focused DNS, TCP-denial, counters, and cancellation checks passed three repeated race-enabled runs.
-
-On 2026-09-22, the shared supervisor passed nine Swift tests, including a handshake and shutdown with the real relay. The four Go ownership scenarios passed three race-enabled repetitions. The combined prototype check passed, as did the core Swift suite (393 tests). No VM or GitHub job ran for this lifecycle change, and no installed service was changed.
-
-Still unverified or deliberately incomplete:
-
-- The full modified Linux machine CLI/service path, including first-boot setup and persisted machine cleanup. The live harness bypasses those layers, not the runtime itself.
-- Relay memory/CPU/connection budgets and performance under load. Normal Linux operations now monitor relay health, but the installed CLI path still needs live validation. Upstream network services live for the helper process; this design uses one helper per guest.
-- An owner crash closes the relay but can leave its temporary directory or guest-side socket path. Normal runner recovery sweeps its socket directories; the standalone probes still require manual socket-directory cleanup after a crash. Process-level lifecycle checks do not establish VM or runner recovery.
-- Denial totals are process-local and best effort, including during normal shutdown. There is no durable metric collection or alerting yet.
-- Public DNS and permitted Internet endpoints remain possible data channels. Rejecting unneeded record types in the built-in service does not restrict jobs from using another public DNS or HTTPS service.
-- IPv6 Internet support and a complete review of the third-party packet stack.
-- Public-address hairpinning through a router or VPN, and interface changes affecting an already-established connection. The current address check covers local interface addresses at connection creation, not every possible public route back into a private network.
-- Full-volume, host restart, and crash-recovery testing with the relay enabled.
-
-The experiment shows that this packet path is usable. It does not establish complete host/LAN isolation or replace the VM security boundary.
+See the [validation boundary](../../Docs/linux-runner-network.md#validation-boundary) for current automated coverage, installed-fork evidence, and remaining acceptance checks. These probes do not establish complete host/LAN isolation or replace the VM security boundary.
 
 An upstream contribution is separate follow-up work. The likely reusable piece is a general socket-backed attachment or plugin integration, rather than yieldd's fixed policy and probe harness. Discuss the scope with maintainers before treating this as a fix for [host-isolation issue #1320](https://github.com/apple/container/issues/1320).

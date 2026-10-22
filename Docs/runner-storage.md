@@ -76,7 +76,7 @@ If Container cannot start or delete a machine, stop yieldd and free space on the
 
 ### An unlisted machine bundle remains
 
-Container 1.3.1 reloads valid machine bundles on service restart. A local stopped-machine experiment confirmed that restarting restored an unlisted bundle and made normal deletion work. The same experiment with missing machine metadata stayed unlisted after restart. yieldd cannot safely infer that an unlisted machine is stopped, so it does not delete these bundles automatically.
+Container reloads valid machine bundles on service restart. A local stopped-machine experiment confirmed that restarting restored an unlisted bundle and made normal deletion work. The same experiment with missing machine metadata stayed unlisted after restart. yieldd cannot safely infer that an unlisted machine is stopped, so it does not delete these bundles automatically.
 
 If restart does not help:
 

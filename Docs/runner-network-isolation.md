@@ -1,6 +1,6 @@
 # Guest network isolation: feasibility
 
-This records the baseline investigation and the subsequent [socket-relay prototype](../Prototypes/RunnerNetwork/README.md). Both runner backends now use that relay; Linux requires a [pinned Container fork](linux-runner-network.md), whose installed machine CLI has passed a local machine test. GitHub jobs still need live validation. The stock Linux runner-machine path can reach the Mac's services. Enforcing an Internet-only policy needs a packet path yieldd can control outside the guest.
+This records the baseline investigation and the subsequent [socket-relay prototype](../Prototypes/RunnerNetwork/README.md). Both runner backends now use that relay; Linux requires a [pinned Container fork](linux-runner-network.md), with current acceptance coverage in its [validation boundary](linux-runner-network.md#validation-boundary). The stock Linux runner-machine path can reach the Mac's services. Enforcing an Internet-only policy needs a packet path yieldd can control outside the guest.
 
 ## What was checked
 
