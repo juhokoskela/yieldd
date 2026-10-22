@@ -53,7 +53,7 @@ The local-agent installer builds the Ubuntu 24.04 guest image automatically when
 container build -t local/yieldd-guest:dev Guest
 ```
 
-The image boots systemd as PID 1 and runs Docker from Ubuntu's `docker.io` package. It also contains the pinned Linux ARM64 GitHub Actions runner and GitHub CLI. Guest commands run as the unprivileged `runner` user, which belongs to the `docker` group.
+The image boots systemd as PID 1 and runs Docker from Ubuntu's `docker.io` package. It also contains the pinned Linux ARM64 GitHub Actions runner and GitHub CLI, plus `zstd` so `actions/cache` compresses entries the same way as GitHub-hosted and fallback runners and can restore the caches they save. Guest commands run as the unprivileged `runner` user, which belongs to the `docker` group.
 
 Machines receive 4 virtual CPUs and a 12 GiB memory ceiling. At boot, `/dev/shm` is resized from Container's 64 MiB default to half of guest memory, so browsers have room for shared memory. Runner processes and Docker-created workflow containers share a systemd slice with the same CPU allocation and an 8 GiB soft memory threshold. `yieldd` reserves each live machine's full ceiling against 75% of host physical memory, so the current configuration requires roughly 16 GiB of physical memory and concurrent runner slots cannot independently overcommit the host. Normal memory pressure removes the soft threshold; warning or unknown pressure keeps it. A slot waits before requesting its registration token when the memory budget is already reserved or host memory pressure is critical. Capacity waits end when another machine is deleted, while critical pressure is periodically rechecked. Reservations are released only after machine deletion succeeds.
 

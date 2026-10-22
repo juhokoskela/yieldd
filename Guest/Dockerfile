@@ -21,6 +21,7 @@ RUN apt-get update \
         libatomic1 \
         build-essential \
         docker-compose-v2 \
+        zstd \
     && mkdir -p /opt/actions-runner \
     && curl --fail --location --retry 3 \
         --output /tmp/actions-runner.tar.gz \
