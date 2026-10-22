@@ -52,9 +52,9 @@ container build -t local/yieldd-guest:dev Guest
 container builder stop
 ```
 
-Confirm that `appRoot` points to `/Volumes/YielddRunners/container`. yieldd's service-start calls use this configured root, and Linux creation and cleanup check the running service's reported root. Standalone `recover` does not start Container: after a reboot, start it with this root before recovering Linux leases. Starting Container manually without `--app-root` can select its old data; yieldd refuses to create or clean up runners there. Keep the old root until you have checked that unrelated Container data is no longer needed.
+Confirm that `paths.appRoot` (or `appRoot` on older Container versions) points to `/Volumes/YielddRunners/container`. yieldd's service-start calls use this configured root, and Linux creation and cleanup check the running service's reported root. Standalone `recover` does not start Container: after a reboot, start it with this root before recovering Linux leases. Starting Container manually without `--app-root` can select its old data; yieldd refuses to create or clean up runners there. Keep the old root until you have checked that unrelated Container data is no longer needed.
 
-The machine-bundle cleanup check follows Apple Container 1.3.1's storage layout. Recheck that boundary when upgrading Container, especially if its machine storage layout changes.
+The machine-bundle cleanup check uses `plugin-state/machine-apiserver/machines/`, which the pinned Container 1.6.0 build retains. Recheck that boundary when upgrading Container, especially if its machine storage layout changes.
 
 ### macOS
 

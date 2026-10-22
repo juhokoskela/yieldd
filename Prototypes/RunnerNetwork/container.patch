@@ -1,5 +1,5 @@
 diff --git a/Package.swift b/Package.swift
-index 93b93c4..85f5522 100644
+index 047651db..f396d7b9 100644
 --- a/Package.swift
 +++ b/Package.swift
 @@ -73,6 +73,22 @@ let package = Package(
@@ -25,7 +25,7 @@ index 93b93c4..85f5522 100644
          .executableTarget(
              name: "container",
              dependencies: [
-@@ -293,6 +309,7 @@ let package = Package(
+@@ -310,6 +326,7 @@ let package = Package(
                  "ContainerAPIClient",
                  "ContainerPersistence",
                  "ContainerTestSupport",
@@ -33,10 +33,239 @@ index 93b93c4..85f5522 100644
              ]
          ),
          .executableTarget(
+diff --git a/Sources/ContainerCommands/Machine/MachineBoot.swift b/Sources/ContainerCommands/Machine/MachineBoot.swift
+new file mode 100644
+index 00000000..01f31af8
+--- /dev/null
++++ b/Sources/ContainerCommands/Machine/MachineBoot.swift
+@@ -0,0 +1,41 @@
++//===----------------------------------------------------------------------===//
++// Copyright © 2026 Apple Inc. and the container project authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//   https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++//===----------------------------------------------------------------------===//
++
++import ArgumentParser
++import ContainerAPIClient
++import MachineAPIClient
++
++extension Application {
++    public struct MachineBoot: AsyncLoggableCommand {
++        public init() {}
++
++        public static let configuration = CommandConfiguration(
++            commandName: "boot",
++            abstract: "Boot a container machine without terminal input"
++        )
++
++        @OptionGroup
++        public var logOptions: Flags.Logging
++
++        @Argument(help: "container machine ID (uses default if not specified)")
++        var id: String?
++
++        public func run() async throws {
++            let snapshot = try await bootMachine(id: id, client: MachineClient(), log: log)
++            print(snapshot.id)
++        }
++    }
++}
+diff --git a/Sources/ContainerCommands/Machine/MachineCommand.swift b/Sources/ContainerCommands/Machine/MachineCommand.swift
+index fe09bcee..c4777203 100644
+--- a/Sources/ContainerCommands/Machine/MachineCommand.swift
++++ b/Sources/ContainerCommands/Machine/MachineCommand.swift
+@@ -41,6 +41,7 @@ extension Application {
+                     $ container machine delete my-machine
+                 """,
+             subcommands: [
++                MachineBoot.self,
+                 MachineCreate.self,
+                 MachineDelete.self,
+                 MachineInspect.self,
+diff --git a/Sources/ContainerCommands/Machine/MachineCreate.swift b/Sources/ContainerCommands/Machine/MachineCreate.swift
+index b6496642..540a32bf 100644
+--- a/Sources/ContainerCommands/Machine/MachineCreate.swift
++++ b/Sources/ContainerCommands/Machine/MachineCreate.swift
+@@ -74,6 +74,9 @@ extension Application {
+         @Option(name: .long, help: "Path to a custom kernel binary (e.g. vmlinux).")
+         public var kernel: String?
+
++        @Option(name: .long, help: "Host-owned packet relay socket. Requires --home-mount none.")
++        public var networkSocket: String?
++
+         @Argument(help: "Container image reference (e.g., alpine:3.22)")
+         var image: String
+
+@@ -105,6 +108,7 @@ extension Application {
+                     "home-mount": homeMount,
+                     "virtualization": virtualization ? "true" : nil,
+                     "kernel": resolvedKernel?.string,
++                    "network-socket": networkSocket,
+                 ].compactMapValues { $0 }
+             )
+
+diff --git a/Sources/ContainerCommands/Machine/MachineInspect.swift b/Sources/ContainerCommands/Machine/MachineInspect.swift
+index 49053c7e..f5ccfa0e 100644
+--- a/Sources/ContainerCommands/Machine/MachineInspect.swift
++++ b/Sources/ContainerCommands/Machine/MachineInspect.swift
+@@ -66,6 +66,7 @@ private struct InspectOutput: Codable {
+     let homeMount: MachineConfig.HomeMountOption
+     let diskSize: UInt64?
+     let ipAddress: String?
++    let networkSocket: String?
+
+     init(_ snapshot: MachineSnapshot) {
+         self.id = snapshot.id
+@@ -81,5 +82,6 @@ private struct InspectOutput: Codable {
+         self.homeMount = snapshot.bootConfig.homeMount
+         self.diskSize = snapshot.diskSize
+         self.ipAddress = snapshot.ipAddress
++        self.networkSocket = snapshot.bootConfig.networkSocket
+     }
+ }
+diff --git a/Sources/ContainerPersistence/MachineConfig.swift b/Sources/ContainerPersistence/MachineConfig.swift
+index 6c816124..aad4534d 100644
+--- a/Sources/ContainerPersistence/MachineConfig.swift
++++ b/Sources/ContainerPersistence/MachineConfig.swift
+@@ -56,6 +56,8 @@ public struct MachineConfig: Codable, Sendable {
+     public let virtualization: Bool
+     /// Optional path to a custom kernel binary. nil falls back to the system default.
+     public let kernelPath: FilePath?
++    /// Experimental host-owned Ethernet relay. No vmnet or SSH-agent forwarding.
++    public let networkSocket: String?
+
+     private enum CodingKeys: String, CodingKey {
+         case cpus
+@@ -63,6 +65,7 @@ public struct MachineConfig: Codable, Sendable {
+         case homeMount
+         case virtualization
+         case kernelPath
++        case networkSocket
+     }
+
+     /// Settable keys and their descriptions, for CLI help text generation.
+@@ -72,6 +75,7 @@ public struct MachineConfig: Codable, Sendable {
+         ("home-mount", "<string>", "User home directory mount option (ro, rw, none). Default: rw"),
+         ("virtualization", "<bool>", "Enable nested virtualization (true|false). Requires Apple Silicon M3+ and macOS 15+ and kernel with CONFIG_KVM=y."),
+         ("kernel", "<path>", "Path to a custom kernel binary. Empty value resets to the system default."),
++        ("network-socket", "<path>", "Experimental yieldd packet relay socket. Requires home-mount=none."),
+     ]
+
+     public init(
+@@ -79,13 +83,15 @@ public struct MachineConfig: Codable, Sendable {
+         memory: MemorySize?,
+         homeMount: HomeMountOption?,
+         virtualization: Bool?,
+-        kernelPath: FilePath?
++        kernelPath: FilePath?,
++        networkSocket: String? = nil
+     ) throws {
+         self.cpus = cpus ?? Self.defaultCPUs
+         self.memory = memory ?? Self.defaultMemory
+         self.homeMount = homeMount ?? Self.defaultHomeMount
+         self.virtualization = virtualization ?? false
+         self.kernelPath = kernelPath
++        self.networkSocket = networkSocket
+
+         try self.validate()
+     }
+@@ -107,7 +113,8 @@ public struct MachineConfig: Codable, Sendable {
+             memory: memory,
+             homeMount: homeMount,
+             virtualization: virtualization,
+-            kernelPath: kernelPath)
++            kernelPath: kernelPath,
++            networkSocket: container.decodeIfPresent(String.self, forKey: .networkSocket))
+     }
+
+     public func encode(to encoder: any Encoder) throws {
+@@ -117,9 +124,15 @@ public struct MachineConfig: Codable, Sendable {
+         try container.encode(homeMount, forKey: .homeMount)
+         try container.encode(virtualization, forKey: .virtualization)
+         try container.encodeIfPresent(kernelPath?.string, forKey: .kernelPath)
++        try container.encodeIfPresent(networkSocket, forKey: .networkSocket)
+     }
+
+     private func validate() throws {
++        if let networkSocket {
++            guard networkSocket.hasPrefix("/"), !networkSocket.utf8.contains(0), homeMount == .none else {
++                throw ContainerizationError(.invalidArgument, message: "network-socket requires an absolute path and home-mount=none")
++            }
++        }
+         guard self.cpus > 0 else {
+             throw ContainerizationError(
+                 .invalidArgument,
+@@ -174,7 +187,8 @@ extension MachineConfig {
+             memory: memory ?? self.memory,
+             homeMount: homeMount ?? self.homeMount,
+             virtualization: virtualization ?? self.virtualization,
+-            kernelPath: kernelPath
++            kernelPath: kernelPath,
++            networkSocket: kwargs["network-socket"] ?? self.networkSocket
+         )
+     }
+
+diff --git a/Sources/ContainerResource/Container/ContainerConfiguration.swift b/Sources/ContainerResource/Container/ContainerConfiguration.swift
+index 87e0f904..3fb5046c 100644
+--- a/Sources/ContainerResource/Container/ContainerConfiguration.swift
++++ b/Sources/ContainerResource/Container/ContainerConfiguration.swift
+@@ -34,6 +34,8 @@ public struct ContainerConfiguration: Sendable, Codable {
+     public var sysctls: [String: String] = [:]
+     /// The networks the container will be added to.
+     public var networks: [AttachmentConfiguration] = []
++    /// Experimental host-owned packet relay, mutually exclusive with network attachments.
++    public var networkSocket: String?
+     /// The DNS configuration for the container.
+     public var dns: DNSConfiguration? = nil
+     /// Whether to enable rosetta x86-64 translation for the container.
+@@ -82,6 +84,7 @@ public struct ContainerConfiguration: Sendable, Codable {
+         case labels
+         case sysctls
+         case networks
++        case networkSocket
+         case dns
+         case rosetta
+         case initProcess
+@@ -121,6 +124,7 @@ public struct ContainerConfiguration: Sendable, Codable {
+         }
+
+         dns = try container.decodeIfPresent(DNSConfiguration.self, forKey: .dns)
++        networkSocket = try container.decodeIfPresent(String.self, forKey: .networkSocket)
+         rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
+         initProcess = try container.decode(ProcessConfiguration.self, forKey: .initProcess)
+         platform = try container.decodeIfPresent(ContainerizationOCI.Platform.self, forKey: .platform) ?? .current
+diff --git a/Sources/Plugins/MachineAPIServer/Resources/init b/Sources/Plugins/MachineAPIServer/Resources/init
+index 495b51ba..cab6949e 100755
+--- a/Sources/Plugins/MachineAPIServer/Resources/init
++++ b/Sources/Plugins/MachineAPIServer/Resources/init
+@@ -31,8 +31,8 @@ if [ "$1" = "-s" ]; then
+ else
+     echo "${CONTAINER_MACHINE_ID}" > /etc/hostname
+
+-    if [ -S ${SSH_AUTH_SOCK} ]; then
+-        chown ${CONTAINER_UID}:${CONTAINER_GID} ${SSH_AUTH_SOCK}
++    if [ -S "${SSH_AUTH_SOCK}" ]; then
++        chown "${CONTAINER_UID}:${CONTAINER_GID}" "${SSH_AUTH_SOCK}"
+     fi
+
+     exec /sbin/init
 diff --git a/Sources/Services/ContainerAPIService/Client/ClientProcess.swift b/Sources/Services/ContainerAPIService/Client/ClientProcess.swift
+index 5a5f8543..a1afc241 100644
 --- a/Sources/Services/ContainerAPIService/Client/ClientProcess.swift
 +++ b/Sources/Services/ContainerAPIService/Client/ClientProcess.swift
-@@ -79,8 +79,12 @@ struct ClientProcessImpl: ClientProcess, Sendable {
+@@ -77,10 +77,14 @@ struct ClientProcessImpl: ClientProcess, Sendable {
+
+     /// Send a signal to the process.
      public func kill(_ signal: Int32) async throws {
 +        guard let name = Signal.platformName(signal) else {
 +            throw ContainerizationError(.invalidArgument, message: "Unknown host signal \(signal)")
@@ -50,8 +279,112 @@ diff --git a/Sources/Services/ContainerAPIService/Client/ClientProcess.swift b/S
 
          try await xpcClient.send(request)
      }
+diff --git a/Sources/Services/MachineAPIService/Server/MachinesService.swift b/Sources/Services/MachineAPIService/Server/MachinesService.swift
+index de2b701d..632a718d 100644
+--- a/Sources/Services/MachineAPIService/Server/MachinesService.swift
++++ b/Sources/Services/MachineAPIService/Server/MachinesService.swift
+@@ -363,6 +363,7 @@ public actor MachinesService {
+                 initializedFile: path.appending(MachineBundle.initializedFile),
+                 homeMountOption: bootConfig.homeMount,
+                 virtualization: bootConfig.virtualization,
++                networkSocket: bootConfig.networkSocket,
+             )
+
+             config.resources.cpus = bootConfig.cpus
+@@ -638,6 +639,7 @@ extension MachineConfiguration {
+         initializedFile: FilePath,
+         homeMountOption: MachineConfig.HomeMountOption,
+         virtualization: Bool,
++        networkSocket: String?,
+     ) async throws -> ContainerConfiguration {
+         var config = ContainerConfiguration(
+             id: cid,
+@@ -683,18 +685,23 @@ extension MachineConfiguration {
+             domain: domain,
+             searchDomains: [domain],
+         )
+-        guard let defaultNetwork = try await NetworkClient().builtin else {
+-            throw ContainerizationError(.invalidState, message: "default network is not present")
++        if let networkSocket {
++            config.networkSocket = networkSocket
++            config.dns = ContainerConfiguration.DNSConfiguration(nameservers: ["192.168.127.1"])
++        } else {
++            guard let defaultNetwork = try await NetworkClient().builtin else {
++                throw ContainerizationError(.invalidState, message: "default network is not present")
++            }
++            config.networks = [
++                AttachmentConfiguration(
++                    network: defaultNetwork.id,
++                    options: AttachmentOptions(hostname: dnsHostname)
++                )
++            ]
+         }
+-        config.networks = [
+-            AttachmentConfiguration(
+-                network: defaultNetwork.id,
+-                options: AttachmentOptions(hostname: dnsHostname)
+-            )
+-        ]
+
+         config.capAdd = ["ALL"]
+-        config.ssh = true
++        config.ssh = networkSocket == nil
+         config.virtualization = virtualization
+         config.readonlyPaths = []
+         config.maskedPaths = []
+diff --git a/Sources/Services/RuntimeLinux/Server/PacketRelayInterface.swift b/Sources/Services/RuntimeLinux/Server/PacketRelayInterface.swift
+new file mode 100644
+index 00000000..31b40c7b
+--- /dev/null
++++ b/Sources/Services/RuntimeLinux/Server/PacketRelayInterface.swift
+@@ -0,0 +1,14 @@
++import Containerization
++import ContainerizationExtras
++import Virtualization
++
++struct PacketRelayInterface: Interface, VZInterface {
++    let ipv4Address = try! CIDRv4("192.168.127.2/24")
++    let ipv4Gateway: IPv4Address? = try! IPv4Address("192.168.127.1")
++    let macAddress: MACAddress? = try! MACAddress("02:00:00:00:00:02")
++    private let socket: PacketSocket
++
++    init(path: String) throws { socket = try PacketSocket(path: path) }
++
++    func device() throws -> VZVirtioNetworkDeviceConfiguration { socket.device() }
++}
+diff --git a/Sources/Services/RuntimeLinux/Server/RuntimeService.swift b/Sources/Services/RuntimeLinux/Server/RuntimeService.swift
+index 8ecc932d..93a543c8 100644
+--- a/Sources/Services/RuntimeLinux/Server/RuntimeService.swift
++++ b/Sources/Services/RuntimeLinux/Server/RuntimeService.swift
+@@ -184,6 +184,14 @@ public actor RuntimeService {
+             var sessions: [XPCClientSession] = []
+             var attachments: [Attachment] = []
+             var interfaces: [Interface] = []
++            if let path = config.networkSocket {
++                guard networkBootstrapInfos.isEmpty, config.networks.isEmpty, !config.ssh,
++                    config.publishedPorts.isEmpty, config.publishedSockets.isEmpty
++                else {
++                    throw ContainerizationError(.invalidArgument, message: "packet relay cannot coexist with another network, published ports or sockets, or SSH-agent forwarding")
++                }
++                interfaces = [try PacketRelayInterface(path: path)]
++            }
+             do {
+                 for (index, info) in networkBootstrapInfos.enumerated() {
+                     let attachmentConfig = config.networks[index]
+@@ -306,8 +314,8 @@ public actor RuntimeService {
+
+                 try await self.initializeWaiters(for: id)
+                 try await self.monitor.registerProcess(id: config.id, onExit: self.onContainerExit)
+-                if !container.interfaces.isEmpty {
+-                    try await self.startSocketForwarders(attachment: attachments[0], publishedPorts: config.publishedPorts)
++                if let attachment = attachments.first {
++                    try await self.startSocketForwarders(attachment: attachment, publishedPorts: config.publishedPorts)
+                 }
+                 await self.setState(.booted)
+             } catch {
 diff --git a/Tests/ContainerAPIClientTests/ClientProcessSignalTests.swift b/Tests/ContainerAPIClientTests/ClientProcessSignalTests.swift
 new file mode 100644
+index 00000000..f6c90c76
 --- /dev/null
 +++ b/Tests/ContainerAPIClientTests/ClientProcessSignalTests.swift
 @@ -0,0 +1,77 @@
@@ -132,323 +465,13 @@ new file mode 100644
 +        #expect(try Signal(encoded).rawValue == signal.linux)
 +    }
 +}
-diff --git a/Sources/ContainerCommands/Machine/MachineBoot.swift b/Sources/ContainerCommands/Machine/MachineBoot.swift
-new file mode 100644
---- /dev/null
-+++ b/Sources/ContainerCommands/Machine/MachineBoot.swift
-@@ -0,0 +1,41 @@
-+//===----------------------------------------------------------------------===//
-+// Copyright © 2026 Apple Inc. and the container project authors.
-+//
-+// Licensed under the Apache License, Version 2.0 (the "License");
-+// you may not use this file except in compliance with the License.
-+// You may obtain a copy of the License at
-+//
-+//   https://www.apache.org/licenses/LICENSE-2.0
-+//
-+// Unless required by applicable law or agreed to in writing, software
-+// distributed under the License is distributed on an "AS IS" BASIS,
-+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+// See the License for the specific language governing permissions and
-+// limitations under the License.
-+//===----------------------------------------------------------------------===//
-+
-+import ArgumentParser
-+import ContainerAPIClient
-+import MachineAPIClient
-+
-+extension Application {
-+    public struct MachineBoot: AsyncLoggableCommand {
-+        public init() {}
-+
-+        public static let configuration = CommandConfiguration(
-+            commandName: "boot",
-+            abstract: "Boot a container machine without terminal input"
-+        )
-+
-+        @OptionGroup
-+        public var logOptions: Flags.Logging
-+
-+        @Argument(help: "container machine ID (uses default if not specified)")
-+        var id: String?
-+
-+        public func run() async throws {
-+            let snapshot = try await bootMachine(id: id, client: MachineClient(), log: log, interactive: false)
-+            print(snapshot.id)
-+        }
-+    }
-+}
-diff --git a/Sources/ContainerCommands/Machine/MachineCommand.swift b/Sources/ContainerCommands/Machine/MachineCommand.swift
---- a/Sources/ContainerCommands/Machine/MachineCommand.swift
-+++ b/Sources/ContainerCommands/Machine/MachineCommand.swift
-@@ -45,6 +45,7 @@ extension Application {
-                 """,
-             subcommands: [
-+                MachineBoot.self,
-                 MachineCreate.self,
-                 MachineDelete.self,
-                 MachineInspect.self,
-                 MachineList.self,
-diff --git a/Sources/ContainerCommands/Machine/MachineCreate.swift b/Sources/ContainerCommands/Machine/MachineCreate.swift
---- a/Sources/ContainerCommands/Machine/MachineCreate.swift
-+++ b/Sources/ContainerCommands/Machine/MachineCreate.swift
-@@ -69,6 +69,9 @@ extension Application {
-         @Option(name: .long, help: "Path to a custom kernel binary (e.g. vmlinux).")
-         public var kernel: String?
-
-+        @Option(name: .long, help: "Host-owned packet relay socket. Requires --home-mount none.")
-+        public var networkSocket: String?
-+
-         @Argument(help: "Container image reference (e.g., alpine:3.22)")
-         var image: String
-
-@@ -102,6 +105,7 @@ extension Application {
-                     "home-mount": homeMount,
-                     "virtualization": virtualization ? "true" : nil,
-                     "kernel": resolvedKernel?.string,
-+                    "network-socket": networkSocket,
-                 ].compactMapValues { $0 }
-             )
-
-diff --git a/Sources/ContainerCommands/Machine/MachineInspect.swift b/Sources/ContainerCommands/Machine/MachineInspect.swift
---- a/Sources/ContainerCommands/Machine/MachineInspect.swift
-+++ b/Sources/ContainerCommands/Machine/MachineInspect.swift
-@@ -66,6 +66,7 @@ private struct InspectOutput: Codable {
-     let homeMount: MachineConfig.HomeMountOption
-     let diskSize: UInt64?
-     let ipAddress: String?
-+    let networkSocket: String?
-
-     init(_ snapshot: MachineSnapshot) {
-         self.id = snapshot.id
-@@ -82,5 +83,6 @@ private struct InspectOutput: Codable {
-         self.homeMount = snapshot.bootConfig.homeMount
-         self.diskSize = snapshot.diskSize
-         self.ipAddress = snapshot.ipAddress
-+        self.networkSocket = snapshot.bootConfig.networkSocket
-     }
- }
-diff --git a/Sources/ContainerPersistence/MachineConfig.swift b/Sources/ContainerPersistence/MachineConfig.swift
-index 6c81612..aad4534 100644
---- a/Sources/ContainerPersistence/MachineConfig.swift
-+++ b/Sources/ContainerPersistence/MachineConfig.swift
-@@ -56,6 +56,8 @@ public struct MachineConfig: Codable, Sendable {
-     public let virtualization: Bool
-     /// Optional path to a custom kernel binary. nil falls back to the system default.
-     public let kernelPath: FilePath?
-+    /// Experimental host-owned Ethernet relay. No vmnet or SSH-agent forwarding.
-+    public let networkSocket: String?
- 
-     private enum CodingKeys: String, CodingKey {
-         case cpus
-@@ -63,6 +65,7 @@ public struct MachineConfig: Codable, Sendable {
-         case homeMount
-         case virtualization
-         case kernelPath
-+        case networkSocket
-     }
- 
-     /// Settable keys and their descriptions, for CLI help text generation.
-@@ -72,6 +75,7 @@ public struct MachineConfig: Codable, Sendable {
-         ("home-mount", "<string>", "User home directory mount option (ro, rw, none). Default: rw"),
-         ("virtualization", "<bool>", "Enable nested virtualization (true|false). Requires Apple Silicon M3+ and macOS 15+ and kernel with CONFIG_KVM=y."),
-         ("kernel", "<path>", "Path to a custom kernel binary. Empty value resets to the system default."),
-+        ("network-socket", "<path>", "Experimental yieldd packet relay socket. Requires home-mount=none."),
-     ]
- 
-     public init(
-@@ -79,13 +83,15 @@ public struct MachineConfig: Codable, Sendable {
-         memory: MemorySize?,
-         homeMount: HomeMountOption?,
-         virtualization: Bool?,
--        kernelPath: FilePath?
-+        kernelPath: FilePath?,
-+        networkSocket: String? = nil
-     ) throws {
-         self.cpus = cpus ?? Self.defaultCPUs
-         self.memory = memory ?? Self.defaultMemory
-         self.homeMount = homeMount ?? Self.defaultHomeMount
-         self.virtualization = virtualization ?? false
-         self.kernelPath = kernelPath
-+        self.networkSocket = networkSocket
- 
-         try self.validate()
-     }
-@@ -107,7 +113,8 @@ public struct MachineConfig: Codable, Sendable {
-             memory: memory,
-             homeMount: homeMount,
-             virtualization: virtualization,
--            kernelPath: kernelPath)
-+            kernelPath: kernelPath,
-+            networkSocket: container.decodeIfPresent(String.self, forKey: .networkSocket))
-     }
- 
-     public func encode(to encoder: any Encoder) throws {
-@@ -117,9 +124,15 @@ public struct MachineConfig: Codable, Sendable {
-         try container.encode(homeMount, forKey: .homeMount)
-         try container.encode(virtualization, forKey: .virtualization)
-         try container.encodeIfPresent(kernelPath?.string, forKey: .kernelPath)
-+        try container.encodeIfPresent(networkSocket, forKey: .networkSocket)
-     }
- 
-     private func validate() throws {
-+        if let networkSocket {
-+            guard networkSocket.hasPrefix("/"), !networkSocket.utf8.contains(0), homeMount == .none else {
-+                throw ContainerizationError(.invalidArgument, message: "network-socket requires an absolute path and home-mount=none")
-+            }
-+        }
-         guard self.cpus > 0 else {
-             throw ContainerizationError(
-                 .invalidArgument,
-@@ -174,7 +187,8 @@ extension MachineConfig {
-             memory: memory ?? self.memory,
-             homeMount: homeMount ?? self.homeMount,
-             virtualization: virtualization ?? self.virtualization,
--            kernelPath: kernelPath
-+            kernelPath: kernelPath,
-+            networkSocket: kwargs["network-socket"] ?? self.networkSocket
-         )
-     }
- 
-diff --git a/Sources/ContainerResource/Container/ContainerConfiguration.swift b/Sources/ContainerResource/Container/ContainerConfiguration.swift
-index 87e0f90..3fb5046 100644
---- a/Sources/ContainerResource/Container/ContainerConfiguration.swift
-+++ b/Sources/ContainerResource/Container/ContainerConfiguration.swift
-@@ -34,6 +34,8 @@ public struct ContainerConfiguration: Sendable, Codable {
-     public var sysctls: [String: String] = [:]
-     /// The networks the container will be added to.
-     public var networks: [AttachmentConfiguration] = []
-+    /// Experimental host-owned packet relay, mutually exclusive with network attachments.
-+    public var networkSocket: String?
-     /// The DNS configuration for the container.
-     public var dns: DNSConfiguration? = nil
-     /// Whether to enable rosetta x86-64 translation for the container.
-@@ -82,6 +84,7 @@ public struct ContainerConfiguration: Sendable, Codable {
-         case labels
-         case sysctls
-         case networks
-+        case networkSocket
-         case dns
-         case rosetta
-         case initProcess
-@@ -121,6 +124,7 @@ public struct ContainerConfiguration: Sendable, Codable {
-         }
- 
-         dns = try container.decodeIfPresent(DNSConfiguration.self, forKey: .dns)
-+        networkSocket = try container.decodeIfPresent(String.self, forKey: .networkSocket)
-         rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
-         initProcess = try container.decode(ProcessConfiguration.self, forKey: .initProcess)
-         platform = try container.decodeIfPresent(ContainerizationOCI.Platform.self, forKey: .platform) ?? .current
-diff --git a/Sources/Services/MachineAPIService/Server/MachinesService.swift b/Sources/Services/MachineAPIService/Server/MachinesService.swift
-index ff3df1f..cfc904d 100644
---- a/Sources/Services/MachineAPIService/Server/MachinesService.swift
-+++ b/Sources/Services/MachineAPIService/Server/MachinesService.swift
-@@ -364,6 +364,7 @@ public actor MachinesService {
-                 initializedFile: path.appending(MachineBundle.initializedFile),
-                 homeMountOption: bootConfig.homeMount,
-                 virtualization: bootConfig.virtualization,
-+                networkSocket: bootConfig.networkSocket,
-             )
- 
-             config.resources.cpus = bootConfig.cpus
-@@ -639,6 +640,7 @@ extension MachineConfiguration {
-         initializedFile: FilePath,
-         homeMountOption: MachineConfig.HomeMountOption,
-         virtualization: Bool,
-+        networkSocket: String?,
-     ) async throws -> ContainerConfiguration {
-         var config = ContainerConfiguration(
-             id: cid,
-@@ -684,18 +686,23 @@ extension MachineConfiguration {
-             domain: domain,
-             searchDomains: [domain],
-         )
--        guard let defaultNetwork = try await NetworkClient().builtin else {
--            throw ContainerizationError(.invalidState, message: "default network is not present")
-+        if let networkSocket {
-+            config.networkSocket = networkSocket
-+            config.dns = ContainerConfiguration.DNSConfiguration(nameservers: ["192.168.127.1"])
-+        } else {
-+            guard let defaultNetwork = try await NetworkClient().builtin else {
-+                throw ContainerizationError(.invalidState, message: "default network is not present")
-+            }
-+            config.networks = [
-+                AttachmentConfiguration(
-+                    network: defaultNetwork.id,
-+                    options: AttachmentOptions(hostname: dnsHostname)
-+                )
-+            ]
-         }
--        config.networks = [
--            AttachmentConfiguration(
--                network: defaultNetwork.id,
--                options: AttachmentOptions(hostname: dnsHostname)
--            )
--        ]
- 
-         config.capAdd = ["ALL"]
--        config.ssh = true
-+        config.ssh = networkSocket == nil
-         config.virtualization = virtualization
-         config.readonlyPaths = []
-         config.maskedPaths = []
-diff --git a/Sources/Services/RuntimeLinux/Server/PacketRelayInterface.swift b/Sources/Services/RuntimeLinux/Server/PacketRelayInterface.swift
-new file mode 100644
-index 0000000..3135703
---- /dev/null
-+++ b/Sources/Services/RuntimeLinux/Server/PacketRelayInterface.swift
-@@ -0,0 +1,14 @@
-+import Containerization
-+import ContainerizationExtras
-+import Virtualization
-+
-+struct PacketRelayInterface: Interface, VZInterface {
-+    let ipv4Address = try! CIDRv4("192.168.127.2/24")
-+    let ipv4Gateway: IPv4Address? = try! IPv4Address("192.168.127.1")
-+    let macAddress: MACAddress? = try! MACAddress("02:00:00:00:00:02")
-+    private let socket: PacketSocket
-+
-+    init(path: String) throws { socket = try PacketSocket(path: path) }
-+
-+    func device() throws -> VZVirtioNetworkDeviceConfiguration { socket.device() }
-+}
-diff --git a/Sources/Services/RuntimeLinux/Server/RuntimeService.swift b/Sources/Services/RuntimeLinux/Server/RuntimeService.swift
-index 948a656..c2f30c2 100644
---- a/Sources/Services/RuntimeLinux/Server/RuntimeService.swift
-+++ b/Sources/Services/RuntimeLinux/Server/RuntimeService.swift
-@@ -184,6 +184,14 @@ public actor RuntimeService {
-             var sessions: [XPCClientSession] = []
-             var attachments: [Attachment] = []
-             var interfaces: [Interface] = []
-+            if let path = config.networkSocket {
-+                guard networkBootstrapInfos.isEmpty, config.networks.isEmpty, !config.ssh,
-+                    config.publishedPorts.isEmpty, config.publishedSockets.isEmpty
-+                else {
-+                    throw ContainerizationError(.invalidArgument, message: "packet relay cannot coexist with another network, published ports or sockets, or SSH-agent forwarding")
-+                }
-+                interfaces = [try PacketRelayInterface(path: path)]
-+            }
-             do {
-                 for (index, info) in networkBootstrapInfos.enumerated() {
-                     let attachmentConfig = config.networks[index]
-@@ -299,8 +307,8 @@ public actor RuntimeService {
- 
-                 try await self.initializeWaiters(for: id)
-                 try await self.monitor.registerProcess(id: config.id, onExit: self.onContainerExit)
--                if !container.interfaces.isEmpty {
--                    try await self.startSocketForwarders(attachment: attachments[0], publishedPorts: config.publishedPorts)
-+                if let attachment = attachments.first {
-+                    try await self.startSocketForwarders(attachment: attachment, publishedPorts: config.publishedPorts)
-                 }
-                 await self.setState(.booted)
-             } catch {
 diff --git a/Tests/ContainerPersistenceTests/MachineConfigTests.swift b/Tests/ContainerPersistenceTests/MachineConfigTests.swift
-index 8ea6e51..8f8ab63 100644
+index 8ea6e515..8f8ab630 100644
 --- a/Tests/ContainerPersistenceTests/MachineConfigTests.swift
 +++ b/Tests/ContainerPersistenceTests/MachineConfigTests.swift
 @@ -21,6 +21,19 @@ import SystemPackage
  import Testing
- 
+
  struct MachineConfigTests {
 +    @Test func packetRelayRequiresNoHomeMountAndAnAbsoluteSocket() throws {
 +        #expect(throws: ContainerizationError.self) {
@@ -467,12 +490,12 @@ index 8ea6e51..8f8ab63 100644
          let config = MachineConfig.default
          #expect(config.virtualization == false)
 diff --git a/Tests/ContainerResourceTests/ContainerConfigurationTests.swift b/Tests/ContainerResourceTests/ContainerConfigurationTests.swift
-index b1aafa0..a413a0f 100644
+index b1aafa0b..a413a0fa 100644
 --- a/Tests/ContainerResourceTests/ContainerConfigurationTests.swift
 +++ b/Tests/ContainerResourceTests/ContainerConfigurationTests.swift
 @@ -52,6 +52,15 @@ func makeTestConfiguration(
  }
- 
+
  struct ContainerConfigurationResourcesTests {
 +    @Test func packetRelayUsesTypedConfigurationNotLabels() throws {
 +        var config = makeTestConfiguration(labels: ["fi.yieldd.prototype.network-socket": "/tmp/untrusted-label.sock"])

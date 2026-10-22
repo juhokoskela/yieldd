@@ -209,6 +209,28 @@ func stoppedContainerReportsItsRequiredStartupRoot() throws {
     #expect(describeError(error).contains("service stopped"))
 }
 
+@Test(arguments: [false, true], [false, true])
+func containerStatusValidatesConfiguredRoot(nestedPaths: Bool, matchingRoot: Bool) throws {
+    let fixture = try StorageFixture()
+    defer { fixture.remove() }
+    let storage = RunnerStorage(volumePath: fixture.directory.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
+    try FileManager.default.createDirectory(at: storage.containerURL, withIntermediateDirectories: true)
+    let root = matchingRoot ? storage.containerURL.path : fixture.directory.path
+    var status: [String: Any] = ["status": "running"]
+    if nestedPaths { status["paths"] = ["appRoot": root] }
+    else { status["appRoot"] = root }
+    let data = try JSONSerialization.data(withJSONObject: status)
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: String(decoding: data, as: UTF8.self)))])
+    let container = URL(fileURLWithPath: "/test/container")
+    if matchingRoot {
+        try storage.validateContainer(containerExecutable: container, executor: executor)
+    } else {
+        #expect(throws: RunnerStorageError.containerRootMismatch(path: storage.containerURL.path)) {
+            try storage.validateContainer(containerExecutable: container, executor: executor)
+        }
+    }
+}
+
 private func plist(_ object: [String: Any]) throws -> Data {
     try PropertyListSerialization.data(fromPropertyList: object, format: .xml, options: 0)
 }

@@ -1,6 +1,6 @@
 # Runner network prototype
 
-This directory contains the relay and experimental VM probes. Normal Linux and macOS runner commands use the same relay and socket adapter. Linux requires the [pinned Container fork](../../Docs/linux-runner-network.md); its installed machine CLI integration awaits live validation. The manual template probe retains NAT. Do not treat this as a finished sandbox.
+This directory contains the relay and experimental VM probes. Normal Linux and macOS runner commands use the same relay and socket adapter. Linux requires the [pinned Container fork](../../Docs/linux-runner-network.md); its installed machine CLI has passed a local machine test, while GitHub jobs still need live validation. The manual template probe retains NAT. Do not treat this as a finished sandbox.
 
 Each guest gets one `VZFileHandleNetworkDeviceAttachment`, connected to its own host-side relay through a private Unix datagram socket. The relay uses gVisor's TCP/IP stack via `gvisor-tap-vsock`. A small upstream patch lets yieldd check the numeric destination immediately before opening a host TCP or UDP socket. There is no vmnet interface, host-address translation, or guest-accessible HTTP management service.
 
@@ -76,7 +76,7 @@ ssh -F /dev/null \
 
 ## Apple Container fork
 
-`container.patch` targets Apple Container 1.3.1 at `a9a62e28f6beb88940122a3d7b286f2d5ae8053a`. It adds an experimental `network-socket` machine setting and a typed `ContainerConfiguration.networkSocket` field, replaces the built-in network with the socket attachment, and disables SSH-agent forwarding in that mode. Labels cannot select the attachment. It requires `home-mount=none`; the runtime refuses another network alongside the relay.
+`container.patch` targets Apple Container 1.6.0 at `ca4884f8f3a13b62c90ea2fb3834f214d61fb91c`. It adds an experimental `network-socket` machine setting and a typed `ContainerConfiguration.networkSocket` field, replaces the built-in network with the socket attachment, and disables SSH-agent forwarding in that mode. Labels cannot select the attachment. It requires `home-mount=none`; the runtime refuses another network alongside the relay.
 
 The shared `PacketSocket.swift` is copied into the fork during preparation. No Containerization dependency fork is needed. Dependency checkout paths include their pinned revision and patch digest. Changing a patch selects a new checkout without deleting old work; unexpected edits in a selected checkout still fail validation. The relay build uses a generated module file and disables VCS metadata.
 

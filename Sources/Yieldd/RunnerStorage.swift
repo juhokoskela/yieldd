@@ -158,7 +158,22 @@ struct RunnerStorage: Codable, Equatable {
         guard result.terminationReason == .exit, result.terminationStatus == 0 else {
             throw RunnerStorageError.containerUnavailable(detail: result.stderrText)
         }
-        struct Status: Decodable { let status: String; let appRoot: String }
+        struct Status: Decodable {
+            struct Paths: Decodable { let appRoot: String }
+            enum CodingKeys: String, CodingKey { case status, paths, appRoot }
+            let status: String
+            let appRoot: String
+
+            init(from decoder: any Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                status = try values.decode(String.self, forKey: .status)
+                if values.contains(.paths) {
+                    appRoot = try values.decode(Paths.self, forKey: .paths).appRoot
+                } else {
+                    appRoot = try values.decode(String.self, forKey: .appRoot)
+                }
+            }
+        }
         let status: Status
         do { status = try JSONDecoder().decode(Status.self, from: result.stdout) }
         catch { throw RunnerStorageError.containerUnavailable(detail: describeError(error)) }

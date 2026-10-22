@@ -2,6 +2,8 @@
 
 Linux runner commands now require yieldd's pinned Apple Container fork and the bundled packet relay. Stock Container does not expose this machine network path. There is no NAT fallback.
 
+The fork uses Container 1.6.0 (`ca4884f8f3a13b62c90ea2fb3834f214d61fb91c`), including its image-digest verification and build-context symlink fixes. The packet relay, headless `machine boot` command, and signal-forwarding fix remain local patches. Machine boot uses upstream's non-interactive user setup. The init script also skips SSH socket ownership changes when forwarding is disabled.
+
 Each machine gets its own relay and private socket directory. yieldd creates the machine with `--no-boot`, then checks `machine inspect` for the exact runner ID, relay socket, and disabled home mount. Only a matching configuration can reach the fork's non-interactive `machine boot` command. Boot and first-user setup have the five-minute creation budget, before the shorter Docker readiness probes. This also rejects a patched CLI talking to an older machine service that discarded the socket setting. The runtime forbids combining the socket with vmnet attachments, published ports or sockets, or SSH-agent forwarding.
 
 Relay health is checked before and during guest commands, including long listener waits. Relay loss interrupts the host command and is reported as a network failure, not a successful user stop. Owner death closes the relay's lifetime pipe. Cleanup attempts both relay shutdown and machine deletion; failed cleanup retains the journal and memory reservation. Recovery never boots abandoned guests or invokes their listener helpers; it deletes machines through Container's host control plane. It does not require the fork just to delete a machine. Socket directories are removed only after machine deletion and storage removal have been confirmed.
@@ -30,7 +32,9 @@ The guest image and `connect` arguments are unchanged. Restart connected workers
 
 ## Validation boundary
 
-Automated checks cover the create/inspect/boot ordering, rejection of missing or mismatched socket settings, relay failure during a running host process, bounded shutdown, and crash-directory cleanup. A local XPC test checks process-signal encoding without starting a guest. CI builds the patched CLI, services, and installer without installing them, and checks that headless boot is exposed by the CLI. It does not prove the installed machine CLI's first-boot user setup or GitHub-job execution.
+Automated checks cover the create/inspect/boot ordering, rejection of missing or mismatched socket settings, relay failure during a running host process, bounded shutdown, and crash-directory cleanup. A local XPC test checks process-signal encoding without starting a guest. The init script runs in a host fixture with `SSH_AUTH_SOCK` unset and empty. CI builds the patched CLI, services, and installer without installing them, and checks that headless boot is exposed by the CLI. It does not prove the installed machine CLI's first-boot user setup or GitHub-job execution.
+
+On 2026-10-22, the installed 1.6.0 fork passed `doctor` and Linux `machine-test` on macOS 27.0.1. The test booted through the machine CLI, validated the guest helpers, ran Docker `hello-world`, and confirmed machine cleanup. No GitHub job ran. Controlled host/LAN denial and interruption/recovery checks against the installed fork remain pending.
 
 Before deploying, repeat public DNS/HTTPS and controlled host/LAN denial checks through a real Linux machine, with positive controls showing that the host endpoint and public transport work. Also verify owner interruption, machine deletion, and recovery against the installed fork. Earlier Linux runtime probes bypassed the machine service and CLI, so they are not evidence for this integration.
 
