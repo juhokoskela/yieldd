@@ -91,16 +91,19 @@ func (f *fakeWorld) dispatch(_ context.Context, l *lease, fallback string) (int6
 	if f.beforeDispatch != nil {
 		f.beforeDispatch()
 	}
-	f.run = &workflowRun{ID: 99, DisplayTitle: "Bootstrap " + l.Name, Status: "queued"}
+	f.run = &workflowRun{ID: 99, Path: ".github/workflows/runner-bootstrap.yml", DisplayTitle: "Bootstrap " + l.Name, Status: "queued"}
 	if f.dispatchErr != nil {
 		return 0, f.dispatchErr
 	}
 	return f.run.ID, nil
 }
-func (f *fakeWorld) findRun(context.Context, *lease) (*workflowRun, error) {
+func (f *fakeWorld) findRun(_ context.Context, l *lease) (*workflowRun, error) {
 	f.findCalls++
-	if f.run == nil {
+	if f.run == nil || f.run.DisplayTitle != "Bootstrap "+l.Name {
 		return nil, nil
+	}
+	if f.run.ID <= 0 {
+		return nil, errors.New("discovered bootstrap has an invalid run ID")
 	}
 	copy := *f.run
 	return &copy, nil
@@ -334,13 +337,13 @@ func TestFailedBootstrapCleansUpAndStopsRatherThanRerunning(t *testing.T) {
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	w.run.Status = "completed"
-	w.run.Conclusion = "failure"
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
-		t.Fatal("bootstrap failure ignored")
+	w.run.DisplayTitle = "Runner bootstrap prototype"
+	w.run.Status, w.run.Conclusion = "completed", "startup_failure"
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "concluded startup_failure") {
+		t.Fatalf("startup failure was not reported after cleanup: error=%v", err)
 	}
 	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
-		t.Fatal("failure cleanup or dispatch count")
+		t.Fatalf("failure cleanup or dispatch count: lease=%v runner=%v secret_present=%v dispatches=%d", singleLease(c.state), w.runner, w.secret != "", w.dispatched)
 	}
 }
 
@@ -349,6 +352,7 @@ func TestRecoveryWaitsForCancellationBeforeDeleting(t *testing.T) {
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
+	w.run.DisplayTitle = ""
 	done, err := c.reconcile(t.Context(), true)
 	if err != nil || done {
 		t.Fatal(done, err)
@@ -363,6 +367,9 @@ func TestRecoveryWaitsForCancellationBeforeDeleting(t *testing.T) {
 	w.run.Conclusion = "cancelled"
 	if done, err := c.reconcile(t.Context(), true); err != nil || !done {
 		t.Fatal(done, err)
+	}
+	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 || w.findCalls != 0 {
+		t.Fatalf("recovery left resources or replayed execution: lease=%v runner=%v secret_present=%v dispatches=%d find=%d", singleLease(c.state), w.runner, w.secret != "", w.dispatched, w.findCalls)
 	}
 }
 

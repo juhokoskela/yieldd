@@ -226,6 +226,51 @@ func TestRunSearchPaginatesAndRejectsDuplicateIdentities(t *testing.T) {
 	}
 }
 
+func TestRunSearchRejectsInvalidMatchingRunIDs(t *testing.T) {
+	for _, id := range []int64{0, -1} {
+		t.Run(fmt.Sprint(id), func(t *testing.T) {
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"workflow_runs":[{"id":%d,"display_title":"Bootstrap %s"}]}`, id, fixtureRunner)
+			})
+			run, err := api.findRun(t.Context(), &lease{Name: fixtureRunner})
+			if err == nil || run != nil {
+				t.Fatalf("invalid discovered run ID %d was accepted: run=%v error=%v", id, run, err)
+			}
+		})
+	}
+}
+
+func TestRunSearchLeavesGenericStartupFailureUnconfirmed(t *testing.T) {
+	api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"workflow_runs":[{"id":99,"display_title":"Runner bootstrap prototype","status":"completed","conclusion":"startup_failure"}]}`)
+	})
+	run, err := api.findRun(t.Context(), &lease{Name: fixtureRunner})
+	if err != nil || run != nil {
+		t.Fatalf("generic startup failure matched an unknown dispatch: run=%v error=%v", run, err)
+	}
+}
+
+func TestRunLookupRequiresBootstrapWorkflow(t *testing.T) {
+	for _, path := range []string{".github/workflows/runner-bootstrap.yml", ".github/workflows/ci.yml", ""} {
+		t.Run(path, func(t *testing.T) {
+			api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/repos/example/infrastructure/actions/runs/99" {
+					t.Error("unexpected workflow lookup", r.URL.Path)
+				}
+				fmt.Fprintf(w, `{"id":99,"path":%q,"display_title":"Runner bootstrap prototype","status":"completed","conclusion":"startup_failure"}`, path)
+			})
+			run, err := api.getRun(t.Context(), 99)
+			if path == ".github/workflows/runner-bootstrap.yml" {
+				if err != nil || run == nil || run.ID != 99 || run.Conclusion != "startup_failure" {
+					t.Fatalf("bootstrap startup failure was rejected: run=%v error=%v", run, err)
+				}
+			} else if err == nil || run != nil {
+				t.Fatalf("unexpected workflow path %q was accepted: run=%v error=%v", path, run, err)
+			}
+		})
+	}
+}
+
 func TestRunSearchIgnoresCoordinatorClock(t *testing.T) {
 	serverTime := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
 	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {

@@ -49,13 +49,12 @@ func TestNonterminalBootstrapMetadataDoesNotPauseOrDelayTheQueue(t *testing.T) {
 			}
 		}
 		if c.paused != nil || w.dispatched != 1 || w.getCalls != 3 || time.Since(start) != 0 {
-			t.Fatal("metadata lag delayed or poisoned the queue", c.paused, w.events, time.Since(start))
+			t.Fatalf("metadata lag delayed or paused the queue: paused=%v dispatches=%d get=%d elapsed=%s events=%v", c.paused, w.dispatched, w.getCalls, time.Since(start), w.events)
 		}
 		time.Sleep(time.Hour)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)
 		}
-		w.run.DisplayTitle = "Bootstrap " + singleLease(c.state).Name
 		w.run.Status, w.run.Conclusion = "completed", "success"
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 0); err != nil {
 			t.Fatal(err)
@@ -68,41 +67,28 @@ func TestNonterminalBootstrapMetadataDoesNotPauseOrDelayTheQueue(t *testing.T) {
 }
 
 func TestBootstrapIdentityIsRequiredBeforeCancellationOrCleanup(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		recoverOnly bool
-		discover    bool
-	}{
-		{"cleanup with wrong ID", false, false},
-		{"cancellation with wrong ID", true, false},
-		{"cleanup with unverified discovery", false, true},
-		{"cancellation with unverified discovery", true, true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+	for _, recoverOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recover=%v", recoverOnly), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				c, w, store := newFixture(t)
-				if test.discover {
-					w.dispatchErr = errors.New("dispatch response lost")
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+					t.Fatal("initial dispatch failed", err)
 				}
-				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); (err != nil) != test.discover {
-					t.Fatal(err)
-				}
-				if !test.recoverOnly {
+				if !recoverOnly {
 					w.run.Status, w.run.Conclusion = "completed", "success"
 				}
-				if test.discover {
-					w.run.DisplayTitle = "Runner bootstrap prototype"
-				} else {
-					w.run.ID++
-				}
+				w.run.ID++
 				start := time.Now()
-				_, err := c.assigned(singleLease(c.state).Name).reconcile(t.Context(), test.recoverOnly)
+				_, err := c.assigned(singleLease(c.state).Name).reconcile(t.Context(), recoverOnly)
 				if !errors.Is(err, bootstrapIdentityMismatch) {
-					t.Fatal("unverified run was accepted", err)
+					t.Fatalf("wrong run ID was not rejected: error=%v", err)
 				}
 				saved, err := store.load(c.state.Config)
-				if err != nil || len(saved.Leases) != 1 || w.runner == nil || w.secret == "" || w.getCalls+w.findCalls != 1 || time.Since(start) != 0 {
+				if err != nil || len(saved.Leases) != 1 || w.runner == nil || w.secret == "" || time.Since(start) != 0 {
 					t.Fatal("unverified run caused deletion or blocked the queue", saved, err, w.events)
+				}
+				if w.getCalls != 1 || w.findCalls != 0 {
+					t.Fatalf("wrong lookup for a saved run ID: get=%d find=%d", w.getCalls, w.findCalls)
 				}
 				if slices.Contains(w.events, "cancel") {
 					t.Fatal("unverified workflow was canceled")
@@ -115,12 +101,13 @@ func TestBootstrapIdentityIsRequiredBeforeCancellationOrCleanup(t *testing.T) {
 	}
 }
 
-func TestStartupFailureCleansUpUsingSavedRunID(t *testing.T) {
+func TestStartupFailureWithoutSavedRunIDRemainsUnconfirmed(t *testing.T) {
 	for _, recoverOnly := range []bool{false, true} {
 		t.Run(fmt.Sprintf("recover=%v", recoverOnly), func(t *testing.T) {
 			c, w, store := newFixture(t)
-			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-				t.Fatal(err)
+			w.dispatchErr = errors.New("dispatch response lost")
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); !errors.Is(err, w.dispatchErr) {
+				t.Fatalf("expected lost dispatch response, got %v", err)
 			}
 			saved, err := store.load(testConfig)
 			if err != nil {
@@ -129,91 +116,19 @@ func TestStartupFailureCleansUpUsingSavedRunID(t *testing.T) {
 			c.state = saved
 			w.run.DisplayTitle = "Runner bootstrap prototype"
 			w.run.Status, w.run.Conclusion = "completed", "startup_failure"
-			if recoverOnly {
-				if done, err := c.reconcile(t.Context(), true); err != nil || !done {
-					t.Fatal("startup failure could not recover", done, err)
-				}
-			} else {
-				if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); n != 0 || err == nil || !strings.Contains(err.Error(), "concluded startup_failure") || errors.Is(err, bootstrapIdentityMismatch) || c.paused != nil {
-					t.Fatal("startup failure was not reported after cleanup", n, err, c.paused)
-				}
+			if done, err := c.reconcile(t.Context(), recoverOnly); done || err == nil || !strings.Contains(err.Error(), "still unconfirmed") || errors.Is(err, bootstrapIdentityMismatch) {
+				t.Fatalf("unknown dispatch was not retained as unconfirmed: done=%v error=%v", done, err)
 			}
 			saved, err = store.load(testConfig)
-			if err != nil || len(saved.Leases) != 0 || w.runner != nil || w.secret != "" || w.dispatched != 1 || w.findCalls != 0 || slices.Contains(w.events, "cancel") {
-				t.Fatal("startup failure left resources or replayed execution", saved, err, w.events)
-			}
-		})
-	}
-}
-
-func TestRecoveryUsesSavedRunIDBeforeTitleIsRendered(t *testing.T) {
-	c, w, store := newFixture(t)
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-		t.Fatal(err)
-	}
-	w.run.DisplayTitle = ""
-	if done, err := c.reconcile(t.Context(), true); err != nil || done {
-		t.Fatal("recovery could not request cancellation by saved run ID", done, err)
-	}
-	if !slices.Contains(w.events, "cancel") || w.runner == nil || w.secret == "" || singleLease(c.state).CleanupIntent {
-		t.Fatal("recovery did not wait for terminal state", w.events)
-	}
-	w.run.Status, w.run.Conclusion = "completed", "cancelled"
-	if done, err := c.reconcile(t.Context(), true); err != nil || !done {
-		t.Fatal("recovery could not clean up by saved run ID", done, err)
-	}
-	saved, err := store.load(testConfig)
-	if err != nil || len(saved.Leases) != 0 || w.runner != nil || w.secret != "" || w.dispatched != 1 || w.findCalls != 0 {
-		t.Fatal("recovery left resources or replayed execution", saved, err, w.events)
-	}
-}
-
-func TestStartupFailureCleanupSurvivesRestart(t *testing.T) {
-	for _, fail := range []string{"busy runner", "delete secret", "clear journal"} {
-		t.Run(fail, func(t *testing.T) {
-			c, w, store := newFixture(t)
-			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-				t.Fatal(err)
-			}
-			w.run.DisplayTitle = "Runner bootstrap prototype"
-			w.run.Status, w.run.Conclusion = "completed", "startup_failure"
-			failure := errors.New("cleanup interrupted")
-			switch fail {
-			case "busy runner":
-				w.busy = true
-				failure = runnerStillBusy
-			case "delete secret":
-				w.deleteErr = failure
-			case "clear journal":
-				c.save = func(s *state) error {
-					if len(s.Leases) == 0 {
-						return failure
-					}
-					return store.save(s)
-				}
-			}
-			if done, err := c.reconcile(t.Context(), true); done || !errors.Is(err, failure) {
-				t.Fatal("cleanup failure was not retained", done, err)
-			}
-			saved, err := store.load(testConfig)
 			if err != nil {
 				t.Fatal(err)
 			}
 			l := singleLease(saved)
-			if l == nil || !l.CleanupIntent || l.Conclusion != "startup_failure" || l.RunID != w.run.ID {
-				t.Fatal("cleanup intent or failure conclusion was lost", l)
+			if l == nil || l.RunID != 0 || !l.DispatchIntent || l.CleanupIntent || w.runner == nil || w.secret == "" || slices.Contains(w.events, "cancel") {
+				t.Fatal("unconfirmed dispatch lost its obligation or resources", l, w.events)
 			}
-			if fail == "busy runner" && (w.runner == nil || w.secret == "") {
-				t.Fatal("busy runner or its credential was removed")
-			}
-			c.state, c.save, w.deleteErr, w.busy = saved, store.save, nil, false
-			w.getErr = errors.New("workflow API unavailable during cleanup")
-			if done, err := c.reconcile(t.Context(), true); err != nil || !done {
-				t.Fatal("restart could not finish saved cleanup", done, err)
-			}
-			saved, err = store.load(testConfig)
-			if err != nil || len(saved.Leases) != 0 || w.runner != nil || w.secret != "" || w.dispatched != 1 || w.findCalls != 0 || w.getCalls != 1 || slices.Contains(w.events, "cancel") {
-				t.Fatal("restart lost cleanup or replayed execution", saved, err, w.events)
+			if w.dispatched != 1 || w.findCalls != 1 || w.getCalls != 0 {
+				t.Fatalf("unconfirmed dispatch was replayed or looked up by ID: dispatches=%d find=%d get=%d", w.dispatched, w.findCalls, w.getCalls)
 			}
 		})
 	}

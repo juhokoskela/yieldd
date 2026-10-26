@@ -22,7 +22,6 @@ func TestIdentityPauseRequiresMatchingRunIDAndThenResumes(t *testing.T) {
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || c.paused == nil {
 			t.Fatal("identity mismatch stopped the queue instead of retaining it for verification", n, err)
 		}
-		w.run.DisplayTitle = "Pending bootstrap metadata"
 		time.Sleep(5 * time.Second)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || c.paused == nil {
 			t.Fatal("a mismatched run ID cleared the identity pause", err)

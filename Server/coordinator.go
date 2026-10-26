@@ -583,9 +583,6 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 		if run == nil {
 			return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, retry reconciliation later without redispatching", l.Name)
 		}
-		if !run.matches(l) {
-			return false, identityMismatch(l, run)
-		}
 	} else {
 		if observed != nil {
 			run, err = observed.run, observed.err
@@ -599,6 +596,9 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 		if err != nil {
 			return false, err
 		}
+		if run == nil || run.ID != l.RunID {
+			return false, identityMismatch(l, run)
+		}
 	}
 	if l.RunID == 0 {
 		next := *l
@@ -606,10 +606,7 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 		if err := a.replace(&next); err != nil {
 			return false, err
 		}
-	}
-	l = a.lease
-	if !run.matches(l) {
-		return false, identityMismatch(l, run)
+		l = a.lease
 	}
 	if run.Status != "completed" && !recoverOnly {
 		return false, nil
@@ -627,7 +624,7 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 		if err != nil {
 			return false, fmt.Errorf("recheck bootstrap after cancellation conflict: %w", err)
 		}
-		if !run.matches(l) {
+		if run == nil || run.ID != l.RunID {
 			return false, identityMismatch(l, run)
 		}
 		if run.Status != "completed" {

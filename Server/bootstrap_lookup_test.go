@@ -26,80 +26,73 @@ func (b bootstrapLookup) getRun(ctx context.Context, id int64) (*workflowRun, er
 func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 	for _, pendingKind := range []string{"registered", "expired-local-offer"} {
 		for _, pendingFirst := range []bool{false, true} {
-			for _, savedRunID := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/pending-first=%t/saved-run=%t", pendingKind, pendingFirst, savedRunID), func(t *testing.T) {
-					c, w, store := multipleFallbackFixture(t, 3)
-					c.device.pollNow(0)
-					issued := issueLocal(t, c, 0, 1)
-					hostedName := "yieldd-bootstrap-00000000-0000-0000-0000-000000000001"
-					pendingName := "yieldd-bootstrap-00000000-0000-0000-0000-000000000002"
-					if pendingFirst {
-						hostedName, pendingName = pendingName, hostedName
-					}
-					hosted := &assignment{coordinator: c}
-					if err := hosted.replace(&lease{Name: hostedName, Created: time.Now().UTC()}); err != nil {
+			t.Run(fmt.Sprintf("%s/pending-first=%t", pendingKind, pendingFirst), func(t *testing.T) {
+				c, w, store := multipleFallbackFixture(t, 3)
+				c.device.pollNow(0)
+				issued := issueLocal(t, c, 0, 1)
+				hostedName := "yieldd-bootstrap-00000000-0000-0000-0000-000000000001"
+				pendingName := "yieldd-bootstrap-00000000-0000-0000-0000-000000000002"
+				if pendingFirst {
+					hostedName, pendingName = pendingName, hostedName
+				}
+				hosted := &assignment{coordinator: c}
+				if err := hosted.replace(&lease{Name: hostedName, Created: time.Now().UTC()}); err != nil {
+					t.Fatal(err)
+				}
+				if err := hosted.register(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				next := *hosted.lease
+				next.DispatchIntent, next.JIT = true, ""
+				next.RunID = 101
+				if err := hosted.replace(&next); err != nil {
+					t.Fatal(err)
+				}
+				w.run = &workflowRun{ID: 102, DisplayTitle: "Bootstrap " + hostedName, Status: "completed", Conclusion: "success"}
+				w.runs[101] = w.run
+				pending := &assignment{coordinator: c}
+				l := &lease{Name: pendingName, Created: time.Now().UTC()}
+				if pendingKind == "expired-local-offer" {
+					l.Local = &localLease{DeviceID: testDevice, Slot: 1, Phase: localOffered, Expires: time.Now().UTC().Add(-time.Second)}
+				}
+				if err := pending.replace(l); err != nil {
+					t.Fatal(err)
+				}
+				if pendingKind == "registered" {
+					if err := pending.register(t.Context()); err != nil {
 						t.Fatal(err)
 					}
-					if err := hosted.register(t.Context()); err != nil {
-						t.Fatal(err)
+				}
+				saved, err := store.load(c.state.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.state, c.device = saved, newDeviceQueue(nil)
+				if err := c.device.restore(saved); err != nil {
+					t.Fatal(err)
+				}
+				before := len(w.events)
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || !c.identityPaused() {
+					t.Fatal("restart did not retain the unverified identity", err, c.paused)
+				}
+				for _, event := range w.events[before:] {
+					if event == "register" || event == "secret" || event == "dispatch" || event == "cancel" {
+						t.Fatal("identity mismatch allowed a pending sibling to provision", w.events[before:])
 					}
-					next := *hosted.lease
-					next.DispatchIntent, next.JIT = true, ""
-					if savedRunID {
-						next.RunID = 101
-					}
-					if err := hosted.replace(&next); err != nil {
-						t.Fatal(err)
-					}
-					w.run = &workflowRun{ID: 101, DisplayTitle: "Pending bootstrap metadata", Status: "completed", Conclusion: "success"}
-					if savedRunID {
-						w.run.ID++
-					}
-					w.runs[101] = w.run
-					pending := &assignment{coordinator: c}
-					l := &lease{Name: pendingName, Created: time.Now().UTC()}
-					if pendingKind == "expired-local-offer" {
-						l.Local = &localLease{DeviceID: testDevice, Slot: 1, Phase: localOffered, Expires: time.Now().UTC().Add(-time.Second)}
-					}
-					if err := pending.replace(l); err != nil {
-						t.Fatal(err)
-					}
-					if pendingKind == "registered" {
-						if err := pending.register(t.Context()); err != nil {
-							t.Fatal(err)
-						}
-					}
-					saved, err := store.load(c.state.Config)
-					if err != nil {
-						t.Fatal(err)
-					}
-					c.state, c.device = saved, newDeviceQueue(nil)
-					if err := c.device.restore(saved); err != nil {
-						t.Fatal(err)
-					}
-					before := len(w.events)
-					if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || !c.identityPaused() {
-						t.Fatal("restart did not retain the unverified identity", err, c.paused)
-					}
-					for _, event := range w.events[before:] {
-						if event == "register" || event == "secret" || event == "dispatch" || event == "cancel" {
-							t.Fatal("identity mismatch allowed a pending sibling to provision", w.events[before:])
-						}
-					}
-					if w.dispatched != 0 || c.state.Leases[pendingName] != nil || w.runners[pendingName] != nil {
-						t.Fatal("pending sibling was dispatched instead of cleaned up", w.dispatched, c.state.Leases[pendingName])
-					}
-					if l := c.state.Leases[hostedName]; l == nil || l.CleanupIntent || l.RunID != next.RunID {
-						t.Fatal("unverified execution was changed", l)
-					}
-					if authorization, err := c.renewDevice(t.Context(), issued); err != nil || !authorization.Continue {
-						t.Fatal("identity pause revoked the issued local sibling", authorization, err)
-					}
-					if err := c.completeDevice(t.Context(), issued); err != nil || c.state.Leases[issued.Runner] != nil {
-						t.Fatal("issued local sibling could not finish during the pause", err)
-					}
-				})
-			}
+				}
+				if w.dispatched != 0 || c.state.Leases[pendingName] != nil || w.runners[pendingName] != nil {
+					t.Fatal("pending sibling was dispatched instead of cleaned up", w.dispatched, c.state.Leases[pendingName])
+				}
+				if l := c.state.Leases[hostedName]; l == nil || l.CleanupIntent || l.RunID != next.RunID {
+					t.Fatal("unverified execution was changed", l)
+				}
+				if authorization, err := c.renewDevice(t.Context(), issued); err != nil || !authorization.Continue {
+					t.Fatal("identity pause revoked the issued local sibling", authorization, err)
+				}
+				if err := c.completeDevice(t.Context(), issued); err != nil || c.state.Leases[issued.Runner] != nil {
+					t.Fatal("issued local sibling could not finish during the pause", err)
+				}
+			})
 		}
 	}
 }
