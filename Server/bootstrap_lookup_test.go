@@ -52,6 +52,9 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 						t.Fatal(err)
 					}
 					w.run = &workflowRun{ID: 101, DisplayTitle: "Pending bootstrap metadata", Status: "completed", Conclusion: "success"}
+					if savedRunID {
+						w.run.ID++
+					}
 					w.runs[101] = w.run
 					pending := &assignment{coordinator: c}
 					l := &lease{Name: pendingName, Created: time.Now().UTC()}

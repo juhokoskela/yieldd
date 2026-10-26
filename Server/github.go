@@ -55,7 +55,13 @@ func dispatchRejected(err error) bool {
 }
 
 func (r *workflowRun) matches(l *lease) bool {
-	return r != nil && r.ID > 0 && (l.RunID == 0 || r.ID == l.RunID) && r.DisplayTitle == "Bootstrap "+l.Name
+	if r == nil || r.ID <= 0 {
+		return false
+	}
+	if l.RunID != 0 {
+		return r.ID == l.RunID
+	}
+	return r.DisplayTitle == "Bootstrap "+l.Name
 }
 
 type githubAPI struct {

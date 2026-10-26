@@ -608,18 +608,11 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 		}
 	}
 	l = a.lease
-	if run == nil || run.ID != l.RunID {
-		return false, identityMismatch(l, run)
-	}
-	// Nonterminal metadata may lag dispatch. Never wait on the device request owner.
-	if run.Status != "completed" && !recoverOnly {
-		if a.identityPaused() && !run.matches(l) {
-			return false, identityMismatch(l, run)
-		}
-		return false, nil
-	}
 	if !run.matches(l) {
 		return false, identityMismatch(l, run)
+	}
+	if run.Status != "completed" && !recoverOnly {
+		return false, nil
 	}
 	if run.Status != "completed" {
 		err := a.bootstrap.cancelRun(ctx, l.RunID)

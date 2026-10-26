@@ -121,7 +121,7 @@ func TestDeferredTerminalCleanupStillRequiresMatchingIdentity(t *testing.T) {
 		run.Status, run.Conclusion = "completed", "success"
 	}
 	bad := c.state.Leases[names[2]]
-	w.runs[bad.RunID].DisplayTitle = "Unverified bootstrap"
+	w.runs[bad.RunID].ID++
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 2 || !c.identityPaused() {
 		t.Fatal("deferred cleanup hid an identity mismatch", n, err, c.paused)
 	}

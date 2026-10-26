@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestIdentityPauseRequiresFullVerificationAndThenResumes(t *testing.T) {
+func TestIdentityPauseRequiresMatchingRunIDAndThenResumes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c, w, store := newFixture(t)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
@@ -22,16 +22,15 @@ func TestIdentityPauseRequiresFullVerificationAndThenResumes(t *testing.T) {
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || c.paused == nil {
 			t.Fatal("identity mismatch stopped the queue instead of retaining it for verification", n, err)
 		}
-		w.run.ID = l.RunID
 		w.run.DisplayTitle = "Pending bootstrap metadata"
 		time.Sleep(5 * time.Second)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || c.paused == nil {
-			t.Fatal("an unverified title cleared the identity pause", err)
+			t.Fatal("a mismatched run ID cleared the identity pause", err)
 		}
 		if w.dispatched != 1 || c.state.Leases[l.Name].CleanupIntent || w.secret == "" || w.runner == nil {
 			t.Fatal("unverified execution was redispatched or cleaned up", w.events)
 		}
-		w.run.DisplayTitle = "Bootstrap " + l.Name
+		w.run.ID = l.RunID
 		w.run.Status, w.run.Conclusion = "completed", "success"
 		time.Sleep(10 * time.Second)
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 || c.paused != nil {
@@ -104,6 +103,7 @@ func TestIdentityPauseRetriesWithoutDemandAndWithoutIssuedSiblings(t *testing.T)
 				return fmt.Errorf("identity pause has no autonomous bounded retry: %d calls", w.getCalls-before)
 			}
 			w.run.ID--
+			w.run.DisplayTitle = "Pending bootstrap metadata"
 			return nil
 		}); err != nil {
 			t.Fatal(err)

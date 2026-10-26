@@ -601,7 +601,7 @@ func TestZeroDemandCleansUpOnlyUndispatchedLeases(t *testing.T) {
 }
 
 func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
-	for _, mode := range []string{"running", "read-failed", "wrong-id", "wrong-title", "missing", "non-conflict"} {
+	for _, mode := range []string{"running", "read-failed", "wrong-id", "missing", "non-conflict"} {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				c, w, _ := newFixture(t)
@@ -619,9 +619,6 @@ func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 					case "wrong-id":
 						w.run.Status = "completed"
 						w.run.ID++
-					case "wrong-title":
-						w.run.Status = "completed"
-						w.run.DisplayTitle = "Bootstrap someone-else"
 					case "missing":
 						w.run = nil
 					}
@@ -642,5 +639,24 @@ func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestCancellationConflictCleansUpSavedRunIDWithoutRenderedTitle(t *testing.T) {
+	c, w, store := newFixture(t)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	w.cancelErr = &apiError{status: http.StatusConflict}
+	w.beforeCancel = func() {
+		w.run.DisplayTitle = "Runner bootstrap prototype"
+		w.run.Status, w.run.Conclusion = "completed", "startup_failure"
+	}
+	if done, err := c.reconcile(t.Context(), true); err != nil || !done {
+		t.Fatal("cancellation conflict did not clean up the saved run", done, err)
+	}
+	saved, err := store.load(testConfig)
+	if err != nil || len(saved.Leases) != 0 || w.runner != nil || w.secret != "" || w.dispatched != 1 || w.getCalls != 2 || w.findCalls != 0 {
+		t.Fatal("cancellation conflict lost cleanup or replayed execution", saved, err, w.events)
 	}
 }
