@@ -21,6 +21,7 @@ var runnerNamePattern = regexp.MustCompile(`^yieldd-bootstrap-[0-9a-f]{8}-[0-9a-
 
 type workflowRun struct {
 	ID           int64  `json:"id"`
+	Path         string `json:"path"`
 	DisplayTitle string `json:"display_title"`
 	Status       string `json:"status"`
 	Conclusion   string `json:"conclusion"`
@@ -52,10 +53,6 @@ func dispatchRejected(err error) bool {
 	default:
 		return false
 	}
-}
-
-func (r *workflowRun) matches(l *lease) bool {
-	return r != nil && r.ID > 0 && (l.RunID == 0 || r.ID == l.RunID) && r.DisplayTitle == "Bootstrap "+l.Name
 }
 
 type githubAPI struct {
@@ -206,6 +203,9 @@ func (g *githubAPI) findRun(ctx context.Context, l *lease) (*workflowRun, error)
 			if run.DisplayTitle != "Bootstrap "+l.Name {
 				continue
 			}
+			if run.ID <= 0 {
+				return nil, errors.New("bootstrap run search returned an invalid workflow run ID")
+			}
 			if match != nil && match.ID != run.ID {
 				return nil, errors.New("multiple bootstrap runs match the provisioning lease")
 			}
@@ -245,6 +245,9 @@ func (g *githubAPI) getRun(ctx context.Context, id int64) (*workflowRun, error) 
 	}
 	if err != nil {
 		return nil, err
+	}
+	if run.Path != ".github/workflows/runner-bootstrap.yml" {
+		return nil, errors.New("workflow run does not belong to runner-bootstrap.yml")
 	}
 	return &run, nil
 }

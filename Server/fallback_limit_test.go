@@ -166,6 +166,7 @@ func TestIdentityRecoveryVerifiesEveryAffectedFallback(t *testing.T) {
 		names := c.names()
 		first, second := c.state.Leases[names[0]], c.state.Leases[names[1]]
 		w.runs[first.RunID].ID++
+		w.runs[second.RunID].ID++
 		w.runs[second.RunID].DisplayTitle = "Pending bootstrap metadata"
 		w.runs[second.RunID].Status, w.runs[second.RunID].Conclusion = "completed", "success"
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused == nil {
@@ -176,7 +177,7 @@ func TestIdentityRecoveryVerifiesEveryAffectedFallback(t *testing.T) {
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused == nil || len(c.state.Leases) != 2 {
 			t.Fatal("one verified run cleared another assignment's pause", err)
 		}
-		w.runs[second.RunID].DisplayTitle = "Bootstrap " + second.Name
+		w.runs[second.RunID].ID = second.RunID
 		time.Sleep(10 * time.Second)
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || n != 1 || c.paused != nil || c.state.Leases[first.Name] == nil || w.dispatched != 2 || slices.Contains(w.events, "cancel") {
 			t.Fatal("verified recovery canceled or redispatched ongoing execution", n, err, w.events)

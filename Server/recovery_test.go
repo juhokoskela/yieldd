@@ -200,6 +200,24 @@ func (b bootstrapWithRunAPI) findRun(ctx context.Context, l *lease) (*workflowRu
 	return b.api.findRun(ctx, l)
 }
 
+func TestRecoveryRetainsRunFromAnotherWorkflow(t *testing.T) {
+	c, w, _ := newFixture(t)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	api := testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":99,"path":".github/workflows/ci.yml","status":"in_progress"}`)
+	})
+	c.bootstrap = bootstrapWithRunAPI{bootstrapAPI: w, api: api}
+	before := len(w.events)
+	if done, err := c.reconcile(t.Context(), true); done || err == nil {
+		t.Fatalf("another workflow was accepted for recovery: done=%v error=%v", done, err)
+	}
+	if singleLease(c.state).CleanupIntent || w.runner == nil || w.secret == "" || len(w.events) != before {
+		t.Fatal("another workflow caused cancellation or cleanup", w.events)
+	}
+}
+
 func TestRestartDoesNotCancelBootstrapBasedOnAge(t *testing.T) {
 	serverNow := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
 	for _, status := range []string{"queued", "in_progress"} {
@@ -224,7 +242,7 @@ func TestRestartDoesNotCancelBootstrapBasedOnAge(t *testing.T) {
 					c.state = saved
 					api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
 						response.Header().Set("Date", serverNow.Format(http.TimeFormat))
-						run := map[string]any{"id": 99, "display_title": "Bootstrap " + singleLease(saved).Name, "status": status, "created_at": serverNow.Add(-age)}
+						run := map[string]any{"id": 99, "path": ".github/workflows/runner-bootstrap.yml", "display_title": "Bootstrap " + singleLease(saved).Name, "status": status, "created_at": serverNow.Add(-age)}
 						if discover {
 							json.NewEncoder(response).Encode(map[string]any{"workflow_runs": []any{run}})
 						} else {
@@ -478,7 +496,8 @@ func TestFailedBootstrapConclusionSurvivesInterruptedCleanup(t *testing.T) {
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	w.run.Status, w.run.Conclusion = "completed", "failure"
+	w.run.DisplayTitle = "Runner bootstrap prototype"
+	w.run.Status, w.run.Conclusion = "completed", "startup_failure"
 	w.deleteErr = errors.New("cleanup interrupted")
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); !errors.Is(err, w.deleteErr) {
 		t.Fatal(err)
@@ -487,12 +506,12 @@ func TestFailedBootstrapConclusionSurvivesInterruptedCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !singleLease(saved).CleanupIntent || singleLease(saved).Conclusion != "failure" {
+	if !singleLease(saved).CleanupIntent || singleLease(saved).Conclusion != "startup_failure" {
 		t.Fatal("lost terminal conclusion")
 	}
 	c.state, w.deleteErr = saved, nil
 	w.getErr = errors.New("workflow API unavailable during cleanup")
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "concluded failure") {
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "concluded startup_failure") {
 		t.Fatal("bootstrap failure not preserved", err)
 	}
 	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
@@ -601,7 +620,7 @@ func TestZeroDemandCleansUpOnlyUndispatchedLeases(t *testing.T) {
 }
 
 func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
-	for _, mode := range []string{"running", "read-failed", "wrong-id", "wrong-title", "missing", "non-conflict"} {
+	for _, mode := range []string{"running", "read-failed", "wrong-id", "missing", "non-conflict"} {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				c, w, _ := newFixture(t)
@@ -619,9 +638,6 @@ func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 					case "wrong-id":
 						w.run.Status = "completed"
 						w.run.ID++
-					case "wrong-title":
-						w.run.Status = "completed"
-						w.run.DisplayTitle = "Bootstrap someone-else"
 					case "missing":
 						w.run = nil
 					}
@@ -642,5 +658,24 @@ func TestCancellationConflictRetainsNonterminalOrUnverifiedRuns(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestCancellationConflictCleansUpSavedRunIDWithoutRenderedTitle(t *testing.T) {
+	c, w, store := newFixture(t)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	w.cancelErr = &apiError{status: http.StatusConflict}
+	w.beforeCancel = func() {
+		w.run.DisplayTitle = "Runner bootstrap prototype"
+		w.run.Status, w.run.Conclusion = "completed", "startup_failure"
+	}
+	if done, err := c.reconcile(t.Context(), true); err != nil || !done {
+		t.Fatal("cancellation conflict did not clean up the saved run", done, err)
+	}
+	saved, err := store.load(testConfig)
+	if err != nil || len(saved.Leases) != 0 || w.runner != nil || w.secret != "" || w.dispatched != 1 || w.getCalls != 2 || w.findCalls != 0 {
+		t.Fatalf("cancellation conflict lost cleanup or replayed execution: state=%v error=%v dispatches=%d get=%d find=%d events=%v", saved, err, w.dispatched, w.getCalls, w.findCalls, w.events)
 	}
 }
