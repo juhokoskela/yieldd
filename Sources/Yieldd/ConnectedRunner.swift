@@ -57,7 +57,7 @@ struct ConnectedRunner {
             failure = authorization.failure ?? operation
         }
         authorization.stop()
-        if let failure, isContainedConnectedFailure(failure), (failure as? ConnectedRunnerError) != .http(410) {
+        if let failure, isContainedConnectedFailure(failure), (failure as? ConnectedRunnerError)?.httpStatus != 410 {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         if machineMayExist {
@@ -101,7 +101,7 @@ struct ConnectedAssignmentFailure: Error, LocalizedError {
 
 func isContainedConnectedFailure(_ error: any Error) -> Bool {
     error is ConnectedExecutionError || error is ConnectedAssignmentFailure
-        || (error as? ConnectedRunnerError) == .http(410)
+        || (error as? ConnectedRunnerError)?.httpStatus == 410
 }
 
 func recoverConnectedRunner(
@@ -125,7 +125,7 @@ func recoverConnectedRunner(
 }
 
 private func acknowledgeConnectedRunner(_ offer: ConnectedOffer, complete: (ConnectedOffer) throws -> Void) throws {
-    do { try complete(offer) } catch ConnectedRunnerError.http(409) {
+    do { try complete(offer) } catch ConnectedRunnerError.http(409, _, _) {
         throw ConnectedRunnerError.registrationReconciliationRequired(offer.runner)
     }
 }

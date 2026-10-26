@@ -72,7 +72,7 @@ func runConnectedClient(
 func isTransientConnectedFailure(_ error: any Error) -> Bool {
     if let error = error as? ConnectedRunnerError {
         switch error {
-        case .transport, .http(429), .http(500), .http(502), .http(503), .http(504): return true
+        case .transport, .http(429, _, _), .http(500, _, _), .http(502, _, _), .http(503, _, _), .http(504, _, _): return true
         default: return false
         }
     }

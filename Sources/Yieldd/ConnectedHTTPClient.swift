@@ -110,9 +110,33 @@ final class ConnectedHTTPClient {
         try check()
         let (status, data) = try response.result()
         guard status == 200 || (action == "poll" && status == 204) else {
-            throw ConnectedRunnerError.http(status)
+            throw ConnectedRunnerError.http(status,
+                request: "POST /\(path) (\(platform.rawValue) ARM64 slot \(slot))",
+                reason: Self.rejectionReason(in: data))
         }
         return (status, data)
+    }
+
+    private static func rejectionReason(in data: Data) -> String? {
+        guard data.count <= 512,
+              let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        // Only echo fixed protocol errors; other response bodies can contain credentials.
+        switch message {
+        case "unauthorized", "POST required", "invalid request", "invalid worker slot", "not found", "404 page not found",
+             "one poll per worker slot",
+             "device identity does not match",
+             "device or coordinator identity does not match",
+             "coordinator queue identity does not match; retain local recovery state",
+             "only an unaccepted offer for this worker can be declined",
+             "offer is no longer available; clean up without starting a runner",
+             "assignment belongs to another worker slot",
+             "coordinator is stopping; retry with the same recovery state",
+             "coordinator operation failed; retain local recovery state",
+             "GitHub has not confirmed an active runner; execution authorization was not renewed":
+            return message
+        default:
+            return nil
+        }
     }
 }
 

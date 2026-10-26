@@ -287,7 +287,7 @@ func connectedGuestFailureDoesNotHideCleanupFailure(_ stage: String) throws {
     let backend = ConnectedBackend(failure: stage == "destroy" ? .destroy : nil)
     backend.failAfterJobStart(ConnectedFailureKind.timeout.error)
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
-        if stage == "acknowledge" { throw ConnectedRunnerError.http(403) }
+        if stage == "acknowledge" { throw ConnectedRunnerError.http(403, request: "POST /v1/complete (linux ARM64 slot 0)") }
         if stage == "journal" {
             try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.directory.path)
         }
@@ -324,7 +324,7 @@ func connectedGuestFailureWaitsForAcknowledgementBeforePollingAnotherAssignment(
     }, complete: { _ in
         acknowledgements += 1
         if acknowledgements == 1 { throw ConnectedRunnerError.transport }
-        if acknowledgements == 2 { throw ConnectedRunnerError.http(503) }
+        if acknowledgements == 2 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
     }, wait: { #expect($0 == 0.5) })
     #expect(throws: ConnectedLoopTestStop.finished) {
         try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
@@ -509,14 +509,14 @@ func connectedPermanentRenewalErrorIsNotContainedAfterJobStart() throws {
     var now: TimeInterval = 0
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
         wait: { #expect($0 == 0.5) }, renew: { _, _ in
-            if now >= 30 { throw ConnectedRunnerError.http(401) }
+            if now >= 30 { throw ConnectedRunnerError.http(401, request: "POST /v1/renew (linux ARM64 slot 0)") }
             return true
         }, currentTime: { now })
     let authorization = runner.authorization
     backend.onStatus = { [unowned backend] in
         if backend.statusPolls == 2 { now = 31; try authorization.check() }
     }
-    #expect(throws: ConnectedRunnerError.http(401)) { try runner.run(connectedOffer, memory: .full) }
+    #expect(throws: ConnectedRunnerError.http(401, request: "POST /v1/renew (linux ARM64 slot 0)")) { try runner.run(connectedOffer, memory: .full) }
     #expect(backend.destroyed)
     #expect(try fixture.store.load() == nil)
 }
@@ -595,7 +595,7 @@ func expiredConnectedOfferReleasesItsJournalWithoutCreatingAGuest() throws {
     defer { fixture.remove() }
     let backend = ConnectedBackend()
     var acknowledged = false
-    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410) },
+    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410, request: "POST /v1/accept (linux ARM64 slot 0)") },
         complete: { _ in acknowledged = true })
     try runner.run(connectedOffer, memory: .full)
     #expect(backend.creates == 0 && !backend.destroyed && acknowledged)
@@ -610,7 +610,7 @@ func expiredConnectedOfferCanPollAgainAfterTransientAcknowledgementFailure() thr
     var acknowledgements = 0
     var polls = 0
     var releases = 0
-    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410) },
+    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410, request: "POST /v1/accept (linux ARM64 slot 0)") },
         complete: { _ in
             acknowledgements += 1
             if acknowledgements == 1 { throw ConnectedRunnerError.transport }
@@ -663,7 +663,7 @@ func connectedClientRetriesOnlyThroughRecovery(_ stage: String) throws {
             polls += 1
             events.append("poll")
             if polls > 1 { throw TestFailure.runnerJob }
-            if stage == "poll" { throw ConnectedRunnerError.http(503) }
+            if stage == "poll" { throw ConnectedRunnerError.http(503, request: "POST /v1/poll (linux ARM64 slot 0)") }
             return connectedOffer
         }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, release in
             events.append("run")
@@ -723,7 +723,7 @@ func connectedClientRetainsCapacityUntilRecoverySucceeds() throws {
             recoveries += 1
             guard recoveries > 1 else { return }
             #expect(!memory.isAvailable(reserving: 8 * gib))
-            if recoveries == 2 { throw ConnectedRunnerError.http(503) }
+            if recoveries == 2 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
         }, acquire: { try memory.tryAcquire(reserving: 12 * gib) }, release: {
             releases += 1
             memory.release($0)
@@ -779,7 +779,7 @@ func connectedClientRecoversTransientCleanupBeforeReportingPermanentOperationFai
     #expect(throws: TestFailure.runnerJob) {
         try runConnectedClient(checkCancellation: {}, recover: {
             recoveryCalls += 1
-            if recoveryCalls == 2 { throw ConnectedRunnerError.http(503) }
+            if recoveryCalls == 2 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
         }, acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in }, poll: {
             polls += 1
             return connectedOffer
@@ -799,7 +799,8 @@ func connectedRecoveryReportsIdentityLossAndRequiresExactOperatorConfirmation() 
     try fixture.store.save(ConnectedLease(server: "https://EXAMPLE.com:443/", deviceID: connectedOffer.owner, offer: connectedOffer))
     let backend = ConnectedBackend()
     let runner = fixture.runner(backend: backend, accept: { _ in Issue.record("Recovery must not accept"); return "" },
-        complete: { _ in throw ConnectedRunnerError.http(409) })
+        complete: { _ in throw ConnectedRunnerError.http(409, request: "POST /v1/complete (linux ARM64 slot 0)",
+            reason: "coordinator queue identity does not match; retain local recovery state") })
     #expect(throws: ConnectedRunnerError.confirmationMismatch) { try runner.recover(confirmRegistrationRemoved: "wrong") }
     #expect(!backend.destroyed)
     #expect(throws: ConnectedRunnerError.registrationReconciliationRequired(connectedOffer.runner)) { try runner.recover() }
