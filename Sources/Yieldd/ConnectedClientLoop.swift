@@ -9,7 +9,7 @@ func runConnectedClient(
     decline: (ConnectedOffer) throws -> Void,
     run: (ConnectedOffer, RunnerMemoryAllocation, () -> Void) throws -> Void,
     wait: (TimeInterval) throws -> Void,
-    retrying: () -> Void,
+    retrying: (any Error) -> Void,
     available: () -> Bool = { true },
     blocked: () -> Void = {}
 ) throws {
@@ -27,7 +27,7 @@ func runConnectedClient(
                 releaseCapacity()
                 return
             } catch where isTransientConnectedFailure(error) {
-                retrying()
+                retrying(error)
                 try wait(5)
             }
         }
@@ -61,7 +61,7 @@ func runConnectedClient(
                 continue
             }
             guard isTransientConnectedFailure(error) else { throw error }
-            retrying()
+            retrying(error)
             try wait(5)
             // Never retry acceptance or execution. Reconcile the recorded assignment first.
             try recoverWithRetry()
@@ -73,6 +73,7 @@ func isTransientConnectedFailure(_ error: any Error) -> Bool {
     if let error = error as? ConnectedRunnerError {
         switch error {
         case .transport, .http(429, _, _), .http(500, _, _), .http(502, _, _), .http(503, _, _), .http(504, _, _): return true
+        case .http(409, _, "one poll per worker slot"): return true
         default: return false
         }
     }

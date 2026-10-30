@@ -123,8 +123,8 @@ struct ConnectCommand: ParsableCommand {
                     }, release: memory.release, poll: client.poll, decline: client.decline, run: { offer, allocation, release in
                         print("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                         try runner.run(offer, memory: allocation, releaseCapacity: release)
-                    }, wait: stop.wait, retrying: {
-                        print("Coordinator request failed; retrying in five seconds. Outstanding \(platform.rawValue) cleanup must finish before new work.")
+                    }, wait: stop.wait, retrying: { error in
+                        print("Retrying \(platform.rawValue) slot \(worker.slot) in five seconds: \(describeError(error))")
                     }, available: {
                         memory.isAvailable(reserving: platform.memoryReservationBytes)
                     }, blocked: {

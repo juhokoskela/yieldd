@@ -118,7 +118,7 @@ func connectedHTTPErrorsIdentifyTheRequestAndCoordinatorReason(_ platform: Runne
     } catch {
         let prefix = platform == .linux ? "/v1/" : "/v1/macos/"
         #expect(describeError(error) == "The coordinator returned HTTP 409 for POST \(prefix)\(action) (\(platform.rawValue) ARM64 slot 2): \(reason). Any unacknowledged cleanup remains in the local journal.")
-        #expect(!isTransientConnectedFailure(error))
+        #expect(isTransientConnectedFailure(error) == (action == "poll"))
         #expect(!describeError(error).contains(server.token))
     }
 }
