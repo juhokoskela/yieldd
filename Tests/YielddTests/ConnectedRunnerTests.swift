@@ -827,6 +827,41 @@ func connectedClientRecoversTransientCleanupBeforeReportingPermanentOperationFai
 }
 
 @Test
+func connectedStartupFailureIsReportedBeforeCleanupRetries() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    let failure = ConnectedFailureKind.timeout.error
+    backend.statusFailure = failure
+    var events: [String] = []
+    var acknowledgements = 0
+    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
+        events.append("complete")
+        acknowledgements += 1
+        if acknowledgements < 3 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
+    })
+    runner.stateChanged = {
+        if case let .executionStopped(_, reason) = $0 {
+            #expect(reason == describeError(failure))
+            events.append("failure")
+        }
+    }
+    var polls = 0
+    #expect(throws: ProcessExecutionError.self) {
+        try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
+            acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in }, poll: {
+                polls += 1
+                guard polls == 1 else { throw TestFailure.unexpectedBackendCall }
+                return connectedOffer
+            }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
+                try runner.run(offer, memory: memory, releaseCapacity: release)
+            }, wait: { #expect($0 == 5); events.append("wait") }, retrying: { _ in events.append("retry") })
+    }
+    #expect(events == ["failure", "complete", "complete", "retry", "wait", "complete"])
+    #expect(try fixture.store.load() == nil)
+}
+
+@Test
 func connectedRecoveryReportsIdentityLossAndRequiresExactOperatorConfirmation() throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }

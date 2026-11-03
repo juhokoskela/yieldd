@@ -57,7 +57,7 @@ struct ConnectedRunner {
             failure = authorization.failure ?? operation
         }
         authorization.stop()
-        if let failure, isContainedConnectedFailure(failure), (failure as? ConnectedRunnerError)?.httpStatus != 410 {
+        if let failure, !isCancellation(failure), (failure as? ConnectedRunnerError)?.httpStatus != 410 {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         if machineMayExist {

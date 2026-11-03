@@ -115,7 +115,7 @@ extension ProcessExecutionError: LocalizedError {
         case let .timedOut(request, result):
             processFailureDescription(
                 executableURL: request.executableURL,
-                reason: "timed out after \(request.timeout ?? 0) seconds",
+                reason: "timed out after \(request.timeout ?? 0) seconds\(timeoutSubcommand(request))",
                 stderr: result.stderrText
             )
         case let .nonZeroExit(request, result):
@@ -130,6 +130,19 @@ extension ProcessExecutionError: LocalizedError {
                 reason: "was terminated by signal \(result.terminationStatus)",
                 stderr: result.stderrText
             )
+        }
+    }
+
+    private func timeoutSubcommand(_ request: ProcessRequest) -> String {
+        guard request.executableURL.lastPathComponent == "container" else { return "" }
+        // Only fixed subcommands are safe to report; later arguments can contain credentials.
+        let subcommand = request.arguments.prefix(2).joined(separator: " ")
+        switch subcommand {
+        case "machine create", "machine inspect", "machine boot", "machine run", "machine list", "machine delete",
+             "system start", "system status":
+            return " (\(subcommand))"
+        default:
+            return ""
         }
     }
 
