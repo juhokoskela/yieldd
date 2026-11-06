@@ -121,8 +121,14 @@ struct ConnectedRunnerStore {
 enum ConnectedRunnerError: Error, Equatable, LocalizedError {
     case previousVersionState
     case invalidOffer, invalidState, invalidJIT, invalidServer, invalidToken, recoveryRequired, identityChanged
-    case responseTooLarge, transport, http(Int)
+    case responseTooLarge, transport
+    case http(Int, request: String, reason: String? = nil)
     case registrationReconciliationRequired(String), confirmationMismatch
+
+    var httpStatus: Int? {
+        guard case let .http(status, _, _) = self else { return nil }
+        return status
+    }
 
     var errorDescription: String? {
         switch self {
@@ -136,7 +142,8 @@ enum ConnectedRunnerError: Error, Equatable, LocalizedError {
         case .identityChanged: "The connected runner journal belongs to another server or device. Reconnect with its original settings to recover it."
         case .responseTooLarge: "The coordinator response exceeded its size limit."
         case .transport: "The coordinator request failed. Outstanding cleanup remains in the local journal."
-        case let .http(status): "The coordinator returned HTTP \(status). Any unacknowledged cleanup remains in the local journal."
+        case let .http(status, request, reason):
+            "The coordinator returned HTTP \(status) for \(request)\(reason.map { ": \($0)" } ?? ""). Any unacknowledged cleanup remains in the local journal."
         case let .registrationReconciliationRequired(runner):
             "The coordinator no longer recognizes this assignment. Restore its original state, or manually remove GitHub runner \(runner), then run connect with --confirm-registration-removed \(runner) and the original server and device ID."
         case .confirmationMismatch: "The confirmed runner must match the outstanding connected journal. No recovery state was cleared."

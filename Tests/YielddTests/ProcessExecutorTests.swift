@@ -151,6 +151,23 @@ func requireSuccessPreservesSignalResult() {
     }
 }
 
+@Test(arguments: [["machine", "inspect"], ["machine", "run"], ["system", "status"]])
+func timeoutReportsTheContainerSubcommandWithoutArgumentsOrInput(_ subcommand: [String]) {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/local/bin/container"),
+        arguments: subcommand + ["--name", "private-runner", "--", "secret-token"],
+        standardInput: Data("private-jit".utf8), timeout: 10)
+    let error = ProcessExecutionError.timedOut(request: request, result: processResult(stdout: "private-output"))
+    #expect(describeError(error) == "Process /usr/local/bin/container timed out after 10.0 seconds (\(subcommand.joined(separator: " "))).")
+}
+
+@Test(arguments: [[], ["machine", "secret-token"], ["machine", "run\nsecret-token"], ["--token", "secret-token"]])
+func timeoutOmitsUnrecognizedContainerArguments(_ arguments: [String]) {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/local/bin/container"),
+        arguments: arguments, timeout: 10)
+    let error = ProcessExecutionError.timedOut(request: request, result: processResult())
+    #expect(describeError(error) == "Process /usr/local/bin/container timed out after 10.0 seconds.")
+}
+
 @Test
 func reportsLaunchFailure() {
     let request = ProcessRequest(

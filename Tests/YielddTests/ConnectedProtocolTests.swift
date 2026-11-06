@@ -62,5 +62,6 @@ func connectedSwiftClientUsesGoRouterAcrossPlatformsAndWorkers() throws {
     try active[0].0.complete(active[0].1)
     let declined = try #require(try active[0].0.poll())
     try active[0].0.decline(declined)
-    #expect(throws: ConnectedRunnerError.http(410)) { try active[0].0.accept(declined) }
+    #expect(throws: ConnectedRunnerError.http(410, request: "POST /v1/accept (linux ARM64 slot 0)",
+        reason: "offer is no longer available; clean up without starting a runner")) { try active[0].0.accept(declined) }
 }

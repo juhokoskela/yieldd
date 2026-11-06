@@ -30,7 +30,7 @@ func recoverConnectedPlatforms(
                 confirmed = true
                 break
             } catch where isTransientConnectedFailure(error) {
-                print("Coordinator request failed; retrying in five seconds. Outstanding cleanup must finish before new work.")
+                print("Retrying \(platform.rawValue) slot \(store.slot) cleanup in five seconds: \(describeError(error))")
                 try stop.wait(for: 5)
             }
         }

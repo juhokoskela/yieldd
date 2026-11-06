@@ -287,7 +287,7 @@ func connectedGuestFailureDoesNotHideCleanupFailure(_ stage: String) throws {
     let backend = ConnectedBackend(failure: stage == "destroy" ? .destroy : nil)
     backend.failAfterJobStart(ConnectedFailureKind.timeout.error)
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
-        if stage == "acknowledge" { throw ConnectedRunnerError.http(403) }
+        if stage == "acknowledge" { throw ConnectedRunnerError.http(403, request: "POST /v1/complete (linux ARM64 slot 0)") }
         if stage == "journal" {
             try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.directory.path)
         }
@@ -324,7 +324,7 @@ func connectedGuestFailureWaitsForAcknowledgementBeforePollingAnotherAssignment(
     }, complete: { _ in
         acknowledgements += 1
         if acknowledgements == 1 { throw ConnectedRunnerError.transport }
-        if acknowledgements == 2 { throw ConnectedRunnerError.http(503) }
+        if acknowledgements == 2 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
     }, wait: { #expect($0 == 0.5) })
     #expect(throws: ConnectedLoopTestStop.finished) {
         try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
@@ -341,7 +341,7 @@ func connectedGuestFailureWaitsForAcknowledgementBeforePollingAnotherAssignment(
                 throw ConnectedLoopTestStop.finished
             }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
                 try runner.run(offer, memory: memory, releaseCapacity: release)
-            }, wait: { #expect($0 == 5) }, retrying: { retries += 1 })
+            }, wait: { #expect($0 == 5) }, retrying: { _ in retries += 1 })
     }
     #expect(polls == 3 && backend.creates == 2 && releases == 2 && acknowledgements == 4 && retries == 1)
     #expect(try fixture.store.load() == nil)
@@ -394,7 +394,7 @@ func connectedGuestTimeoutDoesNotCancelHealthySibling() throws {
                 }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
                     try runner.run(offer, memory: memory, releaseCapacity: release)
                     if offer.slot == 1 { siblingFinished.withLock { $0 = true } }
-                }, wait: { _ in Issue.record("Unexpected client backoff") }, retrying: { Issue.record("Unexpected retry") })
+                }, wait: { _ in Issue.record("Unexpected client backoff") }, retrying: { _ in Issue.record("Unexpected retry") })
         } catch ConnectedLoopTestStop.finished {}
         try stop.check()
         #expect(backend.creates == 1 && backend.destroyed)
@@ -492,7 +492,7 @@ func connectedPreJobFailuresStopPollingInsteadOfReacceptingDemand(_ stage: Conne
                 return connectedOffer
             }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
                 try runner.run(offer, memory: memory, releaseCapacity: release)
-            }, wait: { _ in Issue.record("Unexpected client backoff") }, retrying: { Issue.record("Unexpected retry") })
+            }, wait: { _ in Issue.record("Unexpected client backoff") }, retrying: { _ in Issue.record("Unexpected retry") })
     })
     #expect(describeError(error) == describeError(expected))
     #expect(polls == 1 && backend.destroyed && acknowledged)
@@ -509,14 +509,14 @@ func connectedPermanentRenewalErrorIsNotContainedAfterJobStart() throws {
     var now: TimeInterval = 0
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
         wait: { #expect($0 == 0.5) }, renew: { _, _ in
-            if now >= 30 { throw ConnectedRunnerError.http(401) }
+            if now >= 30 { throw ConnectedRunnerError.http(401, request: "POST /v1/renew (linux ARM64 slot 0)") }
             return true
         }, currentTime: { now })
     let authorization = runner.authorization
     backend.onStatus = { [unowned backend] in
         if backend.statusPolls == 2 { now = 31; try authorization.check() }
     }
-    #expect(throws: ConnectedRunnerError.http(401)) { try runner.run(connectedOffer, memory: .full) }
+    #expect(throws: ConnectedRunnerError.http(401, request: "POST /v1/renew (linux ARM64 slot 0)")) { try runner.run(connectedOffer, memory: .full) }
     #expect(backend.destroyed)
     #expect(try fixture.store.load() == nil)
 }
@@ -595,7 +595,7 @@ func expiredConnectedOfferReleasesItsJournalWithoutCreatingAGuest() throws {
     defer { fixture.remove() }
     let backend = ConnectedBackend()
     var acknowledged = false
-    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410) },
+    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410, request: "POST /v1/accept (linux ARM64 slot 0)") },
         complete: { _ in acknowledged = true })
     try runner.run(connectedOffer, memory: .full)
     #expect(backend.creates == 0 && !backend.destroyed && acknowledged)
@@ -610,7 +610,7 @@ func expiredConnectedOfferCanPollAgainAfterTransientAcknowledgementFailure() thr
     var acknowledgements = 0
     var polls = 0
     var releases = 0
-    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410) },
+    let runner = fixture.runner(backend: backend, accept: { _ in throw ConnectedRunnerError.http(410, request: "POST /v1/accept (linux ARM64 slot 0)") },
         complete: { _ in
             acknowledgements += 1
             if acknowledgements == 1 { throw ConnectedRunnerError.transport }
@@ -627,7 +627,7 @@ func expiredConnectedOfferCanPollAgainAfterTransientAcknowledgementFailure() thr
                 return connectedOffer
             }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
                 try runner.run(offer, memory: memory, releaseCapacity: release)
-            }, wait: { _ in Issue.record("Unexpected backoff") }, retrying: { Issue.record("Unexpected retry") })
+            }, wait: { _ in Issue.record("Unexpected backoff") }, retrying: { _ in Issue.record("Unexpected retry") })
     }
     #expect(polls == 2 && backend.creates == 0)
 }
@@ -663,13 +663,13 @@ func connectedClientRetriesOnlyThroughRecovery(_ stage: String) throws {
             polls += 1
             events.append("poll")
             if polls > 1 { throw TestFailure.runnerJob }
-            if stage == "poll" { throw ConnectedRunnerError.http(503) }
+            if stage == "poll" { throw ConnectedRunnerError.http(503, request: "POST /v1/poll (linux ARM64 slot 0)") }
             return connectedOffer
         }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, release in
             events.append("run")
             release()
             if stage == "run" { throw ConnectedRunnerError.transport }
-        }, wait: { _ in events.append("wait") }, retrying: {})
+        }, wait: { _ in events.append("wait") }, retrying: { _ in })
     }
     #expect(events.filter { $0 == "acquire" }.count == events.filter { $0 == "release" }.count)
     #expect(events.filter { $0 == "run" }.count == (stage == "poll" ? 0 : 1))
@@ -678,6 +678,40 @@ func connectedClientRetriesOnlyThroughRecovery(_ stage: String) throws {
         let lastPoll = try #require(events.lastIndex(of: "poll"))
         #expect(events[(firstPoll + 1)..<lastPoll].contains("recover"))
     }
+}
+
+@Test(arguments: ["one poll per worker slot", "coordinator queue identity does not match; retain local recovery state", ""])
+func connectedClientRetriesConfirmedPollContentionWithoutRetryingIdentityConflicts(_ reason: String) throws {
+    let failure = ConnectedRunnerError.http(409, request: "POST /v1/poll (linux ARM64 slot 0)",
+        reason: reason.isEmpty ? nil : reason)
+    let shouldRetry = reason == "one poll per worker slot"
+    var events: [String] = []
+    var polls = 0
+    do {
+        try runConnectedClient(checkCancellation: {}, recover: { events.append("recover") },
+            acquire: { Issue.record("Polling must not reserve memory"); return nil },
+            release: { _ in Issue.record("No memory was reserved") }, poll: {
+                events.append("poll")
+                polls += 1
+                if polls == 1 { throw failure }
+                throw ConnectedLoopTestStop.finished
+            }, decline: { _ in Issue.record("No offer was returned") },
+            run: { _, _, _ in Issue.record("No offer was returned") }, wait: {
+                #expect($0 == 5)
+                events.append("wait")
+            }, retrying: { error in
+                #expect(error as? ConnectedRunnerError == failure)
+                events.append("retry")
+            })
+        Issue.record("Expected polling to stop")
+    } catch {
+        if shouldRetry {
+            #expect(error is ConnectedLoopTestStop)
+        } else {
+            #expect(error as? ConnectedRunnerError == failure)
+        }
+    }
+    #expect(events == (shouldRetry ? ["recover", "poll", "retry", "wait", "recover", "poll"] : ["recover", "poll"]))
 }
 
 @Test
@@ -700,7 +734,7 @@ func connectedClientRetainsCapacityWhenGuestDestructionFails() throws {
             memory.release(reservation)
         }, poll: { connectedOffer }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { offer, allocation, release in
             try runner.run(offer, memory: allocation, releaseCapacity: release)
-        }, wait: { _ in Issue.record("A permanent destruction failure must escape") }, retrying: {})
+        }, wait: { _ in Issue.record("A permanent destruction failure must escape") }, retrying: { _ in })
     }
     #expect(backend.creates == 1 && !backend.destroyed)
     #expect(releases == 0)
@@ -723,7 +757,7 @@ func connectedClientRetainsCapacityUntilRecoverySucceeds() throws {
             recoveries += 1
             guard recoveries > 1 else { return }
             #expect(!memory.isAvailable(reserving: 8 * gib))
-            if recoveries == 2 { throw ConnectedRunnerError.http(503) }
+            if recoveries == 2 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
         }, acquire: { try memory.tryAcquire(reserving: 12 * gib) }, release: {
             releases += 1
             memory.release($0)
@@ -734,7 +768,7 @@ func connectedClientRetainsCapacityUntilRecoverySucceeds() throws {
                 throw CancellationError()
             }
             return connectedOffer
-        }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in throw ConnectedRunnerError.transport }, wait: { _ in }, retrying: {})
+        }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in throw ConnectedRunnerError.transport }, wait: { _ in }, retrying: { _ in })
     }
     #expect(recoveries == 3 && polls == 2 && releases == 1)
 }
@@ -768,7 +802,7 @@ func connectedClientBoundsEmptyPollsWithoutReservingMemory() throws {
         }, wait: { delay in
             #expect(delay == 1)
             throw CancellationError()
-        }, retrying: { Issue.record("Cancellation is not retryable") })
+        }, retrying: { _ in Issue.record("Cancellation is not retryable") })
     }
 }
 
@@ -779,17 +813,52 @@ func connectedClientRecoversTransientCleanupBeforeReportingPermanentOperationFai
     #expect(throws: TestFailure.runnerJob) {
         try runConnectedClient(checkCancellation: {}, recover: {
             recoveryCalls += 1
-            if recoveryCalls == 2 { throw ConnectedRunnerError.http(503) }
+            if recoveryCalls == 2 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
         }, acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in }, poll: {
             polls += 1
             return connectedOffer
         }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in
             throw RunnerSessionError.operationAndCleanupFailed(operation: TestFailure.runnerJob,
                 cleanup: [.init(step: .githubRunner, error: ConnectedRunnerError.transport)])
-        }, wait: { _ in }, retrying: {})
+        }, wait: { _ in }, retrying: { _ in })
     }
     #expect(recoveryCalls == 3)
     #expect(polls == 1)
+}
+
+@Test
+func connectedStartupFailureIsReportedBeforeCleanupRetries() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let backend = ConnectedBackend()
+    let failure = ConnectedFailureKind.timeout.error
+    backend.statusFailure = failure
+    var events: [String] = []
+    var acknowledgements = 0
+    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
+        events.append("complete")
+        acknowledgements += 1
+        if acknowledgements < 3 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
+    })
+    runner.stateChanged = {
+        if case let .executionStopped(_, reason) = $0 {
+            #expect(reason == describeError(failure))
+            events.append("failure")
+        }
+    }
+    var polls = 0
+    #expect(throws: ProcessExecutionError.self) {
+        try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
+            acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in }, poll: {
+                polls += 1
+                guard polls == 1 else { throw TestFailure.unexpectedBackendCall }
+                return connectedOffer
+            }, decline: { _ in Issue.record("Unexpected decline") }, run: { offer, memory, release in
+                try runner.run(offer, memory: memory, releaseCapacity: release)
+            }, wait: { #expect($0 == 5); events.append("wait") }, retrying: { _ in events.append("retry") })
+    }
+    #expect(events == ["failure", "complete", "complete", "retry", "wait", "complete"])
+    #expect(try fixture.store.load() == nil)
 }
 
 @Test
@@ -799,7 +868,8 @@ func connectedRecoveryReportsIdentityLossAndRequiresExactOperatorConfirmation() 
     try fixture.store.save(ConnectedLease(server: "https://EXAMPLE.com:443/", deviceID: connectedOffer.owner, offer: connectedOffer))
     let backend = ConnectedBackend()
     let runner = fixture.runner(backend: backend, accept: { _ in Issue.record("Recovery must not accept"); return "" },
-        complete: { _ in throw ConnectedRunnerError.http(409) })
+        complete: { _ in throw ConnectedRunnerError.http(409, request: "POST /v1/complete (linux ARM64 slot 0)",
+            reason: "coordinator queue identity does not match; retain local recovery state") })
     #expect(throws: ConnectedRunnerError.confirmationMismatch) { try runner.recover(confirmRegistrationRemoved: "wrong") }
     #expect(!backend.destroyed)
     #expect(throws: ConnectedRunnerError.registrationReconciliationRequired(connectedOffer.runner)) { try runner.recover() }
@@ -964,7 +1034,7 @@ func connectedClientDoesNotAcceptWithoutCapacity(available: Bool) throws {
         }, run: { _, _, _ in Issue.record("No capacity was reserved") }, wait: { delay in
             #expect(delay == 1)
             throw CancellationError()
-        }, retrying: { Issue.record("Not a coordinator failure") }, available: { available })
+        }, retrying: { _ in Issue.record("Not a coordinator failure") }, available: { available })
     }
     #expect(polls == (available ? 1 : 0))
     #expect(acquisitions == polls)
@@ -983,7 +1053,7 @@ func connectedIdlePollingDoesNotConsumeEitherPlatformsMemory(_ platform: RunnerP
             memory.release(all)
             return nil
         }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { _, _, _ in Issue.record("No offer") }, wait: { _ in throw CancellationError() },
-        retrying: {}, available: { memory.isAvailable(reserving: platform.memoryReservationBytes) })
+        retrying: { _ in }, available: { memory.isAvailable(reserving: platform.memoryReservationBytes) })
     }
 }
 
@@ -1079,7 +1149,7 @@ func connectedWorkersOverlapWithinSharedMemoryAndKeepIndependentJournals(_ platf
                 return offer
             }, decline: { _ in Issue.record("Unexpected capacity decline") }, run: { offer, allocation, release in
                 try runner.run(offer, memory: allocation, releaseCapacity: release)
-            }, wait: { _ in throw TestFailure.runnerJob }, retrying: {
+            }, wait: { _ in throw TestFailure.runnerJob }, retrying: { _ in
                 Issue.record("No retry expected")
             })
         } catch is CancellationError {}

@@ -71,9 +71,55 @@ func connectedHTTPRejectsRedirectsAndErrorsWithoutLeakingBodies(_ status: Int) t
         _ = try server.client.poll()
         Issue.record("Expected HTTP rejection")
     } catch {
-        #expect(error as? ConnectedRunnerError == .http(status))
+        #expect(error as? ConnectedRunnerError == .http(status, request: "POST /v1/poll (linux ARM64 slot 0)"))
+        #expect(isTransientConnectedFailure(error) == (status == 503))
         #expect(!describeError(error).contains("private-jit"))
         #expect(!describeError(error).contains("secret-token"))
+    }
+}
+
+@Test(arguments: [
+    "",
+    #"{"jit":"private-jit","token":"secret-token"}"#,
+    "<html>proxy error: private-jit secret-token</html>",
+    "one poll per worker slot\nprivate-jit secret-token",
+    "one poll per worker slot\u{1b}[2J",
+    String(repeating: " ", count: 512) + "one poll per worker slot",
+])
+func connectedHTTPOmitsUnexpectedResponseBodies(_ body: String) throws {
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    #expect(throws: ConnectedRunnerError.http(409, request: "POST /v1/poll (linux ARM64 slot 0)")) {
+        try server.client.poll()
+    }
+}
+
+@Test(arguments: [RunnerPlatform.linux, .macOS], ["poll", "accept", "decline", "complete", "renew"])
+func connectedHTTPErrorsIdentifyTheRequestAndCoordinatorReason(_ platform: RunnerPlatform, action: String) throws {
+    let reason = action == "poll" ? "one poll per worker slot" : "coordinator queue identity does not match; retain local recovery state"
+    let body = "\(reason)\n"
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    let original = server.client
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID,
+        token: original.token, platform: platform, slot: 2, checkCancellation: {})
+    let offer = try ConnectedOffer(owner: client.deviceID,
+        runner: "yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef", repository: "owner/repo",
+        platform: platform == .linux ? "linux" : "macos", architecture: "arm64", slot: 2)
+    do {
+        switch action {
+        case "poll": _ = try client.poll()
+        case "accept": _ = try client.accept(offer)
+        case "decline": try client.decline(offer)
+        case "complete": try client.complete(offer)
+        default: _ = try client.renew(offer, checkDeadline: {})
+        }
+        Issue.record("Expected HTTP rejection")
+    } catch {
+        let prefix = platform == .linux ? "/v1/" : "/v1/macos/"
+        #expect(describeError(error) == "The coordinator returned HTTP 409 for POST \(prefix)\(action) (\(platform.rawValue) ARM64 slot 2): \(reason). Any unacknowledged cleanup remains in the local journal.")
+        #expect(isTransientConnectedFailure(error) == (action == "poll"))
+        #expect(!describeError(error).contains(server.token))
     }
 }
 

@@ -24,7 +24,7 @@ func executionAuthorizationRenewsForLongJobsWithoutATotalDeadline() throws {
     #expect(now == 24 * 60 * 60)
 }
 
-@Test(arguments: [ConnectedRunnerError.transport, .http(503)])
+@Test(arguments: [ConnectedRunnerError.transport, .http(503, request: "POST /v1/renew (linux ARM64 slot 0)")])
 func executionAuthorizationExpiresOfflineWithoutGuestInput(_ failure: ConnectedRunnerError) throws {
     var now: TimeInterval = 0
     let authorization = ConnectedExecutionAuthorization(renew: { _, _ in throw failure },
@@ -90,9 +90,10 @@ func executionAuthorizationPreservesCancellationAndPermanentErrors() {
     cancelled.start(authorizationOffer)
     #expect(throws: CancellationError.self) { try cancelled.check() }
     #expect(cancelled.failure == nil)
-    let rejected = ConnectedExecutionAuthorization(renew: { _, _ in throw ConnectedRunnerError.http(401) }, checkCancellation: {})
+    let error = ConnectedRunnerError.http(401, request: "POST /v1/renew (linux ARM64 slot 0)")
+    let rejected = ConnectedExecutionAuthorization(renew: { _, _ in throw error }, checkCancellation: {})
     rejected.start(authorizationOffer)
-    #expect(throws: ConnectedRunnerError.http(401)) { try rejected.check() }
+    #expect(throws: error) { try rejected.check() }
     #expect(rejected.failure == nil)
 }
 
