@@ -8,7 +8,7 @@ The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scales
 
 ## Setup
 
-Use a Linux or macOS coordinator with Go 1.27.3 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same repository's label during the experiment.
+Use a Linux or macOS coordinator with Go 1.27.4 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same repository's label during the experiment.
 
 When upgrading from the single-repository version, finish its jobs and recovery with the previous binary and original configuration first. Stop it, keep its state intact, and choose a fresh `--state-dir` for this version. Old `state.json` and `macos/state.json` layouts are rejected, not migrated. Existing GitHub scale sets are discovered by name.
 
@@ -57,7 +57,7 @@ Startup refuses to omit any saved queue. Before removing a repository or platfor
 
 ## Container deployment on Linux
 
-The [Dockerfile](Dockerfile) builds a static binary with Go 1.27.3. Its runtime image contains the coordinator and TLS root certificates, runs as UID/GID `65532`, and needs neither a Docker socket nor privileged mode. The Mac still runs `yieldd connect` natively to manage its containers and VMs.
+The [Dockerfile](Dockerfile) builds a static binary with Go 1.27.4. Its runtime image contains the coordinator and TLS root certificates, runs as UID/GID `65532`, and needs neither a Docker socket nor privileged mode. The Mac still runs `yieldd connect` natively to manage its containers and VMs.
 
 The [Compose configuration](compose.yaml) targets Docker Engine on Linux. The coordinator uses a bridge network and listens on `0.0.0.0:8787` inside its container. Docker publishes that port only on host `127.0.0.1:8787`. Terminate HTTPS with a reverse proxy on that same Linux host. Do not publish port 8787 on a public interface. For a bare binary, keep `--client-listen 127.0.0.1:8787`. Wildcard binding requires `--allow-non-loopback-client-listen`, supplied by Compose. This explicit opt-in does not detect whether the process is containerized or verify the published port.
 
