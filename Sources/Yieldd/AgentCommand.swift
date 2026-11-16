@@ -11,6 +11,7 @@ struct AgentCommand: ParsableCommand {
         abstract: "Manage the installed local agent.",
         subcommands: [
             AgentInstallCommand.self,
+            AgentInstallConnectedCommand.self,
             AgentStatusCommand.self,
             AgentUninstallCommand.self,
             AgentRunCommand.self,
@@ -139,6 +140,7 @@ struct AgentInstallCommand: ParsableCommand {
             return
         }
 
+        guard try ConnectedAgentStore(directory: store.directory).load() == nil else { throw AgentError.configurationChanged }
         let service = try localAgentService()
         try installAgent(
             configuration: configuration,
@@ -156,8 +158,18 @@ struct AgentStatusCommand: ParsableCommand {
     )
 
     mutating func run() throws {
+        let store = try AgentConfigurationStore()
+        if let connected = try ConnectedAgentStore(directory: store.directory).load() {
+            let service = try localAgentService()
+            print(registrationStatusDescription(service.status()))
+            print("Connected coordinator: \(connected.server.absoluteString)")
+            print("Device: \(connected.deviceID)")
+            print("Platforms: \(connected.platforms.map(\.rawValue).joined(separator: ", "))")
+            print("Configuration and cleanup records do not establish live health.")
+            return
+        }
         try reportAgentStatus(
-            store: AgentConfigurationStore(),
+            store: store,
             service: localAgentService(),
             output: { print($0) }
         )
@@ -179,6 +191,15 @@ struct AgentUninstallCommand: AsyncParsableCommand {
         }
 
         let store = try AgentConfigurationStore()
+        let connectedStore = ConnectedAgentStore(directory: store.directory)
+        if try connectedStore.load() != nil {
+            try await uninstallConnectedAgent(store: connectedStore, credentials: .keychain, service: service) { configuration, token in
+                try recoverConnectedAgent(configuration: configuration, token: token, directory: store.directory,
+                    stop: RunnerPoolStop.monitoringSignals())
+            }
+            print("Connected agent unregistered and configuration removed.")
+            return
+        }
         try await uninstallAgent(
             store: store,
             service: service,
@@ -207,6 +228,13 @@ struct AgentRunCommand: ParsableCommand {
         defer { agentLogger.notice("Stopping yieldd.") }
         do {
             let store = try AgentConfigurationStore()
+            if let connected = try ConnectedAgentStore(directory: store.directory).load() {
+                let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
+                try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
+                    platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
+                    resolveContainer: connected.resolveContainer, output: .agentLog)
+                return
+            }
             let configuration = try store.load()
             try configuration.requireGitHubCLI()
             try withRunnerOwnership(in: store.directory) { leaseStore in
@@ -274,7 +302,7 @@ func agentContainerPreparation(
     }
 }
 
-private extension RunnerServiceOutput {
+extension RunnerServiceOutput {
     static let agentLog = RunnerServiceOutput(
         info: { agentLogger.notice("\($0, privacy: .public)") },
         warning: { agentLogger.warning("\($0, privacy: .public)") },

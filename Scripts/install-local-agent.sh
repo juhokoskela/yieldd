@@ -3,8 +3,14 @@
 set -eu
 
 if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 [OWNER/REPOSITORY ...] [--macos OWNER/REPOSITORY ... --macos-template PATH]" >&2
+    echo "Usage: $0 [--connected --server URL --device-id UUID | OWNER/REPOSITORY ...] [--macos OWNER/REPOSITORY ... --macos-template PATH]" >&2
     exit 64
+fi
+
+install_command=install
+if [ "$1" = --connected ]; then
+    install_command=install-connected
+    shift
 fi
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -58,7 +64,7 @@ trap 'exit 143' TERM
 
 ditto "$source_application" "$staged_application"
 codesign --verify --strict "$staged_application"
-guest_platform=$("$staged_application/Contents/MacOS/yieldd" agent install \
+guest_platform=$("$staged_application/Contents/MacOS/yieldd" agent "$install_command" \
     --preflight-only "$@")
 case "$guest_platform" in
     linux|macos) ;;
@@ -93,6 +99,6 @@ fi
 mv "$staged_application" "$installed_application"
 replacement_complete=true
 
-"$installed_application/Contents/MacOS/yieldd" agent install "$@"
+"$installed_application/Contents/MacOS/yieldd" agent "$install_command" "$@"
 
 echo "Installed $installed_application"

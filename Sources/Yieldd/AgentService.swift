@@ -91,6 +91,13 @@ func uninstallAgent(
     service: LocalAgentService,
     recover: () throws -> Void
 ) async throws {
+    try await disableAgent(service: service)
+
+    try recover()
+    try store.remove()
+}
+
+func disableAgent(service: LocalAgentService) async throws {
     switch service.status() {
     case .enabled, .requiresApproval, .notFound:
         do {
@@ -104,8 +111,6 @@ func uninstallAgent(
         throw AgentError.unknownStatus
     }
 
-    try recover()
-    try store.remove()
 }
 
 func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {

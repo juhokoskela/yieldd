@@ -7,14 +7,16 @@ final class ConnectedHTTPClient {
     let checkCancellation: () throws -> Void
     let platform: RunnerPlatform
     let slot: Int
+    let maximumExecutionDeadline: () -> DispatchTime?
     private let session: URLSession
 
-    init(server: URL, deviceID: String, token: String, platform: RunnerPlatform = .linux, slot: Int = 0, checkCancellation: @escaping () throws -> Void) {
+    init(server: URL, deviceID: String, token: String, platform: RunnerPlatform = .linux, slot: Int = 0, checkCancellation: @escaping () throws -> Void, maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil }) {
         self.server = server
         self.deviceID = deviceID
         self.token = token
         self.platform = platform
         self.slot = slot
+        self.maximumExecutionDeadline = maximumExecutionDeadline
         self.checkCancellation = checkCancellation
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 65
@@ -79,7 +81,11 @@ final class ConnectedHTTPClient {
     }
 
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {
-        try check()
+        func checkRequest() throws {
+            try check()
+            if let deadline = maximumExecutionDeadline(), DispatchTime.now() >= deadline { throw CancellationError() }
+        }
+        try checkRequest()
         if let offer, offer.runnerPlatform != platform || offer.slot != slot { throw ConnectedRunnerError.invalidOffer }
         struct Body: Encodable {
             let deviceID: String
@@ -105,9 +111,9 @@ final class ConnectedHTTPClient {
         defer { task.cancel() }
         task.resume()
         while response.completed.wait(timeout: .now() + .milliseconds(100)) == .timedOut {
-            try check()
+            try checkRequest()
         }
-        try check()
+        try checkRequest()
         let (status, data) = try response.result()
         guard status == 200 || (action == "poll" && status == 204) else {
             throw ConnectedRunnerError.http(status,

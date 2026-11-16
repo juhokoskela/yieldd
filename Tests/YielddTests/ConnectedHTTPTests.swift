@@ -272,3 +272,21 @@ private final class ConnectedHTTPFixture: @unchecked Sendable {
         }
     }
 }
+
+@Test(arguments: [false, true])
+func connectedCleanupHonorsShutdownDeadlineWithoutCancellingEarlyCleanup(expired: Bool) throws {
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    defer { server.close() }
+    let original = server.client
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID, token: original.token,
+        checkCancellation: { throw CancellationError() },
+        maximumExecutionDeadline: { expired ? .now() - .seconds(1) : nil })
+    let offer = try ConnectedOffer(owner: client.deviceID,
+        runner: "yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef", repository: "owner/repo", platform: "linux", architecture: "arm64")
+    if expired {
+        #expect(throws: CancellationError.self) { try client.complete(offer) }
+    } else {
+        try client.complete(offer)
+        #expect(server.request.contains("POST /v1/complete HTTP/1.1"))
+    }
+}
