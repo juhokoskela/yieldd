@@ -115,6 +115,27 @@ yieldd agent resume
 
 Pause persists across process restarts and app replacement. Resume explicitly when maintenance is complete. These controls apply to the installed connected agent; standalone services and foreground diagnostic commands retain their existing behavior. Control requests use a versioned local XPC interface restricted to the agent's effective user. It opens no network listener.
 
+### Live status
+
+`yieldd agent status` queries the running connected agent over XPC. Add `--json` for a versioned report suitable for a menu bar client or local tooling. The XPC response and JSON report contain no device token or JIT credential payload.
+
+Live status includes service readiness, pause/drain state, active assignment and cleanup counts, worker phases, runner/repository identities, memory reservations and pressure, the latest coordinator request result and successful contact time, and the last error with its timestamp. Reservations are the runner budget, not measured guest RSS or host free memory. A successful coordinator request is a recent observation, not a guarantee of current reachability; paused and memory-blocked workers may make no requests. Listener exit does not establish the GitHub job conclusion.
+
+When XPC is unavailable, the report has no live snapshot. It shows the connection error and any last recorded fatal startup/runtime failure, clearly labeled as history. This small private diagnostic record is separate from recovery journals; damage or failure to save it never changes cleanup or execution authority. Standalone `agent status` retains its existing configuration/lease report.
+
+### End-to-end acceptance
+
+After merging the three runner-service PRs in order, use the installer from this checkout and a trusted repository:
+
+1. Install connected mode with the existing coordinator identity and token. Approve the login item and any setup-time Keychain access, then verify startup after login. Check a locked/missing Keychain token and a rebuilt app against an existing Keychain item; background startup should fail visibly rather than prompt.
+2. Observe `agent status --json` while real Linux and macOS jobs move through provisioning, pickup, execution, capacity release, and cleanup. Exercise concurrent same-platform guests and memory contention. Confirm the reported runner identities against coordinator and GitHub records.
+3. Pause during a long poll and while jobs are active. Confirm existing jobs finish, new offers are declined, idle capacity stops being advertised, and configured hosted fallback runs new demand. Restart while paused and verify pause persists.
+4. Drain during execution and cleanup retries. Confirm it waits until cleanup is complete, and that Ctrl+C only stops the wait. Resume/re-pause from another terminal and restart the service during separate drain attempts; each wait must fail rather than silently attach to a new admission period.
+5. Interrupt networking and restart the coordinator/client with their original state. Confirm status reports retry/recovery accurately, no duplicate execution starts, and unresolved cleanup remains recorded. Check the unavailable-service report after a startup failure.
+6. Drain before replacing or uninstalling the installed app. Verify recovery, retained pause, explicit resume, and normal subsequent local execution and fallback.
+
+The installed service, real guests, network-isolation checks, and fallback placement are live acceptance boundaries. Unit tests and the anonymous XPC fixture do not establish them.
+
 ## Delivery and recovery
 
 An offer contains the repository, queue identity, runner identity, worker slot, and the queue's Linux or macOS ARM64 platform. It contains no executable command. Acceptance, renewal, and cleanup use the persisted queue, runner, and slot identities, not the currently waiting repository. Only one long poll is allowed per platform/worker slot; different workers poll independently. The Mac has five seconds to accept an offer; guest startup is not part of that deadline. A coordinator timer starts hosted fallback when an unaccepted offer expires, without waiting for another GitHub demand message. Local-only offers instead release their claim and wait again. On restart, the coordinator first confirms current demand with GitHub so it can retract an obsolete offer. Acceptance and expiry share the queue's event loop, so they cannot both win. Each queue offers one worker at a time until its credentials are issued, then immediately offers the next worker for outstanding demand. Guest boot and execution overlap; serial registration keeps slow GitHub calls from consuming another offer's acceptance window. An in-progress operation can delay that queue's timer, but not another queue's polling. Logs report acceptance latency and expired offers.

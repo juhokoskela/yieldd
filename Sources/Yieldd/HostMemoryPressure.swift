@@ -1,7 +1,7 @@
 import Darwin
 import Dispatch
 
-enum HostMemoryPressure: Equatable, Sendable {
+enum HostMemoryPressure: String, Codable, Sendable {
     case normal
     case warning
     case critical

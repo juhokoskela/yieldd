@@ -10,6 +10,13 @@ struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let paused: Bool
     let ready: Bool
     let activeAssignments: Int
+    let recordedAt: Date
+    let phase: AgentServicePhase
+    let server: String?
+    let deviceID: String?
+    let memory: RunnerMemoryStatus?
+    let workers: [AgentWorkerStatus]
+    let lastError: AgentReportedError?
 
     var drained: Bool { ready && paused && activeAssignments == 0 }
 }
@@ -23,8 +30,19 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private var resumeGeneration: UInt64 = 0
     private var ready = false
     private var assignments: Set<String> = []
+    private var phase: AgentServicePhase = .starting
+    private let server: String?
+    private let deviceID: String?
+    private var memory: RunnerMemoryAdmission?
+    private var workers: [String: AgentWorkerStatus] = [:]
+    private var lastError: AgentReportedError?
+    private let failureStore: AgentFailureStore
 
-    init(directory: URL) {
+    init(directory: URL, configuration: ConnectedAgentConfiguration? = nil) {
+        server = configuration?.server.absoluteString
+        deviceID = configuration?.deviceID
+        failureStore = AgentFailureStore(directory: directory)
+        lastError = try? failureStore.load()
         pauseFile = directory.appendingPathComponent("connected-agent.paused")
         paused = FileManager.default.fileExists(atPath: pauseFile.path)
     }
@@ -33,7 +51,69 @@ final class ConnectedAgentControl: @unchecked Sendable {
         lock.withLock { snapshotUnlocked() }
     }
 
-    func markReady() { lock.withLock { ready = true } }
+    var isPaused: Bool { lock.withLock { paused } }
+
+    func markReady() { lock.withLock { ready = true; phase = .ready } }
+
+    func configure(workers slots: [ConnectedWorker], memory: RunnerMemoryAdmission) {
+        lock.withLock {
+            self.memory = memory
+            assignments.removeAll()
+            workers = Dictionary(uniqueKeysWithValues: slots.map { worker in
+                let id = "\(worker.backend.platform.rawValue)-\(worker.slot)"
+                return (id, AgentWorkerStatus(id: id, platform: worker.backend.platform, slot: worker.slot))
+            })
+        }
+    }
+
+    func recovering(_ leases: [ConnectedLease]) {
+        lock.withLock {
+            phase = .recovering
+            for lease in leases {
+                let offer = lease.offer
+                let id = "\(offer.runnerPlatform.rawValue)-\(offer.slot)"
+                workers[id] = AgentWorkerStatus(id: id, platform: offer.runnerPlatform, slot: offer.slot,
+                    phase: .recovering, runner: offer.runner, repository: offer.repository)
+            }
+            assignments = Set(workers.keys)
+        }
+    }
+
+    func update(worker: String, phase: AgentWorkerPhase? = nil, offer: ConnectedOffer? = nil) {
+        lock.withLock {
+            if let phase { workers[worker]?.phase = phase }
+            if let offer { workers[worker]?.runner = offer.runner; workers[worker]?.repository = offer.repository }
+        }
+    }
+
+    func connection(worker: String, state: AgentConnectionState, error: String?) {
+        lock.withLock {
+            workers[worker]?.connection = state
+            if state == .connected { workers[worker]?.lastContactAt = Date() }
+            if let error { lastError = AgentReportedError(message: error) }
+        }
+    }
+
+    func session(worker: String, state: RunnerSessionState) {
+        switch state {
+        case .listenerStarted, .waitingForJob: update(worker: worker, phase: .waitingForJob)
+        case .jobStarted: update(worker: worker, phase: .running)
+        case .listenerExited, .capacityReleased, .cleaningUp, .waitingForGitHubCleanup: update(worker: worker, phase: .cleaningUp)
+        case .preparing: update(worker: worker, phase: .provisioning)
+        case .waitingForMemory: update(worker: worker, phase: .waitingForMemory)
+        case let .executionStopped(_, reason), let .leaseCleanupFailed(_, reason):
+            lock.withLock { lastError = AgentReportedError(message: reason); workers[worker]?.phase = .cleaningUp }
+        case .cleanupCompleted: break
+        }
+    }
+
+    func fail(_ error: any Error) {
+        let failure = AgentReportedError(message: describeError(error))
+        lock.withLock { ready = false; phase = .failed; lastError = failure }
+    }
+
+    func stopping() { lock.withLock { ready = false; phase = .stopping } }
+
 
     func beginAssignment(worker: String) -> Bool {
         lock.withLock {
@@ -45,7 +125,12 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     func finishAssignment(worker: String) {
-        _ = lock.withLock { assignments.remove(worker) }
+        lock.withLock {
+            assignments.remove(worker)
+            workers[worker]?.phase = .idle
+            workers[worker]?.runner = nil
+            workers[worker]?.repository = nil
+        }
     }
 
     func request(_ command: String) throws -> AgentControlSnapshot {
@@ -78,7 +163,9 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     private func snapshotUnlocked() -> AgentControlSnapshot {
-        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: ready, activeAssignments: assignments.count)
+        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: ready, activeAssignments: assignments.count,
+            recordedAt: Date(), phase: phase, server: server, deviceID: deviceID, memory: memory?.status,
+            workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError)
     }
 }
 

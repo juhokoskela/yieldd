@@ -290,3 +290,23 @@ func connectedCleanupHonorsShutdownDeadlineWithoutCancellingEarlyCleanup(expired
         #expect(server.request.contains("POST /v1/complete HTTP/1.1"))
     }
 }
+
+@Test(arguments: [204, 503, 401])
+func connectedHTTPReportsLastContactAndFailureWithoutResponseBodies(status: Int) throws {
+    let body = status == 204 ? "" : "private-token private-jit"
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 \(status) Response\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    let original = server.client
+    var states: [AgentConnectionState] = []
+    var failures: [String] = []
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID, token: original.token,
+        checkCancellation: {}, connectionChanged: { state, error in
+            states.append(state)
+            if let error { failures.append(error) }
+        })
+    if status == 204 { _ = try client.poll() }
+    else { #expect(throws: ConnectedRunnerError.self) { try client.poll() } }
+    #expect(states == [status == 204 ? .connected : status == 503 ? .retrying : .failed])
+    #expect(!failures.joined().contains("private-token"))
+    #expect(!failures.joined().contains("private-jit"))
+}
