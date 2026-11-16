@@ -13,6 +13,9 @@ struct AgentCommand: ParsableCommand {
             AgentInstallCommand.self,
             AgentInstallConnectedCommand.self,
             AgentStatusCommand.self,
+            AgentPauseCommand.self,
+            AgentResumeCommand.self,
+            AgentDrainCommand.self,
             AgentUninstallCommand.self,
             AgentRunCommand.self,
             AgentVirtualizationProbeCommand.self,
@@ -229,10 +232,14 @@ struct AgentRunCommand: ParsableCommand {
         do {
             let store = try AgentConfigurationStore()
             if let connected = try ConnectedAgentStore(directory: store.directory).load() {
+                let control = ConnectedAgentControl(directory: store.directory)
+                let endpoint = AgentControlEndpoint(control: control)
+                endpoint.start()
+                defer { endpoint.stop() }
                 let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
                 try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
                     platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
-                    resolveContainer: connected.resolveContainer, output: .agentLog)
+                    resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
                 return
             }
             let configuration = try store.load()

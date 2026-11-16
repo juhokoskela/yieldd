@@ -58,7 +58,7 @@ func runConnectedService(
     server serverURL: URL, deviceID: String, token: String, platforms: [RunnerPlatform], template: URL?,
     confirmation: String? = nil, stop: RunnerPoolStop, stateDirectory: URL? = nil,
     resolveContainer: @escaping @Sendable () throws -> URL = { try ExecutableLocator().locate("container") },
-    output: RunnerServiceOutput = .terminal
+    output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
 ) throws {
     try MacOSVirtualMachineLifecycle.requireSupportedHost()
     try withRunnerOwnership(in: stateDirectory, connected: true) { leaseStore in
@@ -105,7 +105,9 @@ func runConnectedService(
         let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
+        control?.markReady()
         try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
+            let workerID = "\(worker.backend.platform.rawValue)-\(worker.slot)"
             let platform = worker.backend.platform
             let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
                                              platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
@@ -142,6 +144,10 @@ func runConnectedService(
                 memory.isAvailable(reserving: platform.memoryReservationBytes)
             }, blocked: {
                 output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
+            }, paused: { control?.snapshot.paused ?? false }, beginAssignment: {
+                control?.beginAssignment(worker: workerID) ?? true
+            }, finishAssignment: {
+                control?.finishAssignment(worker: workerID)
             })
         }
     }

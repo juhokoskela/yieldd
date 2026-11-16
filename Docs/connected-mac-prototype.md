@@ -99,6 +99,22 @@ The installer preflights tools, storage, capacity, and template files, builds th
 
 Use `yieldd agent status` from the installed app to inspect registration and configuration, and `yieldd agent uninstall` to disable it and recover outstanding assignments. Configuration and the Keychain token remain if recovery fails. The agent uses unified logging under subsystem `dev.yieldd`, category `agent`, and has the same 50-second shutdown budget as the standalone agent. Foreground `connect` remains available for diagnostics.
 
+### Pause and drain
+
+Run these commands from the installed app:
+
+```sh
+yieldd agent pause
+yieldd agent drain
+yieldd agent resume
+```
+
+`pause` stops new connected admissions and lets active assignments finish. A poll already in flight may still return an offer; the worker declines it before accepting credentials. Paused clients stop advertising capacity, and the coordinator's existing availability lease expires normally. Hosted fallback remains governed by coordinator policy.
+
+`drain` pauses and waits for all accepted work and cleanup to finish. It does not stop guests, revoke execution authorization, or unregister the agent. Cleanup retries keep the assignment active until they succeed. Cancelling the waiting command leaves the agent paused; an unavailable service or another caller's resume fails the wait. Run it before replacing or uninstalling the agent when existing jobs should finish first. Uninstall itself still stops the process and performs recovery.
+
+Pause persists across process restarts and app replacement. Resume explicitly when maintenance is complete. These controls apply to the installed connected agent; standalone services and foreground diagnostic commands retain their existing behavior. Control requests use a versioned local XPC interface restricted to the agent's effective user. It opens no network listener.
+
 ## Delivery and recovery
 
 An offer contains the repository, queue identity, runner identity, worker slot, and the queue's Linux or macOS ARM64 platform. It contains no executable command. Acceptance, renewal, and cleanup use the persisted queue, runner, and slot identities, not the currently waiting repository. Only one long poll is allowed per platform/worker slot; different workers poll independently. The Mac has five seconds to accept an offer; guest startup is not part of that deadline. A coordinator timer starts hosted fallback when an unaccepted offer expires, without waiting for another GitHub demand message. Local-only offers instead release their claim and wait again. On restart, the coordinator first confirms current demand with GitHub so it can retract an obsolete offer. Acceptance and expiry share the queue's event loop, so they cannot both win. Each queue offers one worker at a time until its credentials are issued, then immediately offers the next worker for outstanding demand. Guest boot and execution overlap; serial registration keeps slow GitHub calls from consuming another offer's acceptance window. An in-progress operation can delay that queue's timer, but not another queue's polling. Logs report acceptance latency and expired offers.

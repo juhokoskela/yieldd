@@ -12,6 +12,11 @@
         <string>agent</string>
         <string>run</string>
     </array>
+    <key>MachServices</key>
+    <dict>
+        <key>dev.yieldd.agent.control</key>
+        <true/>
+    </dict>
     <key>KeepAlive</key>
     <true/>
     <key>ThrottleInterval</key>

@@ -11,7 +11,10 @@ func runConnectedClient(
     wait: (TimeInterval) throws -> Void,
     retrying: (any Error) -> Void,
     available: () -> Bool = { true },
-    blocked: () -> Void = {}
+    blocked: () -> Void = {},
+    paused: () -> Bool = { false },
+    beginAssignment: () -> Bool = { true },
+    finishAssignment: () -> Void = {}
 ) throws {
     var heldReservation: RunnerMemoryReservation?
     func releaseCapacity() {
@@ -25,6 +28,7 @@ func runConnectedClient(
             do {
                 try recover()
                 releaseCapacity()
+                finishAssignment()
                 return
             } catch where isTransientConnectedFailure(error) {
                 retrying(error)
@@ -37,6 +41,7 @@ func runConnectedClient(
     while true {
         try checkCancellation()
         do {
+            if paused() { try wait(1); continue }
             guard available() else {
                 if !reportedBlocked { blocked(); reportedBlocked = true }
                 try wait(1)
@@ -52,7 +57,14 @@ func runConnectedClient(
                 continue
             }
             heldReservation = reservation
+            guard beginAssignment() else {
+                try decline(offer)
+                releaseCapacity()
+                try wait(1)
+                continue
+            }
             try run(offer, reservation.allocation, releaseCapacity)
+            finishAssignment()
         } catch {
             if case let RunnerSessionError.operationAndCleanupFailed(operation, cleanup) = error,
                !isCancellation(operation), cleanup.allSatisfy({ isTransientConnectedFailure($0.error) }) {
