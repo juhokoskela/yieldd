@@ -116,6 +116,20 @@ func connectedAgentUninstallRetainsCredentialsAndSettingsUntilRecoverySucceeds()
     #expect(keychain.values.withLock { $0.isEmpty })
 }
 
+@Test
+func connectedUninstallDoesNotSweepOutstandingStandaloneGuests() throws {
+    let fixture = try ConnectedAgentFixture()
+    defer { fixture.remove() }
+    let lease = RunnerLease(runnerID: RunnerID(value: "yieldd-macos-test-pending"),
+        repository: try GitHubRepository("owner/repo"), platform: .macOS)
+    let leases = try RunnerLeaseStore(directory: fixture.store.directory)
+    try leases.save(lease)
+    #expect(throws: ConnectedRunnerError.recoveryRequired) {
+        try recoverConnectedAgent(configuration: agentConfiguration, token: "", directory: fixture.store.directory, stop: RunnerPoolStop())
+    }
+    #expect(try leases.load() == [lease])
+}
+
 private final class FakeAgentKeychain: Sendable {
     let values = Mutex<[String: String]>([:])
     var credentials: ConnectedAgentCredentials {
