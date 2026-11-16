@@ -88,7 +88,11 @@ final class ConnectedHTTPClient {
             connectionChanged(.connected, nil)
             return result
         } catch {
-            if !isCancellation(error) { connectionChanged(isTransientConnectedFailure(error) ? .retrying : .failed, describeError(error)) }
+            if (error as? ConnectedRunnerError)?.httpStatus == 410 {
+                connectionChanged(.connected, nil)
+            } else if !isCancellation(error) {
+                connectionChanged(isTransientConnectedFailure(error) ? .retrying : .failed, describeError(error))
+            }
             throw error
         }
     }

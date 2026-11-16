@@ -11,10 +11,10 @@ func readPrivateRunnerFile(_ file: URL, maximumBytes: Int) throws -> Data? {
     defer { try? handle.close() }
     var info = stat()
     guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_mode & 0o077 == 0 else {
-        throw ConnectedAgentError.invalidConfiguration
+        throw RunnerStateFileError.invalidFile
     }
     let data = try handle.read(upToCount: maximumBytes + 1) ?? Data()
-    guard data.count <= maximumBytes else { throw ConnectedAgentError.invalidConfiguration }
+    guard data.count <= maximumBytes else { throw RunnerStateFileError.invalidFile }
     return data
 }
 
@@ -33,4 +33,9 @@ func writePrivateRunnerFile(_ data: Data, to file: URL) throws {
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
     try synchronizeRunnerState(directory)
+}
+
+enum RunnerStateFileError: Error, LocalizedError {
+    case invalidFile
+    var errorDescription: String? { "The saved runner state file is invalid, too large, or not private." }
 }

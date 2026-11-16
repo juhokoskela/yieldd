@@ -233,31 +233,26 @@ struct AgentRunCommand: ParsableCommand {
     )
 
     mutating func run() throws {
-        let stop = try RunnerPoolStop.monitoringSignals(
-            shutdownTimeout: Self.shutdownTimeout
-        )
         defer { agentLogger.notice("Stopping yieldd.") }
-        let store = try AgentConfigurationStore()
+        var stateDirectory: URL?
         do {
+            let store = try AgentConfigurationStore()
+            stateDirectory = store.directory
             if let connected = try ConnectedAgentStore(directory: store.directory).load() {
                 let control = ConnectedAgentControl(directory: store.directory, configuration: connected)
+                let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout, onStop: control.stopping)
                 let endpoint = AgentControlEndpoint(control: control)
                 endpoint.start()
                 defer { endpoint.stop() }
-                do {
-                    try prepareConnectedAgentKeychain()
-                    let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
-                    try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
-                        platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
-                        resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
-                } catch {
-                    if isCancellation(error) { control.stopping() }
-                    else { control.fail(error) }
-                    throw error
-                }
+                try prepareConnectedAgentKeychain()
+                let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
+                try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
+                    platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
+                    resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
                 return
             }
             let configuration = try store.load()
+            let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout)
             try configuration.requireGitHubCLI()
             try withRunnerOwnership(in: store.directory) { leaseStore in
                 let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
@@ -274,9 +269,9 @@ struct AgentRunCommand: ParsableCommand {
         } catch where isCancellation(error) {
             return
         } catch {
-            if FileManager.default.fileExists(atPath: ConnectedAgentStore(directory: store.directory).file.path) {
+            if let stateDirectory, FileManager.default.fileExists(atPath: ConnectedAgentStore(directory: stateDirectory).file.path) {
                 // Diagnostic history is best effort and never changes recovery obligations.
-                try? AgentFailureStore(directory: store.directory).save(AgentReportedError(message: describeError(error)))
+                try? AgentFailureStore(directory: stateDirectory).save(AgentReportedError(message: describeError(error)))
             }
             agentLogger.error("Local agent failed: \(describeError(error), privacy: .public)")
             throw error

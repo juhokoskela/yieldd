@@ -60,6 +60,7 @@ struct ConnectedAgentStore {
 
     func remove() throws {
         try FileManager.default.removeItem(at: file)
+        try? AgentFailureStore(directory: directory).remove()
         try synchronizeRunnerState(directory)
     }
 }

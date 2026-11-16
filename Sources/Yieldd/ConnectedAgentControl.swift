@@ -28,7 +28,6 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private var paused: Bool
     private let instanceID = UUID()
     private var resumeGeneration: UInt64 = 0
-    private var ready = false
     private var assignments: Set<String> = []
     private var phase: AgentServicePhase = .starting
     private let server: String?
@@ -36,13 +35,10 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private var memory: RunnerMemoryAdmission?
     private var workers: [String: AgentWorkerStatus] = [:]
     private var lastError: AgentReportedError?
-    private let failureStore: AgentFailureStore
 
     init(directory: URL, configuration: ConnectedAgentConfiguration? = nil) {
         server = configuration?.server.absoluteString
         deviceID = configuration?.deviceID
-        failureStore = AgentFailureStore(directory: directory)
-        lastError = try? failureStore.load()
         pauseFile = directory.appendingPathComponent("connected-agent.paused")
         var info = stat()
         paused = Darwin.lstat(pauseFile.path, &info) == 0 || errno != ENOENT
@@ -54,14 +50,23 @@ final class ConnectedAgentControl: @unchecked Sendable {
 
     var isPaused: Bool { lock.withLock { paused } }
 
-    func markReady() { lock.withLock { ready = true; phase = .ready } }
+    func starting() {
+        lock.withLock { if phase != .stopping { phase = .starting } }
+    }
+
+    func markReady() {
+        lock.withLock {
+            guard phase != .stopping else { return }
+            phase = .ready
+        }
+    }
 
     func configure(workers slots: [ConnectedWorker], memory: RunnerMemoryAdmission) {
         lock.withLock {
             self.memory = memory
-            assignments.removeAll()
+            precondition(assignments.isEmpty)
             workers = Dictionary(uniqueKeysWithValues: slots.map { worker in
-                let id = "\(worker.backend.platform.rawValue)-\(worker.slot)"
+                let id = worker.id
                 return (id, AgentWorkerStatus(id: id, platform: worker.backend.platform, slot: worker.slot))
             })
         }
@@ -69,21 +74,26 @@ final class ConnectedAgentControl: @unchecked Sendable {
 
     func recovering(_ leases: [ConnectedLease]) {
         lock.withLock {
-            phase = .recovering
+            if phase != .stopping { phase = .recovering }
             for lease in leases {
                 let offer = lease.offer
-                let id = "\(offer.runnerPlatform.rawValue)-\(offer.slot)"
+                let id = offer.runnerPlatform.connectedWorkerID(slot: offer.slot)
                 workers[id] = AgentWorkerStatus(id: id, platform: offer.runnerPlatform, slot: offer.slot,
                     phase: .recovering, runner: offer.runner, repository: offer.repository)
+                assignments.insert(id)
             }
-            assignments = Set(workers.keys)
         }
     }
 
-    func update(worker: String, phase: AgentWorkerPhase? = nil, offer: ConnectedOffer? = nil) {
+    func update(worker: String, phase: AgentWorkerPhase) {
+        lock.withLock { workers[worker]?.phase = phase }
+    }
+
+    func assign(worker: String, offer: ConnectedOffer) {
         lock.withLock {
-            if let phase { workers[worker]?.phase = phase }
-            if let offer { workers[worker]?.runner = offer.runner; workers[worker]?.repository = offer.repository }
+            workers[worker]?.phase = .provisioning
+            workers[worker]?.runner = offer.runner
+            workers[worker]?.repository = offer.repository
         }
     }
 
@@ -108,17 +118,12 @@ final class ConnectedAgentControl: @unchecked Sendable {
         }
     }
 
-    func fail(_ error: any Error) {
-        let failure = AgentReportedError(message: describeError(error))
-        lock.withLock { ready = false; phase = .failed; lastError = failure }
-    }
-
-    func stopping() { lock.withLock { ready = false; phase = .stopping } }
+    func stopping() { lock.withLock { phase = .stopping } }
 
 
     func beginAssignment(worker: String) -> Bool {
         lock.withLock {
-            guard ready, !paused else { return false }
+            guard phase == .ready, !paused else { return false }
             precondition(!assignments.contains(worker))
             assignments.insert(worker)
             return true
@@ -164,7 +169,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     private func snapshotUnlocked() -> AgentControlSnapshot {
-        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: ready, activeAssignments: assignments.count,
+        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: phase == .ready, activeAssignments: assignments.count,
             recordedAt: Date(), phase: phase, server: server, deviceID: deviceID, memory: memory?.status,
             workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError)
     }
@@ -204,7 +209,8 @@ final class AgentControlEndpoint: NSObject, AgentControlProtocol, NSXPCListenerD
     }
 }
 
-func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCConnection(machServiceName: agentControlService)) throws -> AgentControlSnapshot {
+func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCConnection(machServiceName: agentControlService), timeout: TimeInterval = 10) throws -> AgentControlSnapshot {
+    precondition(timeout.isFinite && timeout > 0)
     connection.remoteObjectInterface = NSXPCInterface(with: AgentControlProtocol.self)
     let result = Mutex<Result<Data, AgentControlError>?>(nil)
     let completed = DispatchSemaphore(value: 0)
@@ -227,7 +233,7 @@ func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCC
         else if let data { finish(.success(data)) }
         else { finish(.failure(.invalidResponse)) }
     }
-    guard completed.wait(timeout: .now() + 10) == .success else { throw AgentControlError.unavailable }
+    guard completed.wait(timeout: .now() + timeout) == .success else { throw AgentControlError.unavailable }
     guard let value = result.withLock({ $0 }) else { throw AgentControlError.invalidResponse }
     let snapshot = try JSONDecoder().decode(AgentControlSnapshot.self, from: value.get())
     guard snapshot.version == 1 else { throw AgentControlError.invalidResponse }

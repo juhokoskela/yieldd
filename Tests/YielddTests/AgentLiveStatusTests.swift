@@ -14,7 +14,7 @@ func liveStatusKeepsCleanupActiveAfterMachineCapacityIsReleased() throws {
     let offer = try ConnectedOffer(owner: "01234567-89ab-4def-8123-456789abcdef",
         runner: "yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef", repository: "owner/repo", platform: "linux", architecture: "arm64")
     #expect(control.beginAssignment(worker: "linux-0"))
-    control.update(worker: "linux-0", phase: .provisioning, offer: offer)
+    control.assign(worker: "linux-0", offer: offer)
     control.connection(worker: "linux-0", state: .connected, error: nil)
     control.session(worker: "linux-0", state: .jobStarted(RunnerID(value: offer.runner)))
     #expect(control.snapshot.workers.first?.phase == .running)
@@ -51,8 +51,8 @@ func liveStatusReportsRecoveryAndRetainsTheLastErrorAfterReconnect() throws {
     control.connection(worker: "linux-0", state: .connected, error: nil)
     #expect(control.snapshot.lastError?.occurredAt == errorDate)
     #expect(control.snapshot.workers.first?.connection == .connected)
-    control.fail(ConnectedRunnerError.transport)
-    #expect(control.snapshot.phase == .failed && !control.snapshot.ready)
+    control.stopping()
+    #expect(control.snapshot.phase == .stopping && !control.snapshot.ready)
 }
 
 @Test
@@ -65,6 +65,7 @@ func unavailableServiceReportsHistoryWithoutPresentingItAsLiveHealth() throws {
     #expect(report.live == nil)
     #expect(report.lastFailure == failure)
     #expect(report.unavailableReason != nil)
+    #expect(ConnectedAgentControl(directory: directory).snapshot.lastError == nil)
     #expect(renderAgentStatus(report).contains("Last recorded failure"))
     let data = try JSONEncoder().encode(report)
     let value = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -90,4 +91,41 @@ private func liveStatusDirectory() throws -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("agent-status-\(UUID().uuidString)")
     _ = try AgentConfigurationStore(directory: directory)
     return directory
+}
+
+@Test
+func stopRequestReportsStoppingBeforeAssignmentCleanupFinishes() throws {
+    let directory = try liveStatusDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let control = ConnectedAgentControl(directory: directory)
+    control.markReady()
+    #expect(control.beginAssignment(worker: "linux-0"))
+    let stop = RunnerPoolStop(shutdownTimeout: 50, onStop: control.stopping)
+    stop.request()
+    #expect(stop.executionDeadline() != nil)
+    #expect(throws: CancellationError.self) { try stop.check() }
+    control.markReady()
+    control.recovering([])
+    let stopping = control.snapshot
+    #expect(stopping.phase == .stopping && !stopping.ready)
+    #expect(stopping.activeAssignments == 1 && !stopping.drained)
+    control.finishAssignment(worker: "linux-0")
+    #expect(control.snapshot.activeAssignments == 0)
+}
+
+@Test
+func unavailableStatusIncludesConfiguredIdentityAndUninstallClearsDiagnosticHistory() throws {
+    let directory = try liveStatusDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = ConnectedAgentStore(directory: directory)
+    let configuration = ConnectedAgentConfiguration(server: URL(string: "https://coordinator.example/")!,
+        deviceID: "01234567-89ab-4def-8123-456789abcdef", platforms: [.macOS],
+        template: URL(fileURLWithPath: "/template.bundle"), container: nil)
+    try store.save(configuration)
+    try AgentFailureStore(directory: directory).save(AgentReportedError(message: "old failure"))
+    let report = connectedAgentStatus(registration: .notRegistered, directory: directory, request: { throw AgentControlError.unavailable })
+    #expect(report.configuration == configuration && report.live == nil)
+    #expect(renderAgentStatus(report).contains(configuration.deviceID))
+    try store.remove()
+    #expect(try AgentFailureStore(directory: directory).load() == nil)
 }

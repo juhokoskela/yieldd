@@ -74,10 +74,10 @@ func runConnectedService(
         let directory = leaseStore.directory
         // Recover every persisted platform, even if it is no longer enabled.
         // macOS recovery removes abandoned clones without requiring the template.
-        control?.recovering(try ConnectedRunnerStore.all(in: directory).compactMap { try $0.load() })
         try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
                                       token: token, confirmation: confirmation, stop: stop,
-                                      resolveContainer: resolveContainer, output: output)
+                                      resolveContainer: resolveContainer, output: output, control: control)
+        control?.starting()
         if confirmation != nil {
             output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
             return
@@ -111,9 +111,9 @@ func runConnectedService(
         }
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
-        if control?.snapshot.paused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
+        if control?.isPaused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
         try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
-            let workerID = "\(worker.backend.platform.rawValue)-\(worker.slot)"
+            let workerID = worker.id
             let platform = worker.backend.platform
             let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
                                              platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline,
@@ -150,7 +150,7 @@ func runConnectedService(
                 control?.update(worker: workerID, phase: .idle)
                 return try client.poll()
             }, decline: client.decline, run: { offer, allocation, release in
-                control?.update(worker: workerID, phase: .provisioning, offer: offer)
+                control?.assign(worker: workerID, offer: offer)
                 output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                 try runner.run(offer, memory: allocation, releaseCapacity: release)
             }, wait: stop.wait, retrying: { error in
@@ -172,6 +172,11 @@ func runConnectedService(
 struct ConnectedWorker: Sendable {
     let backend: RunnerSlotBackend
     let slot: Int
+    var id: String { backend.platform.connectedWorkerID(slot: slot) }
+}
+
+extension RunnerPlatform {
+    func connectedWorkerID(slot: Int) -> String { "\(rawValue)-\(slot)" }
 }
 
 func connectedWorkers(backends: [RunnerSlotBackend], memory: RunnerMemoryAdmission,

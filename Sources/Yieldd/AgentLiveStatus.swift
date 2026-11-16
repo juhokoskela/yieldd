@@ -8,7 +8,7 @@ struct RunnerMemoryStatus: Codable, Equatable, Sendable {
 }
 
 enum AgentServicePhase: String, Codable, Sendable {
-    case starting, recovering, ready, stopping, failed
+    case starting, recovering, ready, stopping
 }
 
 enum AgentConnectionState: String, Codable, Sendable {
@@ -57,6 +57,7 @@ enum AgentRegistrationState: String, Codable {
 struct AgentStatusReport: Encodable {
     let version = 1
     let registration: AgentRegistrationState
+    let configuration: ConnectedAgentConfiguration?
     let live: AgentControlSnapshot?
     let unavailableReason: String?
     let lastFailure: AgentReportedError?
@@ -71,17 +72,23 @@ struct AgentFailureStore {
         return try JSONDecoder().decode(AgentReportedError.self, from: data)
     }
 
+    func remove() throws {
+        do { try FileManager.default.removeItem(at: file) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile { return }
+    }
+
     func save(_ failure: AgentReportedError) throws {
         try writePrivateRunnerFile(JSONEncoder().encode(failure), to: file)
     }
 }
 
 func connectedAgentStatus(registration: AgentRegistrationState, directory: URL,
-                          request: () throws -> AgentControlSnapshot = { try requestAgentControl("status") }) -> AgentStatusReport {
+                          request: () throws -> AgentControlSnapshot = { try requestAgentControl("status", timeout: 2) }) -> AgentStatusReport {
+    let configuration = try? ConnectedAgentStore(directory: directory).load()
     do {
-        return AgentStatusReport(registration: registration, live: try request(), unavailableReason: nil, lastFailure: nil)
+        return AgentStatusReport(registration: registration, configuration: configuration, live: try request(), unavailableReason: nil, lastFailure: nil)
     } catch {
-        return AgentStatusReport(registration: registration, live: nil, unavailableReason: describeError(error),
+        return AgentStatusReport(registration: registration, configuration: configuration, live: nil, unavailableReason: describeError(error),
             lastFailure: try? AgentFailureStore(directory: directory).load())
     }
 }
@@ -89,6 +96,11 @@ func connectedAgentStatus(registration: AgentRegistrationState, directory: URL,
 func renderAgentStatus(_ report: AgentStatusReport) -> String {
     var lines = ["Agent registration: \(report.registration.rawValue)"]
     guard let status = report.live else {
+        if let configuration = report.configuration {
+            lines.append("Configured coordinator: \(configuration.server.absoluteString)")
+            lines.append("Configured device: \(configuration.deviceID)")
+            lines.append("Configured platforms: \(configuration.platforms.map(\.rawValue).joined(separator: ", "))")
+        }
         lines.append("Live status unavailable: \(report.unavailableReason ?? "unknown error")")
         if let failure = report.lastFailure {
             lines.append("Last recorded failure (\(failure.occurredAt.formatted(.iso8601))): \(failure.message)")

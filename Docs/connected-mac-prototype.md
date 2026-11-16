@@ -125,7 +125,7 @@ When XPC is unavailable, the report has no live snapshot. It shows the connectio
 
 ### End-to-end acceptance
 
-After merging the three runner-service PRs in order, use the installer from this checkout and a trusted repository:
+Use the installer from this checkout and a trusted repository to validate the installed service:
 
 1. Install connected mode with the existing coordinator identity and token. Approve the login item and any setup-time Keychain access, then verify startup after login. Check a locked/missing Keychain token and a rebuilt app against an existing Keychain item; background startup should fail visibly rather than prompt.
 2. Observe `agent status --json` while real Linux and macOS jobs move through provisioning, pickup, execution, capacity release, and cleanup. Exercise concurrent same-platform guests and memory contention. Confirm the reported runner identities against coordinator and GitHub records.
