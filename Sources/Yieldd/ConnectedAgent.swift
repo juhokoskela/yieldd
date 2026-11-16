@@ -213,7 +213,10 @@ struct AgentInstallConnectedCommand: ParsableCommand {
         for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
         let storage = try RunnerStorage.required(in: standalone.directory)
         try storage.validate(stateDirectory: standalone.directory)
-        if let template = configuration.template { try validateRunnerServiceTemplate(template, stateDirectory: standalone.directory) }
+        if let template = configuration.template {
+            try storage.validateMacOS(template: template, clones: storage.clonesURL)
+            try validateRunnerServiceTemplate(template, stateDirectory: standalone.directory)
+        }
         try RunnerNetwork.requireRelay()
         if platforms.contains(.linux), let container {
             try storage.validatePath(storage.containerURL)
