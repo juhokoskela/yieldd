@@ -26,15 +26,7 @@ func installAgent(
         }
     case .notRegistered:
         try store.save(configuration)
-        do {
-            try service.register()
-        } catch {
-            // Registration reports denied approval as an error. Re-reading the service state
-            // distinguishes that expected result from other registration failures.
-            guard service.status() == .requiresApproval else {
-                throw error
-            }
-        }
+        try enableAgent(service: service)
     case .notFound:
         throw AgentError.serviceNotFound
     @unknown default:
@@ -97,6 +89,20 @@ func uninstallAgent(
     try store.remove()
 }
 
+func enableAgent(service: LocalAgentService) throws {
+    switch service.status() {
+    case .enabled, .requiresApproval: break
+    case .notRegistered:
+        do { try service.register() }
+        catch {
+            // Registration can throw when macOS requires user approval.
+            guard service.status() == .requiresApproval else { throw error }
+        }
+    case .notFound: throw AgentError.serviceNotFound
+    @unknown default: throw AgentError.unknownStatus
+    }
+}
+
 func disableAgent(service: LocalAgentService) async throws {
     switch service.status() {
     case .enabled, .requiresApproval, .notFound:
@@ -110,7 +116,6 @@ func disableAgent(service: LocalAgentService) async throws {
     @unknown default:
         throw AgentError.unknownStatus
     }
-
 }
 
 func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {

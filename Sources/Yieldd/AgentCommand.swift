@@ -195,7 +195,7 @@ struct AgentUninstallCommand: AsyncParsableCommand {
 
         let store = try AgentConfigurationStore()
         let connectedStore = ConnectedAgentStore(directory: store.directory)
-        if try connectedStore.load() != nil {
+        if FileManager.default.fileExists(atPath: connectedStore.file.path) {
             try await uninstallConnectedAgent(store: connectedStore, credentials: .keychain, service: service) { configuration, token in
                 try recoverConnectedAgent(configuration: configuration, token: token, directory: store.directory,
                     stop: RunnerPoolStop.monitoringSignals())
@@ -236,6 +236,7 @@ struct AgentRunCommand: ParsableCommand {
                 let endpoint = AgentControlEndpoint(control: control)
                 endpoint.start()
                 defer { endpoint.stop() }
+                try prepareConnectedAgentKeychain()
                 let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
                 try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
                     platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,

@@ -124,10 +124,37 @@ func connectedUninstallDoesNotSweepOutstandingStandaloneGuests() throws {
         repository: try GitHubRepository("owner/repo"), platform: .macOS)
     let leases = try RunnerLeaseStore(directory: fixture.store.directory)
     try leases.save(lease)
-    #expect(throws: ConnectedRunnerError.recoveryRequired) {
+    #expect(throws: ConnectedAgentError.self) {
         try recoverConnectedAgent(configuration: agentConfiguration, token: "", directory: fixture.store.directory, stop: RunnerPoolStop())
     }
     #expect(try leases.load() == [lease])
+}
+
+@Test
+func connectedUninstallDisablesServiceEvenWhenSettingsAreDamaged() async throws {
+    let fixture = try ConnectedAgentFixture()
+    defer { fixture.remove() }
+    try Data("damaged".utf8).write(to: fixture.store.file)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fixture.store.file.path)
+    let disabled = Mutex(false)
+    let service = LocalAgentService(status: { .enabled }, register: {}, unregister: { disabled.withLock { $0 = true } })
+    do {
+        try await uninstallConnectedAgent(store: fixture.store, credentials: FakeAgentKeychain().credentials, service: service) { _, _ in
+            Issue.record("Cannot recover with damaged identity")
+        }
+        Issue.record("Expected invalid settings")
+    } catch {
+        #expect(disabled.withLock { $0 })
+        #expect(FileManager.default.fileExists(atPath: fixture.store.file.path))
+    }
+}
+
+@Test
+func connectedConfigurationProtectsInstalledIdentity() throws {
+    try agentConfiguration.requireIdentity(server: URL(string: "https://COORDINATOR.example:443/")!, deviceID: agentConfiguration.deviceID)
+    #expect(throws: ConnectedRunnerError.identityChanged) {
+        try agentConfiguration.requireIdentity(server: URL(string: "https://other.example")!, deviceID: agentConfiguration.deviceID)
+    }
 }
 
 private final class FakeAgentKeychain: Sendable {
