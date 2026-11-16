@@ -26,7 +26,8 @@ final class ConnectedAgentControl: @unchecked Sendable {
 
     init(directory: URL) {
         pauseFile = directory.appendingPathComponent("connected-agent.paused")
-        paused = FileManager.default.fileExists(atPath: pauseFile.path)
+        var info = stat()
+        paused = Darwin.lstat(pauseFile.path, &info) == 0 || errno != ENOENT
     }
 
     var snapshot: AgentControlSnapshot {
@@ -149,6 +150,7 @@ func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCC
 struct AgentPauseCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "pause", abstract: "Stop accepting connected assignments; let active work finish.")
     mutating func run() throws {
+        try requireInstalledConnectedAgent()
         let snapshot = try requestAgentControl("pause")
         print("Paused. \(snapshot.activeAssignments) assignment(s) still active or cleaning up.")
     }
@@ -157,6 +159,7 @@ struct AgentPauseCommand: ParsableCommand {
 struct AgentResumeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "resume", abstract: "Resume accepting connected assignments.")
     mutating func run() throws {
+        try requireInstalledConnectedAgent()
         _ = try requestAgentControl("resume")
         print("Connected assignments enabled.")
     }
@@ -165,11 +168,16 @@ struct AgentResumeCommand: ParsableCommand {
 struct AgentDrainCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "drain", abstract: "Pause and wait until connected assignments and cleanup finish.")
     mutating func run() throws {
-        let stop = try RunnerPoolStop.monitoringSignals()
+        try requireInstalledConnectedAgent()
         print("Draining. The agent will remain paused until resumed.")
-        try waitForAgentDrain(request: { try requestAgentControl($0) }, wait: { try stop.wait(for: 1) })
+        try waitForAgentDrain(request: { try requestAgentControl($0) }, wait: { Thread.sleep(forTimeInterval: 1) })
         print("Drained. No connected assignments or cleanup remain.")
     }
+}
+
+func requireInstalledConnectedAgent(in directory: URL? = nil) throws {
+    let directory = try directory ?? yielddApplicationSupportDirectory()
+    guard try ConnectedAgentStore(directory: directory).load() != nil else { throw AgentControlError.notInstalled }
 }
 
 func waitForAgentDrain(request: (String) throws -> AgentControlSnapshot, wait: () throws -> Void) throws {
@@ -184,11 +192,12 @@ func waitForAgentDrain(request: (String) throws -> AgentControlSnapshot, wait: (
 }
 
 enum AgentControlError: Error, LocalizedError {
-    case invalidRequest, invalidResponse, unavailable, drainInterrupted
+    case invalidRequest, invalidResponse, unavailable, drainInterrupted, notInstalled
     case rejected(String)
 
     var errorDescription: String? {
         switch self {
+        case .notInstalled: "Pause, resume, and drain require an installed connected agent."
         case .drainInterrupted: "Drain interrupted because the agent restarted or connected assignments were resumed."
         case .invalidRequest: "Unknown connected agent control request."
         case .invalidResponse: "The connected agent returned an unsupported control response."

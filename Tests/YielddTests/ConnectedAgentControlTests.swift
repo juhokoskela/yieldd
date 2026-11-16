@@ -61,8 +61,8 @@ func connectedClientDeclinesAnOfferReceivedDuringPauseWithoutAcceptingIt() throw
     #expect(declined && released && fixture.control.snapshot.drained)
 }
 
-@Test
-func connectedDrainWaitsForRetryingCleanupBeforeReleasingAssignment() throws {
+@Test(arguments: [false, true])
+func connectedDrainWaitsForRetryingCleanupBeforeReleasingAssignment(combined: Bool) throws {
     let fixture = try AgentControlFixture()
     defer { fixture.remove() }
     fixture.control.markReady()
@@ -83,6 +83,10 @@ func connectedDrainWaitsForRetryingCleanupBeforeReleasingAssignment() throws {
             poll: { offer }, decline: { _ in Issue.record("Unexpected decline") }, run: { _, _, _ in
                 _ = try fixture.control.request("pause")
                 recovering = true
+                if combined {
+                    throw RunnerSessionError.operationAndCleanupFailed(operation: ConnectedExecutionError.revoked,
+                        cleanup: [.init(step: .githubRunner, error: ConnectedRunnerError.transport)])
+                }
                 throw ConnectedRunnerError.transport
             }, wait: { _ in }, retrying: { _ in }, paused: { fixture.control.snapshot.paused },
             beginAssignment: { fixture.control.beginAssignment(worker: "linux-0") },
@@ -111,6 +115,44 @@ func drainDetectsResumePauseRaceAndAgentRestart(restart: Bool) throws {
             }
         })
     }
+}
+
+@Test
+func connectedControlRejectsMissingInstallationAndKeepsUnexpectedPauseMarkersSafe() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    #expect(throws: AgentControlError.self) { try requireInstalledConnectedAgent(in: fixture.directory) }
+    let marker = fixture.directory.appendingPathComponent("connected-agent.paused")
+    try FileManager.default.createSymbolicLink(at: marker, withDestinationURL: fixture.directory.appendingPathComponent("missing"))
+    _ = try fixture.control.request("pause")
+    #expect(ConnectedAgentControl(directory: fixture.directory).snapshot.paused)
+    _ = try fixture.control.request("resume")
+    #expect(!ConnectedAgentControl(directory: fixture.directory).snapshot.paused)
+}
+
+@Test
+func connectedDrainCompletesAfterASuccessfulAssignmentAndCleanup() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    fixture.control.markReady()
+    let offer = try ConnectedOffer(owner: "01234567-89ab-4def-8123-456789abcdef",
+        runner: "yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef", repository: "owner/repo", platform: "linux", architecture: "arm64")
+    var finished = false
+    #expect(throws: CancellationError.self) {
+        try runConnectedClient(checkCancellation: { if finished { throw CancellationError() } }, recover: {},
+            acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in },
+            poll: { offer }, decline: { _ in Issue.record("Unexpected decline") }, run: { _, _, release in
+                _ = try fixture.control.request("pause")
+                #expect(!fixture.control.snapshot.drained)
+                release()
+                #expect(!fixture.control.snapshot.drained)
+            }, wait: { _ in }, retrying: { _ in }, paused: { fixture.control.snapshot.paused },
+            beginAssignment: { fixture.control.beginAssignment(worker: "linux-0") }, finishAssignment: {
+                if fixture.control.snapshot.activeAssignments > 0 { finished = true }
+                fixture.control.finishAssignment(worker: "linux-0")
+            })
+    }
+    #expect(fixture.control.snapshot.drained)
 }
 
 private struct AgentControlFixture {

@@ -109,6 +109,7 @@ func runConnectedService(
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
         control?.markReady()
+        if control?.snapshot.paused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
         try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
             let workerID = "\(worker.backend.platform.rawValue)-\(worker.slot)"
             let platform = worker.backend.platform
