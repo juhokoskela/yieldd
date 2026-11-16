@@ -58,8 +58,8 @@ func runConnectedClient(
             }
             heldReservation = reservation
             guard beginAssignment() else {
-                try decline(offer)
                 releaseCapacity()
+                try decline(offer)
                 try wait(1)
                 continue
             }

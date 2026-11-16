@@ -111,6 +111,7 @@ func runConnectedService(
         }
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
+        if control?.snapshot.paused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
         try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
             let workerID = "\(worker.backend.platform.rawValue)-\(worker.slot)"
             let platform = worker.backend.platform

@@ -111,7 +111,7 @@ yieldd agent resume
 
 `pause` stops new connected admissions and lets active assignments finish. A poll already in flight may still return an offer; the worker declines it before accepting credentials. Paused clients stop advertising capacity, and the coordinator's existing availability lease expires normally. Hosted fallback remains governed by coordinator policy.
 
-`drain` pauses and waits for all accepted work and cleanup to finish. It does not stop guests, revoke execution authorization, or unregister the agent. Cleanup retries keep the assignment active until they succeed. Cancelling the waiting command leaves the agent paused; an unavailable service or another caller's resume fails the wait. Run it before replacing or uninstalling the agent when existing jobs should finish first. Uninstall itself still stops the process and performs recovery.
+`drain` pauses and waits for all accepted work and cleanup to finish. It does not stop guests, revoke execution authorization, or unregister the agent. Cleanup retries keep the assignment active until they succeed. Cancelling the waiting command leaves the agent paused; an unavailable service, an agent restart, or another caller's resume fails the wait. Run it before replacing or uninstalling the agent when existing jobs should finish first. Uninstall itself still stops the process and performs recovery.
 
 Pause persists across process restarts and app replacement. Resume explicitly when maintenance is complete. These controls apply to the installed connected agent; standalone services and foreground diagnostic commands retain their existing behavior. Control requests use a versioned local XPC interface restricted to the agent's effective user. It opens no network listener.
 
