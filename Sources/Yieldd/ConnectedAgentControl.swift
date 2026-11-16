@@ -5,6 +5,8 @@ import Synchronization
 
 struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let version: Int
+    let instanceID: UUID
+    let resumeGeneration: UInt64
     let paused: Bool
     let ready: Bool
     let activeAssignments: Int
@@ -17,6 +19,8 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private let lock = NSLock()
     private let pauseFile: URL
     private var paused: Bool
+    private let instanceID = UUID()
+    private var resumeGeneration: UInt64 = 0
     private var ready = false
     private var assignments: Set<String> = []
 
@@ -64,6 +68,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
                     }
                     try synchronizeRunnerState(pauseFile.deletingLastPathComponent())
                     paused = false
+                    resumeGeneration += 1
                 }
             case "status": break
             default: throw AgentControlError.invalidRequest
@@ -73,7 +78,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     private func snapshotUnlocked() -> AgentControlSnapshot {
-        AgentControlSnapshot(version: 1, paused: paused, ready: ready, activeAssignments: assignments.count)
+        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: ready, activeAssignments: assignments.count)
     }
 }
 
@@ -161,14 +166,20 @@ struct AgentDrainCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "drain", abstract: "Pause and wait until connected assignments and cleanup finish.")
     mutating func run() throws {
         let stop = try RunnerPoolStop.monitoringSignals()
-        var snapshot = try requestAgentControl("pause")
         print("Draining. The agent will remain paused until resumed.")
-        while !snapshot.drained {
-            try stop.wait(for: 1)
-            snapshot = try requestAgentControl("status")
-            guard snapshot.paused else { throw AgentControlError.drainInterrupted }
-        }
+        try waitForAgentDrain(request: { try requestAgentControl($0) }, wait: { try stop.wait(for: 1) })
         print("Drained. No connected assignments or cleanup remain.")
+    }
+}
+
+func waitForAgentDrain(request: (String) throws -> AgentControlSnapshot, wait: () throws -> Void) throws {
+    let initial = try request("pause")
+    var snapshot = initial
+    while !snapshot.drained {
+        try wait()
+        snapshot = try request("status")
+        guard snapshot.paused, snapshot.instanceID == initial.instanceID,
+              snapshot.resumeGeneration == initial.resumeGeneration else { throw AgentControlError.drainInterrupted }
     }
 }
 
@@ -178,7 +189,7 @@ enum AgentControlError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .drainInterrupted: "Drain interrupted because connected assignments were resumed."
+        case .drainInterrupted: "Drain interrupted because the agent restarted or connected assignments were resumed."
         case .invalidRequest: "Unknown connected agent control request."
         case .invalidResponse: "The connected agent returned an unsupported control response."
         case .unavailable: "The connected agent is unavailable. Check its login-item registration and agent logs."

@@ -92,6 +92,27 @@ func connectedDrainWaitsForRetryingCleanupBeforeReleasingAssignment() throws {
     #expect(fixture.control.snapshot.drained)
 }
 
+@Test(arguments: [false, true])
+func drainDetectsResumePauseRaceAndAgentRestart(restart: Bool) throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    fixture.control.markReady()
+    #expect(fixture.control.beginAssignment(worker: "linux-0"))
+    var current = fixture.control
+    #expect(throws: AgentControlError.self) {
+        try waitForAgentDrain(request: { try current.request($0) }, wait: {
+            if restart {
+                current = ConnectedAgentControl(directory: fixture.directory)
+                current.markReady()
+            } else {
+                _ = try current.request("resume")
+                _ = try current.request("pause")
+                current.finishAssignment(worker: "linux-0")
+            }
+        })
+    }
+}
+
 private struct AgentControlFixture {
     let directory: URL
     let control: ConnectedAgentControl
