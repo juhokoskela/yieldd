@@ -57,11 +57,14 @@ struct ConnectCommand: ParsableCommand {
 func runConnectedService(
     server serverURL: URL, deviceID: String, token: String, platforms: [RunnerPlatform], template: URL?,
     confirmation: String? = nil, stop: RunnerPoolStop, stateDirectory: URL? = nil,
-    resolveContainer: @escaping @Sendable () throws -> URL = { try ExecutableLocator().locate("container") },
+    resolveContainer: () throws -> URL = { try ExecutableLocator().locate("container") },
     output: RunnerServiceOutput = .terminal
 ) throws {
     try MacOSVirtualMachineLifecycle.requireSupportedHost()
     try withRunnerOwnership(in: stateDirectory, connected: true) { leaseStore in
+        if let installed = try ConnectedAgentStore(directory: leaseStore.directory).load() {
+            try installed.requireIdentity(server: serverURL, deviceID: deviceID)
+        }
         guard try leaseStore.load().isEmpty else {
             throw ValidationError("Run recover to clean up standalone runner leases before connecting.")
         }

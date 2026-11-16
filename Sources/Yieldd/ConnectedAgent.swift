@@ -24,6 +24,13 @@ struct ConnectedAgentConfiguration: Codable, Equatable, Sendable {
         }
     }
 
+    func requireIdentity(server: URL, deviceID: String) throws {
+        guard self.deviceID == deviceID,
+              try ConnectedHTTPClient.serverURL(self.server.absoluteString) == ConnectedHTTPClient.serverURL(server.absoluteString) else {
+            throw ConnectedRunnerError.identityChanged
+        }
+    }
+
     var credentialAccount: String { "\(server.absoluteString)|\(deviceID)" }
 
     func resolveContainer() throws -> URL {
@@ -143,12 +150,12 @@ func installConnectedAgent(configuration: ConnectedAgentConfiguration, token: St
     } else {
         guard service.status() == .notRegistered else { throw AgentError.configurationChanged }
         try withRunnerOwnership(in: store.directory, connected: true) { leases in
-            guard try leases.load().isEmpty else { throw ConnectedRunnerError.recoveryRequired }
+            guard try leases.load().isEmpty else { throw ConnectedAgentError.standaloneRecoveryRequired }
             for journal in ConnectedRunnerStore.all(in: store.directory) {
                 if let lease = try journal.load() {
-                    guard lease.deviceID == configuration.deviceID,
-                          try ConnectedHTTPClient.serverURL(lease.server) == configuration.server else {
-                        throw ConnectedRunnerError.identityChanged
+                    try configuration.requireIdentity(server: ConnectedHTTPClient.serverURL(lease.server), deviceID: lease.deviceID)
+                    if lease.offer.runnerPlatform == .linux, configuration.container == nil {
+                        throw ConnectedAgentError.recoveryContainerRequired
                     }
                 }
             }
@@ -156,21 +163,14 @@ func installConnectedAgent(configuration: ConnectedAgentConfiguration, token: St
             try store.save(configuration)
         }
     }
-    switch service.status() {
-    case .enabled, .requiresApproval: break
-    case .notRegistered:
-        do { try service.register() }
-        catch { guard service.status() == .requiresApproval else { throw error } }
-    case .notFound: throw AgentError.serviceNotFound
-    @unknown default: throw AgentError.unknownStatus
-    }
+    try enableAgent(service: service)
 }
 
 func uninstallConnectedAgent(store: ConnectedAgentStore, credentials: ConnectedAgentCredentials,
                              service: LocalAgentService,
                              recover: (ConnectedAgentConfiguration, String) throws -> Void) async throws {
-    guard let configuration = try store.load() else { throw ConnectedAgentError.invalidConfiguration }
     try await disableAgent(service: service)
+    guard let configuration = try store.load() else { throw ConnectedAgentError.invalidConfiguration }
     let token = try ConnectedRunnerStore.hasRecovery(in: store.directory)
         ? credentials.load(configuration.credentialAccount) : ""
     try recover(configuration, token)
@@ -179,11 +179,11 @@ func uninstallConnectedAgent(store: ConnectedAgentStore, credentials: ConnectedA
 }
 
 func recoverConnectedAgent(configuration: ConnectedAgentConfiguration, token: String,
-                           directory: URL, stop: RunnerPoolStop) throws {
+                           directory: URL, stop: RunnerPoolStop, output: RunnerServiceOutput = .terminal) throws {
     try withRunnerOwnership(in: directory, connected: true) { leases in
-        guard try leases.load().isEmpty else { throw ConnectedRunnerError.recoveryRequired }
+        guard try leases.load().isEmpty else { throw ConnectedAgentError.standaloneRecoveryRequired }
         try recoverConnectedPlatforms(directory: directory, server: configuration.server, deviceID: configuration.deviceID,
-            token: token, confirmation: nil, stop: stop, resolveContainer: configuration.resolveContainer, output: .agentLog)
+            token: token, confirmation: nil, stop: stop, resolveContainer: configuration.resolveContainer, output: output)
         try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
     }
 }
@@ -236,13 +236,23 @@ struct AgentInstallConnectedCommand: ParsableCommand {
 }
 
 enum ConnectedAgentError: Error, LocalizedError {
-    case invalidConfiguration
+    case invalidConfiguration, standaloneRecoveryRequired, recoveryContainerRequired
     case keychain(OSStatus)
 
     var errorDescription: String? {
         switch self {
+        case .standaloneRecoveryRequired: "Run yieldd recover to clean up standalone runner leases before using connected mode."
+        case .recoveryContainerRequired: "An outstanding Linux assignment needs a saved container executable. Recover it with the original connect command before installing a macOS-only agent."
         case .invalidConfiguration: "The connected agent needs a valid coordinator, device UUID, distinct platforms, and absolute paths for its tools and macOS template."
+        case .keychain(errSecItemNotFound): "The connected agent token is missing from Keychain. Restore its original token before recovering outstanding assignments."
         case let .keychain(status): "Connected agent credential access failed (Keychain status \(status)). Unlock the login keychain and retry."
         }
     }
+}
+
+func prepareConnectedAgentKeychain() throws {
+    // The file-based login keychain has ACL prompts outside LocalAuthentication.
+    // This process runs as a LaunchAgent and must fail instead of showing them.
+    let status = SecKeychainSetUserInteractionAllowed(false)
+    guard status == errSecSuccess else { throw ConnectedAgentError.keychain(status) }
 }

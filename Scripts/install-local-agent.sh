@@ -3,7 +3,8 @@
 set -eu
 
 if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 [--connected --server URL --device-id UUID | OWNER/REPOSITORY ...] [--macos OWNER/REPOSITORY ... --macos-template PATH]" >&2
+    echo "Usage: $0 [OWNER/REPOSITORY ...] [--macos OWNER/REPOSITORY ... --macos-template PATH]" >&2
+    echo "       $0 --connected --server URL --device-id UUID [--platform linux|macos ...] [--macos-template PATH]" >&2
     exit 64
 fi
 
