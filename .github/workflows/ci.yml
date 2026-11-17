@@ -13,7 +13,7 @@ permissions:
 jobs:
   swift:
     name: Swift build and tests
-    runs-on: yieldd-macos
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - name: Check out
@@ -49,7 +49,7 @@ jobs:
 
   bootstrap:
     name: Bootstrap contract
-    runs-on: yieldd
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Check out
@@ -65,7 +65,7 @@ jobs:
 
   coordinator:
     name: Coordinator contract
-    runs-on: yieldd
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
