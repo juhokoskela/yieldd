@@ -41,9 +41,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app
 .build/yieldd.app/Contents/MacOS/yieldd doctor
 ```
 
-The `CI` workflow uses GitHub-hosted runners for pushes to `main`, pull requests, and manual dispatches. Swift builds, tests, and signed-app checks run on `macos-26`; bootstrap and coordinator checks run on `ubuntu-24.04`. The `Network prototype` workflow also uses `macos-26`. CI does not depend on the yieldd coordinator. These checks do not start nested runner VMs or replace a running yieldd installation. Swift tests run serially while parallel lifecycle-test timing failures remain unresolved.
+While the yieldd coordinator is unavailable, the `CI` workflow uses GitHub-hosted runners for pushes to `main`, pull requests, and manual dispatches. Swift builds, tests, and signed-app checks run on `macos-26`; bootstrap and coordinator checks run on `ubuntu-24.04-arm`. The `Network prototype` workflow also uses `macos-26`. CI does not depend on the yieldd coordinator. These checks do not start nested runner VMs or replace a running yieldd installation. Swift tests run serially while parallel lifecycle-test timing failures remain unresolved.
 
-The opt-in runner acceptance workflows still target yieldd runners. They require a working coordinator or a manually started local runner; a GitHub-hosted run would not validate yieldd execution. Hosted fallback bootstrap workflows continue to use their explicitly supplied external runner.
+The opt-in runner acceptance workflows target yieldd runners. They require a working coordinator or a manually started local runner; a GitHub-hosted run would not validate yieldd execution. Hosted fallback bootstrap workflows must target their explicitly supplied external runner, never a yieldd queue.
 
 ## Guest image
 
