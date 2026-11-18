@@ -30,13 +30,7 @@ func TestLocalOfferDoesNotRegisterUntilAccepted(t *testing.T) {
 	if len(w.events) != 0 || singleLease(c.state).Local.Phase != localOffered {
 		t.Fatal("offer caused external provisioning")
 	}
-	save := c.save
-	c.save = func(s *state) error {
-		if s.Leases[request.Runner].JIT != "" {
-			t.Fatal("local assignment persisted JIT")
-		}
-		return save(s)
-	}
+	checkJournalOmitsCredential(t, c, store)
 	w.beforeGenerate = func() {
 		saved, err := store.load(c.state.Config)
 		if err != nil || singleLease(saved).Local.Phase != localAccepted {
@@ -48,7 +42,7 @@ func TestLocalOfferDoesNotRegisterUntilAccepted(t *testing.T) {
 		t.Fatalf("accept: %v %v", credential, err)
 	}
 	saved, err := store.load(c.state.Config)
-	if err != nil || singleLease(saved).Local.Phase != localIssued || singleLease(saved).JIT != "" {
+	if err != nil || singleLease(saved).Local.Phase != localIssued {
 		t.Fatalf("delivery not durable: %v", err)
 	}
 	if _, err := c.acceptDevice(t.Context(), request); err == nil {
@@ -366,7 +360,7 @@ func TestDeviceRequestRejectsOversizedAndUnknownFields(t *testing.T) {
 }
 
 func TestLocalStateRejectsMixedHostedAndLocalIdentities(t *testing.T) {
-	for _, invalid := range []string{"device", "phase", "run", "issued", "credentials", "accepted-id", "accepted-jit"} {
+	for _, invalid := range []string{"device", "phase", "run", "issued", "accepted-id"} {
 		t.Run(invalid, func(t *testing.T) {
 			c, _, store, _ := localFixture(t)
 			l := singleLease(c.state)
@@ -384,11 +378,6 @@ func TestLocalStateRejectsMixedHostedAndLocalIdentities(t *testing.T) {
 			case "accepted-id":
 				l.Local.Phase = localAccepted
 				l.RunnerID = 7
-			case "accepted-jit":
-				l.Local.Phase = localAccepted
-				l.JIT = "private-jit"
-			case "credentials":
-				l.JIT = "private-jit"
 			}
 			if err := store.save(c.state); err != nil {
 				t.Fatal(err)

@@ -39,11 +39,12 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 				if err := hosted.replace(&lease{Name: hostedName, Created: time.Now().UTC()}); err != nil {
 					t.Fatal(err)
 				}
-				if err := hosted.register(t.Context()); err != nil {
+				registration, err := hosted.generateRegistration(t.Context())
+				if err != nil {
 					t.Fatal(err)
 				}
 				next := *hosted.lease
-				next.DispatchIntent, next.JIT = true, ""
+				next.DispatchIntent, next.RunnerID = true, registration.Runner.ID
 				next.RunID = 101
 				if err := hosted.replace(&next); err != nil {
 					t.Fatal(err)
@@ -61,7 +62,7 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 					t.Fatal(err)
 				}
 				if pendingKind == "registered" {
-					if err := pending.register(t.Context()); err != nil {
+					if _, err := pending.generateRegistration(t.Context()); err != nil {
 						t.Fatal(err)
 					}
 				}

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -55,8 +54,20 @@ func TestFailedQueueAndItsRestartLeaveSiblingServing(t *testing.T) {
 		failed.state = saved
 		broken.generateErr = nil
 		restarted := testPlatform(t, ctx, failed, &controlledMessages{initial: 1})
-		if err := restarted.run(ctx, false); err == nil || !strings.Contains(err.Error(), "run with --recover") {
-			t.Fatal("uncertain registration was replayed", err)
+		restartDone := make(chan error, 1)
+		go func() { restartDone <- restarted.run(ctx, false) }()
+		synctest.Wait()
+		if err := restarted.loop.invoke(t.Context(), func(context.Context) error {
+			if len(failed.state.Leases) != 0 || broken.dispatched != 0 {
+				return errors.New("restart replayed registration")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		restarted.cancel()
+		if err := <-restartDone; err != nil {
+			t.Fatal(err)
 		}
 		if n, err := good.loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || world.dispatched != 1 {
 			t.Fatal("sibling cannot provision after failure and restart", n, err)
@@ -163,10 +174,7 @@ func TestTargetedRecoveryLeavesOtherQueueAlone(t *testing.T) {
 	if err := healthy.replace(&lease{Name: name, Created: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := healthy.register(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if err := healthy.prepare(t.Context()); err != nil {
+	if err := healthy.provisionHosted(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	sibling.state.Config.Repository = "example/yieldd-bootstrap-sibling"

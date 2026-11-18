@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
+func TestExpiredContextAfterSecretUploadRecoversWithoutDispatch(t *testing.T) {
 	for _, mode := range []string{"cancel", "deadline"} {
 		for _, recoverOnly := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/recover=%v", mode, recoverOnly), func(t *testing.T) {
@@ -42,8 +42,8 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if singleLease(saved) == nil || singleLease(saved).DispatchIntent || singleLease(saved).JIT != "private-jit" || singleLease(saved).RunnerID != 7 {
-						t.Fatal("expired context recorded dispatch or lost resumable credentials")
+					if singleLease(saved) == nil || singleLease(saved).DispatchIntent || singleLease(saved).RunnerID != 0 {
+						t.Fatal("upload advanced the journal before dispatch")
 					}
 					if singleLease(c.state).DispatchIntent || w.dispatched != 0 || w.secret != "private-jit" {
 						t.Fatal("dispatch attempted after upload exhausted its context")
@@ -60,8 +60,8 @@ func TestExpiredContextAfterSecretUploadLeavesResumableIntent(t *testing.T) {
 						if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 							t.Fatal(err)
 						}
-						if w.dispatched != 1 || w.findCalls != 0 || singleLease(c.state).RunID != 99 {
-							t.Fatal("restart could not resume provisioning")
+						if w.dispatched != 0 || w.findCalls != 0 || singleLease(c.state) != nil || w.secret != "" || w.runner != nil {
+							t.Fatal("restart left pre-dispatch resources or replayed execution")
 						}
 					}
 				})
@@ -108,7 +108,7 @@ func TestExpiredContextDuringDispatchIntentSaveEntersCleanup(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if singleLease(saved) == nil || !singleLease(saved).CleanupIntent || singleLease(saved).JIT != "" || singleLease(saved).RunID != 0 {
+					if singleLease(saved) == nil || !singleLease(saved).CleanupIntent || singleLease(saved).RunID != 0 {
 						t.Fatal("unattempted dispatch did not persist cleanup intent")
 					}
 					if w.dispatched != 0 || w.runner == nil || w.secret == "" {

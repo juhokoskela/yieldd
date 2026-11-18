@@ -19,7 +19,6 @@ type lease struct {
 	Name           string      `json:"name"`
 	Created        time.Time   `json:"created"`
 	RunnerID       int         `json:"runner_id,omitempty"`
-	JIT            string      `json:"jit,omitempty"`
 	DispatchIntent bool        `json:"dispatch_intent,omitempty"`
 	RunID          int64       `json:"run_id,omitempty"`
 	CleanupIntent  bool        `json:"cleanup_intent,omitempty"`
@@ -170,7 +169,7 @@ func (s *stateStore) load(c config) (*state, error) {
 		if value.Config.LocalOnly && l.Local == nil {
 			return nil, errors.New("local-only queue contains a fallback lease")
 		}
-		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0) || (l.Conclusion != "" && !l.CleanupIntent) || ((l.DispatchIntent || l.CleanupIntent) && l.JIT != "") {
+		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0) || (l.Conclusion != "" && !l.CleanupIntent) {
 			return nil, errors.New("invalid provisioning lease")
 		}
 		if err := l.validateLocal(value.Config.DeviceID); err != nil {
@@ -249,11 +248,11 @@ func (l *lease) validateLocal(device string) error {
 	}
 	switch a.Phase {
 	case localOffered, localDeclined, localAccepted:
-		if l.RunnerID != 0 || l.JIT != "" {
+		if l.RunnerID != 0 {
 			return errors.New("unissued local lease has credentials")
 		}
 	case localIssued:
-		if l.RunnerID == 0 || l.JIT != "" {
+		if l.RunnerID == 0 {
 			return errors.New("invalid issued local lease")
 		}
 	default:

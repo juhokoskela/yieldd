@@ -253,10 +253,7 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, err
 	}
 	a.logger.Info("Local offer expired; using hosted fallback", "runner", l.Name, "device", a.state.Config.DeviceID, "offer_age", time.Since(l.Created))
-	if err := a.register(ctx); err != nil {
-		return false, err
-	}
-	return false, a.prepare(ctx)
+	return false, a.provisionHosted(ctx)
 }
 
 func (a *assignment) saveLocal(local *localLease) error {

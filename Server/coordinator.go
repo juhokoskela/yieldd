@@ -453,10 +453,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		c.logger.Info("Local offer created", "runner", l.Name, "device", c.state.Config.DeviceID, "slot", slot, "accept_timeout", offerLifetime)
 		return nil
 	}
-	if err := a.register(ctx); err != nil {
-		return err
-	}
-	if err := a.prepare(ctx); err != nil {
+	if err := a.provisionHosted(ctx); err != nil {
 		return err
 	}
 	// Give device requests a turn before the next provisioning operation.
@@ -516,35 +513,25 @@ func (a *assignment) generateRegistration(ctx context.Context) (*scaleset.Runner
 	return generated, nil
 }
 
-func (a *assignment) register(ctx context.Context) error {
-	generated, err := a.generateRegistration(ctx)
-	if err != nil {
-		return err
-	}
-	next := *a.lease
-	next.RunnerID, next.JIT = generated.Runner.ID, generated.EncodedJITConfig
-	return a.replace(&next)
-}
-
-func (a *assignment) prepare(ctx context.Context) error {
+// Called only for a newly journaled hosted assignment or an unissued local offer
+// just converted to hosted. Reconciliation cleans up interrupted attempts.
+func (a *assignment) provisionHosted(ctx context.Context) error {
 	if a.state.Config.LocalOnly {
 		return errors.New("local-only queues cannot dispatch fallback runners")
 	}
 	l := a.lease
-	if l.RunnerID == 0 {
-		return fmt.Errorf("registration outcome is unknown; run with --recover %s/%s/%s before provisioning again", a.state.Config.Repository, a.state.Config.platform(), l.Name)
+	generated, err := a.generateRegistration(ctx)
+	if err != nil {
+		return err
 	}
-	if l.JIT == "" {
-		return fmt.Errorf("JIT configuration is missing; run with --recover %s/%s/%s", a.state.Config.Repository, a.state.Config.platform(), l.Name)
-	}
-	if err := a.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
+	if err := a.bootstrap.putSecret(ctx, l.secretName(), generated.EncodedJITConfig); err != nil {
 		return fmt.Errorf("store bootstrap credential: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	next := *l
-	next.JIT, next.DispatchIntent = "", true
+	next.RunnerID, next.DispatchIntent = generated.Runner.ID, true
 	if err := a.replace(&next); err != nil {
 		// Rename may have published intent before directory sync failed.
 		return errors.Join(err, a.beginCleanup(""))
@@ -590,13 +577,10 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 		return a.reconcileLocal(ctx, recoverOnly)
 	}
 	if !l.DispatchIntent {
-		if recoverOnly {
-			if err := a.beginCleanup(""); err != nil {
-				return false, err
-			}
-			return a.finishCleanup(ctx, recoverOnly)
+		if err := a.beginCleanup(""); err != nil {
+			return false, err
 		}
-		return false, a.prepare(ctx)
+		return a.finishCleanup(ctx, recoverOnly)
 	}
 	var run *workflowRun
 	var err error
@@ -684,7 +668,6 @@ func (a *assignment) beginCleanup(conclusion string) error {
 	nextLease := *l
 	nextLease.CleanupIntent = true
 	nextLease.Conclusion = conclusion
-	nextLease.JIT = ""
 	if err := a.replace(&nextLease); err != nil {
 		return fmt.Errorf("persist cleanup intent: %w", err)
 	}
@@ -751,7 +734,7 @@ func (a *assignment) cleanup(ctx context.Context) error {
 		return err
 	}
 	delete(a.reportedLocalHold, l.Name)
-	if runner != nil || l.RunnerID != 0 || l.DispatchIntent || (l.Local != nil && l.Local.Phase == localIssued) {
+	if l.Local == nil || runner != nil || l.Local.Phase == localIssued {
 		a.refreshDemand = true
 	}
 	return nil
