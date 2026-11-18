@@ -10,6 +10,8 @@ The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scales
 
 Use a Linux or macOS coordinator with Go 1.27.4 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or legacy standalone `yieldd` service against the same repository's label during the experiment.
 
+Before upgrading from a release that persisted local JIT credentials, stop new demand and drain all queues and Macs. Keep the original credentials and journals until the previous coordinator has reconciled issued registrations and received guest cleanup acknowledgements. This version rejects local credentials in persisted state. Finish recovery with the old binary if startup reports that condition.
+
 When upgrading from the single-repository version, finish its jobs and recovery with the previous binary and original configuration first. Stop it, keep its state intact, and choose a fresh `--state-dir` for this version. Old `state.json` and `macos/state.json` layouts are rejected, not migrated. Existing GitHub scale sets are discovered by name.
 
 When upgrading from the one-runner-per-queue version, finish all jobs and recovery with the previous coordinator and Mac client first. Stop both before updating them together. Empty multi-repository journals can be reused without changing queue or scale-set identities; active single-assignment journals are rejected rather than migrated. Do not delete unresolved state. The `connect` command and coordinator environment variables are unchanged.

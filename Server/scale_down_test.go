@@ -23,7 +23,7 @@ func TestPositiveScaleDownRetiresUnusedLocalAssignmentsBeforeFallback(t *testing
 				a := c.assigned(offer.Runner)
 				local := *a.lease.Local
 				local.Phase, local.Expires = phase, time.Now().Add(-time.Second)
-				if err := a.saveLocal(&local, ""); err != nil {
+				if err := a.saveLocal(&local); err != nil {
 					t.Fatal(err)
 				}
 				if phase == localAccepted {

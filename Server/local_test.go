@@ -366,7 +366,7 @@ func TestDeviceRequestRejectsOversizedAndUnknownFields(t *testing.T) {
 }
 
 func TestLocalStateRejectsMixedHostedAndLocalIdentities(t *testing.T) {
-	for _, invalid := range []string{"device", "phase", "run", "issued", "credentials"} {
+	for _, invalid := range []string{"device", "phase", "run", "issued", "credentials", "accepted-id", "accepted-jit"} {
 		t.Run(invalid, func(t *testing.T) {
 			c, _, store, _ := localFixture(t)
 			l := singleLease(c.state)
@@ -381,6 +381,12 @@ func TestLocalStateRejectsMixedHostedAndLocalIdentities(t *testing.T) {
 				l.RunID = 99
 			case "issued":
 				l.Local.Phase = localIssued
+			case "accepted-id":
+				l.Local.Phase = localAccepted
+				l.RunnerID = 7
+			case "accepted-jit":
+				l.Local.Phase = localAccepted
+				l.JIT = "private-jit"
 			case "credentials":
 				l.JIT = "private-jit"
 			}
@@ -391,33 +397,5 @@ func TestLocalStateRejectsMixedHostedAndLocalIdentities(t *testing.T) {
 				t.Fatal("invalid local state accepted")
 			}
 		})
-	}
-}
-
-func TestRecoverPreviousAcceptedJITWithoutIssuingAgain(t *testing.T) {
-	c, w, store, req := localFixture(t)
-	a := c.assigned(req.Runner)
-	accepted := *a.lease.Local
-	accepted.Phase = localAccepted
-	if err := a.saveLocal(&accepted, ""); err != nil {
-		t.Fatal(err)
-	}
-	// Previous releases checkpointed both the JIT and ID while still accepted.
-	if err := a.register(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := store.load(c.state.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.state = saved
-	if jit, err := c.acceptDevice(t.Context(), req); err == nil || jit != nil {
-		t.Fatal("reissued previous JIT")
-	}
-	if err := c.completeDevice(t.Context(), req); err != nil {
-		t.Fatal(err)
-	}
-	if w.runner != nil || len(c.state.Leases) != 0 || w.dispatched != 0 {
-		t.Fatal("old registration not reconciled")
 	}
 }

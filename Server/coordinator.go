@@ -311,7 +311,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		if surplus[name] && local != nil && local.Phase == localIssued {
 			next := *local
 			next.Expires = time.Now().UTC()
-			if err := a.saveLocal(&next, ""); err != nil {
+			if err := a.saveLocal(&next); err != nil {
 				return err
 			}
 		}

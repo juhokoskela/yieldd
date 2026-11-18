@@ -236,11 +236,10 @@ func (l *lease) validateLocal(device string) error {
 		return errors.New("invalid local lease identity")
 	}
 	switch a.Phase {
-	case localOffered, localDeclined:
+	case localOffered, localDeclined, localAccepted:
 		if l.RunnerID != 0 || l.JIT != "" {
-			return errors.New("unaccepted offer has credentials")
+			return errors.New("unissued local lease has credentials")
 		}
-	case localAccepted:
 	case localIssued:
 		if l.RunnerID == 0 || l.JIT != "" {
 			return errors.New("invalid issued local lease")
