@@ -31,23 +31,28 @@ struct NativeCacheStore {
     private let platform: RunnerPlatform
     private let validate: () throws -> Void
     private let diskBytes: Int64
+    private let executor: any ProcessExecuting
+    private let ownershipDescriptor: Int32?
     private let manager = FileManager.default
     private var seeds: URL { directory.appendingPathComponent("seeds") }
     private var jobs: URL { directory.appendingPathComponent("jobs") }
     private var index: URL { directory.appendingPathComponent("index.json") }
 
     init(root: URL, platform: RunnerPlatform, diskBytes: Int64 = 8 << 30,
+         executor: any ProcessExecuting = ProcessExecutor(), ownershipDescriptor: Int32? = nil,
          validate: @escaping () throws -> Void = {}) {
         self.directory = root.appendingPathComponent(platform.rawValue)
         self.platform = platform
         self.diskBytes = diskBytes
+        self.executor = executor
+        self.ownershipDescriptor = ownershipDescriptor
         self.validate = validate
     }
 
-    init(storage: RunnerStorage, platform: RunnerPlatform) throws {
+    init(storage: RunnerStorage, platform: RunnerPlatform, executor: any ProcessExecuting, ownershipDescriptor: Int32?) throws {
         let root = storage.volumeURL.appendingPathComponent("job-caches/native")
         let device = try RunnerStorage.device(at: storage.volumeURL)
-        self.init(root: root, platform: platform) {
+        self.init(root: root, platform: platform, executor: executor, ownershipDescriptor: ownershipDescriptor) {
             guard try RunnerStorage.device(at: storage.volumeURL) == device else {
                 throw RunnerStorageError.volumeUnavailable(path: storage.volumePath)
             }
@@ -173,8 +178,9 @@ struct NativeCacheStore {
         if platform == .macOS {
             let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/sbin/diskutil"),
                 arguments: ["image", "create", "blank", "--format", "RAW", "--size", String(diskBytes),
-                            "--volumeName", "YielddCache", url.path], timeout: 60, outputCapture: .tail(maxBytes: 4096))
-            _ = try ProcessExecutor().execute(request).requireSuccess(for: request)
+                            "--volumeName", "YielddCache", url.path], timeout: 60, outputCapture: .tail(maxBytes: 4096),
+                ownershipDescriptor: ownershipDescriptor)
+            _ = try executor.execute(request).requireSuccess(for: request)
         } else {
             let fd = Darwin.open(url.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
             guard fd >= 0 else { throw lastError() }

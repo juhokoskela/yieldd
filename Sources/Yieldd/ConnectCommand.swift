@@ -128,7 +128,9 @@ func runConnectedService(
             let authorization = ConnectedExecutionAuthorization(renew: client.renew, jobResult: client.jobResult, checkCancellation: stop.check)
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
             let network = try RunnerNetwork(stateDirectory: directory, platform: platform, cacheSocket: cacheSocket)
-            let nativeCache = try cacheSocket.map { _ in try NativeCacheStore(storage: storage, platform: platform) }
+            let nativeCache = try cacheSocket.map { _ in
+                try NativeCacheStore(storage: storage, platform: platform, executor: executor, ownershipDescriptor: ownershipDescriptor)
+            }
             let backend: any RunnerBackend
             switch worker.backend {
             case let .linux(containerURL):

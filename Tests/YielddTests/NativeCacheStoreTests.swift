@@ -126,6 +126,22 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     }
 }
 
+@Test func macOSColdFormatterUsesSlotCancellationAndRetainsRunnerOwnership() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let executor = RecordingProcessExecutor(outcomes: [.failure(TestFailure.cancelled)])
+    try withRunnerOwnership(in: root) { owner in
+        let descriptor = try #require(owner.ownershipDescriptor)
+        let storage = RunnerStorage(volumePath: root.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
+        let store = try NativeCacheStore(storage: storage, platform: .macOS, executor: executor, ownershipDescriptor: descriptor)
+        #expect(throws: TestFailure.cancelled) { try store.open(runner(), readable: [], writable: mainScope) }
+        let request = try #require(executor.requests.first)
+        #expect(request.executableURL.path == "/usr/sbin/diskutil")
+        #expect(request.cancellable)
+        #expect(request.ownershipDescriptor == descriptor)
+    }
+}
+
 @Test func macOSColdDiskHasTheRequestedRawSizeAndCanBeCloned() throws {
     let root = try workspace()
     defer { try? FileManager.default.removeItem(at: root) }
