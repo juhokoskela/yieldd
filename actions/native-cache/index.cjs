@@ -21,7 +21,7 @@ async function request(operation) {
 
 async function open() {
   let directory
-  if (process.env.ACTIONS_RESULTS_URL === origin) {
+  if (process.env.ACTIONS_RESULTS_URL === origin && process.env.ACTIONS_CACHE_MODE !== 'none') {
     const result = await request('open')
     directory = process.platform === 'darwin' ? '/Volumes/YielddCache' : '/mnt/yieldd-cache'
     if (result.path !== directory) throw new Error('The native cache returned an unexpected mount point.')

@@ -30,6 +30,14 @@ test('hosted fallback supplies a private directory without using a job token', t
   execFileSync(process.execPath, [path.join(__dirname, 'post.cjs')], {env})
 })
 
+test('a job with no cache grant uses fresh disk space', t => {
+  const env = {...fixture(t), ACTIONS_RESULTS_URL: 'http://192.168.127.1:7341/', ACTIONS_CACHE_MODE: 'none'}
+  execFileSync(process.execPath, [path.join(__dirname, 'index.cjs')], {env})
+  const dir = fs.readFileSync(env.GITHUB_OUTPUT, 'utf8').trim().slice('path='.length)
+  assert.equal(path.dirname(dir), env.RUNNER_TEMP)
+  assert.ok(!fs.existsSync(env.GITHUB_STATE))
+})
+
 test('opt-in opens the disk and requests a save at the same endpoint', t => {
   const env = fixture(t)
   env.ACTIONS_RESULTS_URL = 'http://192.168.127.1:7341/'
