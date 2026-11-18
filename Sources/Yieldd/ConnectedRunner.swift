@@ -97,6 +97,9 @@ final class ConnectedRunner {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation
         }
+        if cache?.saveRequested == true && !authorization.jobSucceeded {
+            writeToStandardError("Discarding native cache for \(id.value) because GitHub job success was not confirmed.\n")
+        }
         authorization.stop()
         if let failure, !isCancellation(failure), (failure as? ConnectedRunnerError)?.httpStatus != 410 {
             stateChanged(.executionStopped(id, reason: describeError(failure)))

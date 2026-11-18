@@ -59,7 +59,7 @@ func TestLocalTransitionsCannotReopenExecutionOrReleaseUnacknowledgedCapacity(t 
 			if _, err := c.acceptDevice(t.Context(), request); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.assigned(request.Runner).recordLocalJob(singleLease(c.state).RunnerID, new("Succeeded")); err != nil {
+			if err := c.assigned(request.Runner).recordLocalJob(singleLease(c.state).RunnerID, jobSucceeded); err != nil {
 				t.Fatal(err)
 			}
 			original := singleLease(c.state)

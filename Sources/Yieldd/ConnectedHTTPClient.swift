@@ -87,6 +87,20 @@ final class ConnectedHTTPClient {
         return authorization.job_succeeded == true ? .jobSucceeded : .revoked
     }
 
+    func jobResult(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> FinalJobResult {
+        struct Response: Decodable { let result: FinalJobResult }
+        do {
+            let (_, data) = try request("job-result", offer: offer, checkCancellation: {
+                try self.checkCancellation()
+                try checkDeadline()
+            })
+            return try JSONDecoder().decode(Response.self, from: data).result
+        } catch ConnectedRunnerError.http(404, _, _) {
+            // Older coordinators can run jobs without confirming native cache publication.
+            return .unavailable
+        }
+    }
+
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {
         do {
             let result = try performRequest(action, offer: offer, checkCancellation: check)

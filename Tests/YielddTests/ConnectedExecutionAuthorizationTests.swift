@@ -5,6 +5,16 @@ import Testing
 private let authorizationOffer = try! ConnectedOffer(owner: "01234567-89ab-4def-8123-456789abcdef",
     runner: "yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef", repository: "owner/repo", platform: "linux", architecture: "arm64")
 
+// Tests without native saves should never need the final-result endpoint.
+extension ConnectedExecutionAuthorization {
+    convenience init(renew: @escaping (ConnectedOffer, () throws -> Void) throws -> ExecutionRenewal,
+                     checkCancellation: @escaping () throws -> Void,
+                     currentTime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.init(renew: renew, jobResult: { _, _ in throw TestFailure.unexpectedBackendCall },
+                  checkCancellation: checkCancellation, currentTime: currentTime)
+    }
+}
+
 @Test
 func executionAuthorizationRenewsForLongJobsWithoutATotalDeadline() throws {
     var now: TimeInterval = 0
@@ -120,10 +130,15 @@ func executionAuthorizationInterruptsAHostOwnedProcessWhileGuestCommandIsStuck()
 func nativeCacheWaitsForGitHubSuccessBeforeOrAfterListenerExit(successBeforeExit: Bool) throws {
     var now: TimeInterval = 0
     var renewals = 0
+    var resultQueries = 0
     let authorization = ConnectedExecutionAuthorization(renew: { _, check in
         try check()
         renewals += 1
         return renewals == 2 ? .jobSucceeded : .active
+    }, jobResult: { _, check in
+        try check()
+        resultQueries += 1
+        return resultQueries == 2 ? .succeeded : .pending
     }, checkCancellation: {}, currentTime: { now })
     authorization.start(authorizationOffer, pendingNativeSave: { true })
     if successBeforeExit {
@@ -132,7 +147,8 @@ func nativeCacheWaitsForGitHubSuccessBeforeOrAfterListenerExit(successBeforeExit
         try authorization.check()
     }
     #expect(try authorization.confirmNativeSave { now += $0 })
-    #expect(renewals == 2)
+    #expect(renewals == (successBeforeExit ? 2 : 0))
+    #expect(resultQueries == (successBeforeExit ? 0 : 2))
     now = ConnectedExecutionAuthorization.offlineGrace
     #expect(throws: ConnectedExecutionError.expired) { try authorization.check() }
 }
@@ -140,15 +156,21 @@ func nativeCacheWaitsForGitHubSuccessBeforeOrAfterListenerExit(successBeforeExit
 @Test
 func nativeCacheRejectsRevocationAndBoundsMissingCompletion() throws {
     var now: TimeInterval = 0
-    let revoked = ConnectedExecutionAuthorization(renew: { _, _ in .revoked }, checkCancellation: {})
+    let revoked = ConnectedExecutionAuthorization(renew: { _, _ in throw TestFailure.unexpectedBackendCall },
+        jobResult: { _, _ in .unavailable }, checkCancellation: {})
     revoked.start(authorizationOffer, pendingNativeSave: { true })
     #expect(try !revoked.confirmNativeSave { _ in Issue.record("unexpected retry") })
 
-    let offline = ConnectedExecutionAuthorization(renew: { _, _ in throw ConnectedRunnerError.transport },
+    var attempts: [TimeInterval] = []
+    let offline = ConnectedExecutionAuthorization(renew: { _, _ in throw TestFailure.unexpectedBackendCall }, jobResult: { _, _ in
+        attempts.append(now)
+        throw ConnectedRunnerError.transport
+    },
         checkCancellation: {}, currentTime: { now })
     offline.start(authorizationOffer, pendingNativeSave: { true })
     #expect(try !offline.confirmNativeSave { now += $0 })
     #expect(now == 30)
+    #expect(attempts == [0, 2, 6, 14, 22])
 }
 
 @Test
@@ -156,4 +178,30 @@ func successfulCompletionDoesNotExtendGuestExecutionWithoutPendingSave() throws 
     let authorization = ConnectedExecutionAuthorization(renew: { _, _ in .jobSucceeded }, checkCancellation: {})
     authorization.start(authorizationOffer)
     #expect(throws: ConnectedExecutionError.revoked) { try authorization.check() }
+}
+
+@Test(arguments: [true, false])
+func terminalSuccessBoundsOnlyTheWaitForListenerExit(cleanExitInTime: Bool) throws {
+    var now: TimeInterval = 0
+    var result = ExecutionRenewal.active
+    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in result }, checkCancellation: {},
+                                                       currentTime: { now })
+    authorization.start(authorizationOffer, pendingNativeSave: { true })
+    try authorization.check()
+    now = 30
+    result = .jobSucceeded
+    try authorization.check()
+    now = 59
+    try authorization.check()
+    if cleanExitInTime {
+        #expect(try authorization.confirmNativeSave { _ in Issue.record("unexpected result poll") })
+        now = 299
+        try authorization.check()
+        now = 300
+        #expect(throws: ConnectedExecutionError.expired) { try authorization.check() }
+    } else {
+        now = 60
+        #expect(throws: ConnectedExecutionError.listenerExitTimedOut) { try authorization.check() }
+        #expect(throws: ConnectedExecutionError.listenerExitTimedOut) { try authorization.confirmNativeSave { _ in } }
+    }
 }

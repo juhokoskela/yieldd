@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -196,7 +197,7 @@ func (a *assignment) replace(nextLease *lease) error {
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, nil); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, jobStarted); err != nil {
 		return err
 	}
 	c.logger.Info("Job started", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID)
@@ -204,7 +205,11 @@ func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStart
 }
 
 func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, &job.Result); err != nil {
+	event := jobUnsuccessful
+	if strings.EqualFold(job.Result, "succeeded") || strings.EqualFold(job.Result, "success") {
+		event = jobSucceeded
+	}
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, event); err != nil {
 		return err
 	}
 	c.logger.Info("Job completed", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID, "result", job.Result)

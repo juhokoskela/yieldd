@@ -125,7 +125,7 @@ func runConnectedService(
             let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
                                              platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline,
                 connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
-            let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
+            let authorization = ConnectedExecutionAuthorization(renew: client.renew, jobResult: client.jobResult, checkCancellation: stop.check)
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
             let network = try RunnerNetwork(stateDirectory: directory, platform: platform, cacheSocket: cacheSocket)
             let nativeCache = try cacheSocket.map { _ in try NativeCacheStore(storage: storage, platform: platform) }

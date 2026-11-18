@@ -1309,6 +1309,7 @@ func connectedNativeCachePublicationUsesFinalJobResult(_ result: ExecutionRenewa
     var now: TimeInterval = 0
     var saveSent = false
     let authorization = ConnectedExecutionAuthorization(renew: { _, _ in saveSent ? result : .active },
+        jobResult: { _, _ in result == .jobSucceeded ? .succeeded : .unavailable },
         checkCancellation: {}, currentTime: { now })
     let runner = ConnectedRunner(backend: backend, store: fixture.store, server: "https://example.com/",
         deviceID: connectedOffer.owner, accept: { _ in try connectedJIT() },

@@ -164,6 +164,17 @@ func connectedRenewalRequiresExplicitFinalSuccess(_ success: Bool) throws {
     #expect(try server.client.renew(offer, checkDeadline: {}) == (success ? .jobSucceeded : .revoked))
 }
 
+@Test(arguments: [FinalJobResult.pending, .succeeded, .unavailable])
+func connectedFinalResultUsesDedicatedEndpoint(_ result: FinalJobResult) throws {
+    let body = #"{"result":"\#(result.rawValue)"}"#
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    let offer = try ConnectedOffer(owner: UUID().uuidString.lowercased(), runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
+        repository: "owner/repo", platform: "linux", architecture: "arm64")
+    #expect(try server.client.jobResult(offer, checkDeadline: {}) == result)
+    #expect(server.request.contains("POST /v1/job-result HTTP/1.1"))
+}
+
 @Test(arguments: [RunnerPlatform.linux, .macOS], [0, 2, 15])
 func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatform, slot: Int) throws {
     let body = #"{"jit":"fixture","continue":true}"#

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/actions/scaleset"
 )
 
 func TestDeviceHTTPValidationAndShutdownDiagnostics(t *testing.T) {
@@ -255,4 +257,33 @@ func TestDeviceJournalErrorAfterPublicationStopsQueue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeviceFinalResultReadsTheMatchedLeaseWithoutGitHub(t *testing.T) {
+	c, _, _, request := localFixture(t)
+	if _, err := c.acceptDevice(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	id := c.state.Leases[request.Runner].RunnerID
+	c.bootstrap, c.runners = nil, nil
+	ctx, cancel := context.WithCancel(t.Context())
+	loop := newCoordinatorLoop(ctx, c)
+	handler := deviceHandlerFor(t, loop, strings.Repeat("x", 32))
+	startLoops(t, cancel, []*coordinatorLoop{loop})
+	check := func(req deviceRequest, want string) {
+		t.Helper()
+		response := requestDevice(handler, "job-result", req)
+		var got deviceJobResult
+		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil || response.Code != http.StatusOK || got.Result != want {
+			t.Fatalf("job result: %d %s; want %q", response.Code, response.Body, want)
+		}
+	}
+	check(request, "pending")
+	if err := loop.HandleJobCompleted(ctx, &scaleset.JobCompleted{RunnerName: request.Runner, RunnerID: id, Result: "Succeeded"}); err != nil {
+		t.Fatal(err)
+	}
+	check(request, "succeeded")
+	wrong := request
+	wrong.Slot++
+	check(wrong, "unavailable")
 }

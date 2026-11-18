@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -162,6 +161,30 @@ type deviceAuthorization struct {
 	JobSucceeded bool `json:"job_succeeded,omitempty"`
 }
 
+type deviceJobResult struct {
+	Result string `json:"result"`
+}
+
+func (l *lease) jobResult(slot int) deviceJobResult {
+	if l == nil || l.CleanupIntent || l.Local == nil || l.Local.Slot != slot || l.Local.Phase != localIssued {
+		return deviceJobResult{"unavailable"}
+	}
+	if !l.Local.JobCompleted {
+		return deviceJobResult{"pending"}
+	}
+	if l.Local.JobSucceeded {
+		return deviceJobResult{"succeeded"}
+	}
+	return deviceJobResult{"unavailable"}
+}
+
+func (c *coordinator) deviceJobResult(request deviceRequest) (deviceJobResult, error) {
+	if err := c.checkDevice(request); err != nil {
+		return deviceJobResult{}, err
+	}
+	return c.state.Leases[request.Runner].jobResult(request.Slot), nil
+}
+
 func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
 	if err := c.checkDevice(request); err != nil {
 		return nil, err
@@ -170,14 +193,8 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 }
 func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
 	l := a.lease
-	if l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.Local.Phase != localIssued {
-		return &deviceAuthorization{}, nil
-	}
-	if l.CleanupIntent {
-		return &deviceAuthorization{}, nil
-	}
-	if l.Local.JobCompleted {
-		return &deviceAuthorization{JobSucceeded: l.Local.JobSucceeded}, nil
+	if result := l.jobResult(request.Slot); result.Result != "pending" {
+		return &deviceAuthorization{JobSucceeded: result.Result == "succeeded"}, nil
 	}
 	busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, l.RunnerID)
 	if err != nil {
@@ -201,16 +218,24 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	return &deviceAuthorization{Continue: !l.Local.expired()}, nil
 }
 
-func (a *assignment) recordLocalJob(id int, result *string) error {
+type localJobEvent uint8
+
+const (
+	jobStarted localJobEvent = iota
+	jobUnsuccessful
+	jobSucceeded
+)
+
+func (a *assignment) recordLocalJob(id int, event localJobEvent) error {
 	l := a.lease
 	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.RunnerID != id {
 		return nil
 	}
 	next := *l.Local
 	next.JobStarted = true
-	if result != nil && !next.JobCompleted {
+	if event != jobStarted && !next.JobCompleted {
 		next.JobCompleted = true
-		next.JobSucceeded = strings.EqualFold(*result, "succeeded") || strings.EqualFold(*result, "success")
+		next.JobSucceeded = event == jobSucceeded
 	}
 	if next == *l.Local {
 		return nil
