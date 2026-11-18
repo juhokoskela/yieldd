@@ -2,16 +2,10 @@
 
 set -eu
 
+if [ "${1:-}" = --connected ]; then shift; fi
 if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 [OWNER/REPOSITORY ...] [--macos OWNER/REPOSITORY ... --macos-template PATH]" >&2
-    echo "       $0 --connected --server URL --device-id UUID [--platform linux|macos ...] [--macos-template PATH]" >&2
+    echo "Usage: $0 --server URL --device-id UUID [--platform linux|macos ...] [--macos-template PATH]" >&2
     exit 64
-fi
-
-install_command=install
-if [ "$1" = --connected ]; then
-    install_command=install-connected
-    shift
 fi
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -25,81 +19,148 @@ if [ -L "$installed_application" ]; then
     exit 1
 fi
 
-"$script_directory/build-local-app.sh"
 mkdir -p "$applications_directory"
-staging_directory=$(mktemp -d "$applications_directory/.yieldd-install.XXXXXX")
-staged_application="$staging_directory/yieldd.app"
-previous_application="$staging_directory/previous-yieldd.app"
-guest_image="local/yieldd-guest:dev"
-staged_image="local/yieldd-guest:installing-$$"
-replacement_complete=false
-stop_builder=false
-remove_staged_image=false
+lock="$applications_directory/.yieldd-installer"
+if ! mkdir -m 700 "$lock"; then
+    echo "An installation is running or was interrupted. Inspect $lock before retrying." >&2
+    exit 1
+fi
+staged="$lock/yieldd.app"
+previous="$lock/previous-yieldd.app"
+installed="$installed_application/Contents/MacOS/yieldd"
+guest_image=local/yieldd-guest:dev
+candidate=local/yieldd-guest:installing-$$
+backup=local/yieldd-guest:previous-$$
+service="gui/$(id -u)/dev.yieldd.agent"
+update=false
+restore_bundle=false
+restore_image=false
+candidate_built=false
+backup_tagged=false
+builder=false
+resume=false
+restarting=false
+committed=false
+enrolling=false
+old_instance=""
+
+field() { plutil -extract "$1" raw -o - "$lock/status.json"; }
+snapshot() { "$installed" agent status --json > "$lock/status.json"; }
+still_drained() {
+    snapshot && [ "$(field live.instanceID)" = "$old_instance" ] && [ "$(field live.paused)" = true ] &&
+        [ "$(field live.activeAssignments)" = 0 ] && [ "$(field live.resumeGeneration)" = "$generation" ]
+}
+wait_ready() {
+    attempts=0
+    while [ "$attempts" -lt 60 ]; do
+        if snapshot && [ "$(field live.ready)" = true ] && [ "$(field live.paused)" = true ] &&
+            [ "$(field live.activeAssignments)" = 0 ] &&
+            [ -n "$(field live.instanceID)" ] && [ "$(field live.instanceID)" != "$1" ] &&
+            { [ -z "$2" ] || [ "$(field live.buildID)" = "$2" ]; }; then return 0; fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+    return 1
+}
 
 cleanup() {
     status=$?
-    trap - 0
-    if [ "$stop_builder" = true ] && ! container builder stop; then
-        if [ "$status" -eq 0 ]; then
-            status=1
+    trap - EXIT HUP INT TERM
+    set +e
+    restored=true
+    if [ "$enrolling" = true ] && [ "$committed" = false ]; then
+        # Registration may already have saved its credential or started a worker.
+        restored=false
+        echo "Enrollment was interrupted. Inspect agent status and retry install-connected from the installed app." >&2
+    elif [ "$committed" = false ]; then
+        if [ "$restarting" = true ] && snapshot && [ "$(field live.paused 2>/dev/null)" = false ]; then
+            echo "Another caller resumed admissions. Leaving the current app and backup for recovery." >&2
+            restored=false
         fi
-    fi
-    if [ "$remove_staged_image" = true ] \
-        && ! container image delete --force "$staged_image"; then
-        if [ "$status" -eq 0 ]; then
-            status=1
+        if [ "$restored" = true ] && [ "$restore_image" = true ]; then
+            container image tag "$backup" "$guest_image" || restored=false
         fi
+        if [ "$restored" = true ] && [ "$restore_bundle" = true ] && [ -d "$previous" ]; then
+            if [ -e "$installed_application" ]; then mv "$installed_application" "$lock/failed.app" || restored=false; fi
+            if [ "$restored" = true ]; then mv "$previous" "$installed_application" || restored=false; fi
+        fi
+        if [ "$restarting" = true ] && [ "$restored" = true ]; then
+            # KeepAlive relaunches a stopped process using the restored bundle.
+            current=""
+            if snapshot; then current=$(field live.instanceID); fi
+            launchctl kill SIGTERM "$service" 2>/dev/null || true
+            wait_ready "$current" "" || restored=false
+        fi
+        if [ "$resume" = true ] && [ "$restored" = true ]; then "$installed" agent resume || restored=false; fi
     fi
-    if [ "$replacement_complete" = false ] \
-        && [ -d "$previous_application" ] \
-        && [ ! -e "$installed_application" ]; then
-        mv "$previous_application" "$installed_application"
+    if [ "$builder" = true ]; then container builder stop || status=1; fi
+    if [ "$candidate_built" = true ]; then container image delete --force "$candidate" || status=1; fi
+    if [ "$restored" = true ]; then
+        if [ "$backup_tagged" = true ]; then container image delete --force "$backup" || status=1; fi
+        rm -rf "$lock"
+    else
+        echo "Installation recovery needs attention. Inspect $lock before resuming." >&2
+        if [ "$backup_tagged" = true ]; then echo "Previous image: $backup" >&2; fi
+        status=1
     fi
-    rm -rf "$staging_directory"
     exit "$status"
 }
-trap cleanup 0
+trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-ditto "$source_application" "$staged_application"
-codesign --verify --strict "$staged_application"
-guest_platform=$("$staged_application/Contents/MacOS/yieldd" agent "$install_command" \
-    --preflight-only "$@")
-case "$guest_platform" in
-    linux|macos) ;;
-    *) echo "Unexpected agent preflight result: $guest_platform" >&2; exit 1 ;;
+"$script_directory/build-local-app.sh"
+ditto "$source_application" "$staged"
+codesign --verify --strict "$staged"
+result=$("$staged/Contents/MacOS/yieldd" agent install-connected --preflight-only "$@")
+case "$result" in
+    update-linux|update-macos) update=true; platform=${result#update-} ;;
+    linux|macos) platform="$result" ;;
+    *) echo "Unexpected installation preflight: $result" >&2; exit 1 ;;
 esac
-if [ "$guest_platform" = linux ]; then
-    stop_builder=true
-    remove_staged_image=true
-    container build -t "$staged_image" "$repository_directory/Guest"
+if [ "$platform" = linux ]; then
+    builder=true
+    candidate_built=true
+    container build -t "$candidate" "$repository_directory/Guest"
     container builder stop
-    stop_builder=false
+    builder=false
 fi
 
-if [ -e "$installed_application" ]; then
-    installed_executable="$installed_application/Contents/MacOS/yieldd"
-    if [ ! -x "$installed_executable" ]; then
-        echo "$installed_application does not contain an executable yieldd installation." >&2
-        exit 1
+if [ "$update" = true ]; then
+    snapshot
+    old_instance=$(field live.instanceID)
+    generation=$(field live.resumeGeneration)
+    paused=$(field live.paused)
+    case "$paused" in true) ;; false) resume=true ;; *) exit 1 ;; esac
+    "$installed" agent drain
+    still_drained || exit 1
+    if [ "$platform" = linux ]; then
+        container image tag "$guest_image" "$backup"
+        backup_tagged=true
+        restore_image=true
     fi
-
-    "$installed_executable" agent uninstall
-    mv "$installed_application" "$previous_application"
 fi
-
-if [ "$guest_platform" = linux ]; then
-    container image delete --force "$guest_image"
-    container image tag "$staged_image" "$guest_image"
-    container image delete "$staged_image"
-    remove_staged_image=false
+if [ -e "$installed_application" ]; then
+    restore_bundle=true
+    mv "$installed_application" "$previous"
 fi
+mv "$staged" "$installed_application"
+if [ "$platform" = linux ]; then container image tag "$candidate" "$guest_image"; fi
 
-mv "$staged_application" "$installed_application"
-replacement_complete=true
-
-"$installed_application/Contents/MacOS/yieldd" agent "$install_command" "$@"
-
+if [ "$update" = true ]; then
+    build_id=$(plutil -extract YielddBuildID raw -o - "$installed_application/Contents/Info.plist")
+    [ -n "$build_id" ]
+    still_drained || exit 1
+    restarting=true
+    launchctl kill SIGTERM "$service"
+    wait_ready "$old_instance" "$build_id"
+    # Once admissions resume the new agent may immediately own guests.
+    committed=true
+    if [ "$resume" = true ]; then "$installed" agent resume; fi
+else
+    enrolling=true
+    "$installed" agent install-connected "$@"
+    committed=true
+fi
 echo "Installed $installed_application"

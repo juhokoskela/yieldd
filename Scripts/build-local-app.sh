@@ -19,6 +19,7 @@ mkdir -p \
     "$application/Contents/Helpers" \
     "$application/Contents/Library/LaunchAgents"
 cp Packaging/Info.plist "$application/Contents/Info.plist"
+plutil -insert YielddBuildID -string "$(uuidgen)" "$application/Contents/Info.plist"
 cp Packaging/dev.yieldd.agent.plist "$application/Contents/Library/LaunchAgents/"
 cp "$executable" "$application/Contents/MacOS/yieldd"
 cp .build/yieldd-network-relay "$application/Contents/Helpers/"

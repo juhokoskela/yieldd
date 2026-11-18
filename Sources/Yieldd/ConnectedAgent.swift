@@ -71,20 +71,7 @@ struct ConnectedAgentCredentials: Sendable {
     let remove: @Sendable (String) throws -> Void
 
     static let keychain = ConnectedAgentCredentials(load: { account in
-        var query = keychainQuery(account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        let context = LAContext()
-        context.interactionNotAllowed = true
-        query[kSecUseAuthenticationContext as String] = context
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { throw ConnectedAgentError.keychain(status) }
-        guard let data = result as? Data, let token = String(data: data, encoding: .utf8) else {
-            throw ConnectedRunnerError.invalidToken
-        }
-        try ConnectedHTTPClient.validateToken(token)
-        return token
+        try readConnectedAgentToken(account, interactive: false)
     }, save: { account, token in
         try ConnectedHTTPClient.validateToken(token)
         let query = keychainQuery(account)
@@ -102,6 +89,23 @@ struct ConnectedAgentCredentials: Sendable {
         let status = SecItemDelete(keychainQuery(account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw ConnectedAgentError.keychain(status) }
     })
+}
+
+private func readConnectedAgentToken(_ account: String, interactive: Bool) throws -> String {
+    var query = keychainQuery(account)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    let context = LAContext()
+    context.interactionNotAllowed = !interactive
+    query[kSecUseAuthenticationContext as String] = context
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    guard status == errSecSuccess else { throw ConnectedAgentError.keychain(status) }
+    guard let data = result as? Data, let token = String(data: data, encoding: .utf8) else {
+        throw ConnectedRunnerError.invalidToken
+    }
+    try ConnectedHTTPClient.validateToken(token)
+    return token
 }
 
 private func keychainQuery(_ account: String) -> [String: Any] {
@@ -126,20 +130,24 @@ func installConnectedAgent(configuration: ConnectedAgentConfiguration, token: St
     } else {
         guard service.status() == .notRegistered else { throw AgentError.configurationChanged }
         try withRunnerOwnership(in: store.directory, connected: true) { leases in
-            guard try leases.load().isEmpty else { throw ConnectedAgentError.standaloneRecoveryRequired }
-            for journal in ConnectedRunnerStore.all(in: store.directory) {
-                if let lease = try journal.load() {
-                    try configuration.requireIdentity(server: ConnectedHTTPClient.serverURL(lease.server), deviceID: lease.deviceID)
-                    if lease.offer.runnerPlatform == .linux, configuration.container == nil {
-                        throw ConnectedAgentError.recoveryContainerRequired
-                    }
-                }
-            }
+            try validateEnrollment(configuration, leases: leases)
             try credentials.save(configuration.credentialAccount, token)
             try store.save(configuration)
         }
     }
     try enableAgent(service: service)
+}
+
+private func validateEnrollment(_ configuration: ConnectedAgentConfiguration, leases: RunnerLeaseStore) throws {
+    guard try leases.load().isEmpty else { throw ConnectedAgentError.standaloneRecoveryRequired }
+    for journal in ConnectedRunnerStore.all(in: leases.directory) {
+        if let lease = try journal.load() {
+            try configuration.requireIdentity(server: ConnectedHTTPClient.serverURL(lease.server), deviceID: lease.deviceID)
+            if lease.offer.runnerPlatform == .linux, configuration.container == nil {
+                throw ConnectedAgentError.recoveryContainerRequired
+            }
+        }
+    }
 }
 
 func uninstallConnectedAgent(store: ConnectedAgentStore, credentials: ConnectedAgentCredentials,
@@ -175,7 +183,6 @@ struct AgentInstallConnectedCommand: ParsableCommand {
     @Flag(name: .long, help: .hidden) var preflightOnly = false
 
     mutating func run() throws {
-        let service = try localAgentService()
         let standalone = try AgentConfigurationStore()
         let platforms = (platform.isEmpty ? [.linux] : platform).map(\.runnerPlatform)
         let locator = ExecutableLocator()
@@ -199,14 +206,38 @@ struct AgentInstallConnectedCommand: ParsableCommand {
             try storage.validatePath(storage.containerURL)
             try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor())
         }
-        let token = ProcessInfo.processInfo.environment["YIELDD_CLIENT_TOKEN"] ?? ""
-        try ConnectedHTTPClient.validateToken(token)
+        guard !FileManager.default.fileExists(atPath: standalone.fileURL.path) else {
+            throw AgentError.configurationChanged
+        }
+        let store = ConnectedAgentStore(directory: standalone.directory)
+        let previous = try store.load()
+        let suppliedToken = ProcessInfo.processInfo.environment["YIELDD_CLIENT_TOKEN"]
+        let token: String
+        if let previous {
+            guard previous == configuration else { throw AgentError.configurationChanged }
+            // An ad-hoc rebuild can need a new login-keychain ACL approval.
+            // Obtain it in the operator's process before draining the previous agent.
+            _ = try readConnectedAgentToken(previous.credentialAccount, interactive: true)
+            try prepareConnectedAgentKeychain()
+            token = try ConnectedAgentCredentials.keychain.load(previous.credentialAccount)
+            if let suppliedToken, suppliedToken != token { throw AgentError.configurationChanged }
+        } else {
+            token = suppliedToken ?? ""
+            try ConnectedHTTPClient.validateToken(token)
+        }
         guard !preflightOnly else {
-            print(platforms.contains(.linux) ? "linux" : "macos")
+            if previous == nil {
+                try withRunnerOwnership(in: store.directory, connected: true) {
+                    try validateEnrollment(configuration, leases: $0)
+                }
+            }
+            let platform = platforms.contains(.linux) ? "linux" : "macos"
+            print(previous == nil ? platform : "update-\(platform)")
             return
         }
+        let service = try localAgentService()
         try installConnectedAgent(configuration: configuration, token: token,
-            store: ConnectedAgentStore(directory: standalone.directory), credentials: .keychain, service: service)
+            store: store, credentials: .keychain, service: service)
         print(registrationStatusDescription(service.status()))
     }
 }
