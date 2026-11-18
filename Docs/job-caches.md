@@ -26,13 +26,13 @@ Add the action after checkout and point your build tool at the directory it expo
 - run: swift test --scratch-path "$YIELDD_CACHE_PATH/swift-build"
 ```
 
-The action also supplies a `path` step output. It gives each job a temporary directory on hosted fallback runners. Use a separate subdirectory for each tool or incompatible build configuration. Enabling a native cache for the same paths already covered by an archive makes the workflow pay for both.
+Run this action directly in the VM so the build can access its mount point. If yieldd is in a private repository, grant the consuming repository access to the action in GitHub. The action also supplies a `path` step output. It gives each job a temporary directory on hosted fallback runners and when the workflow sets `cache-mode: none`. Use a separate subdirectory for each tool or incompatible build configuration. Enabling a native cache for the same paths already covered by an archive makes the workflow pay for both.
 
 A successful action post-step requests publication. After the listener exits, yieldd unmounts the disk, destroys the guest and publishes the new generation. The agent holds the slot until it proves the guest is gone. A failed unmount, canceled job or interrupted cleanup leaves the prior generation available. When two jobs start from the same generation, the first successful publication wins. A read-only job can modify its private copy.
 
 ## Share trusted branches
 
-By default, the cache service uses the repository ID and branch or pull-request scopes from GitHub's signed job token. The job receives the read scopes and write permission GitHub granted it. A pull request can inherit a readable base cache and save a separate pull-request cache.
+By default, the cache service uses the repository ID and branch or pull-request scopes from GitHub's signed job token. The workflow's effective `cache-mode` limits those grants. The job receives the read scopes and write permission GitHub granted it. A pull request can inherit a readable base cache and save a separate pull-request cache.
 
 To share bytes across repositories, put their exact branch refs and numeric repository IDs in one group. Obtain an ID with `gh api repos/OWNER/REPO --jq .id`. For example:
 
@@ -47,4 +47,4 @@ To share bytes across repositories, put their exact branch refs and numeric repo
 }
 ```
 
-Both branches can then read and replace shared build state. A pull request that GitHub allows to read either base branch can also read that shared cache. Its own writes stay in its repository's pull-request scope. Only group repositories whose workflows can be trusted with each other's cached files. Changing group membership starts a fresh shared namespace. Archive keys remain immutable within a scope, and archives and native disks use separate storage.
+Both branches can then read and replace shared build state. A pull request that GitHub allows to read either base branch can also read that shared cache. For a `pull_request` run, writes stay in its repository’s merge-ref scope. A workflow that explicitly grants default-branch writes to another event, such as `pull_request_target`, can update shared state. See [GitHub's cache permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#cache-access-for-low-trust-workflow-triggers). Only group repositories whose workflows can be trusted with each other's cached files. Changing group membership starts a fresh shared namespace. Archive keys remain immutable within a scope, and archives and native disks use separate storage.

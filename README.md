@@ -7,6 +7,7 @@
 - An Apple Silicon Mac running macOS 26 or newer
 - Swift 6.2 or newer
 - Go matching `Prototypes/RunnerNetwork/go.mod` to build the bundled network relay
+- Rustup to build the bundled archive service. The build script installs its pinned Rust toolchain.
 - For Linux runners: the [pinned Container fork](Docs/linux-runner-network.md) with relay-aware machine support and a running container system
 - A configured [quota-limited APFS volume](Docs/runner-storage.md) for guest storage, separate from recovery records
 - For macOS runners: a user-prepared template bundle on that guest-storage volume
@@ -75,7 +76,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app
 
 Use the packaged executable for macOS commands. A plain `swift run` executable lacks the virtualization entitlement. Building the application does not install or start the agent.
 
-Validation checks SSH, both guest helpers' protocol version, automatic console login, the GUI launchd domain, Xcode setup, an available compatible iOS runtime and iPhone device type, simulator boot, and a nonempty screenshot. Selection does not guarantee the newest runtime or device. Simulator validation has a ten-minute limit. The command attempts to destroy the clone after success, failure, or interruption; if destruction fails, it reports the failure and leaves the clone for recovery. The template is not modified. macOS clones reserve 8 GiB against the host budget and boot with 8 GiB under normal pressure or 6 GiB under warning or unknown pressure. The macOS guest receives virtual disks.
+Validation checks SSH, both guest helpers' protocol version, automatic console login, the GUI launchd domain, Xcode setup, an available compatible iOS runtime and iPhone device type, simulator boot, and a nonempty screenshot. Selection does not guarantee the newest runtime or device. Simulator validation has a ten-minute limit. The command attempts to destroy the clone after success, failure, or interruption; if destruction fails, it reports the failure and leaves the clone for recovery. The template is not modified. macOS clones reserve 8 GiB against the host budget and boot with 8 GiB under normal pressure or 6 GiB under warning or unknown pressure. No host directories are shared.
 
 A pending Linux machine test requires `container` for cleanup. The macOS test also removes abandoned clones. Outstanding coordinator assignments must be recovered through the original connection first.
 
