@@ -90,7 +90,7 @@ final class ConnectedRunner {
                                       if case .jobStarted = state { jobStarted = true }
                                       self.stateChanged(state)
                                   }, currentTime: currentTime)
-                .run(id: id, pickupTimeout: 5 * 60) { try cache?.handleRequest() }
+                .run(id: id, pickupTimeout: 5 * 60, handleNativeCache: cache.map { $0.handleRequest })
             authorization.stopRenewing()
             publishCache = cache?.detachForPublication() == true
             if publishCache { try authorization.check() }
