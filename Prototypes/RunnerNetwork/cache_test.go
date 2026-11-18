@@ -211,6 +211,50 @@ func fixtureResultsTransport(t *testing.T, origin *httptest.Server) *http.Transp
 	return results
 }
 
+func TestVerifyWhileArchiveTransfersAreBusy(t *testing.T) {
+	dir := socketTestDirectory(t)
+	socket := filepath.Join(dir, "archive.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/yieldd/verify" {
+			io.WriteString(w, `{"repository_id":"123"}`)
+			return
+		}
+		w.Header().Set("Content-Length", "1")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+		io.WriteString(w, "x")
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+	defer close(release)
+
+	cache := newRelayCache(socket, dir, nil)
+	defer cache.client.CloseIdleConnections()
+	for range 8 {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://cache/download/fixture", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := cache.proxy.Transport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	grants, err := cache.verify(ctx, "Bearer fixture")
+	if err != nil || grants.RepositoryID != "123" {
+		t.Fatalf("verify with all archive connections busy: grants=%+v err=%v", grants, err)
+	}
+}
+
 func TestArtifactMetadataRequiresBoundTokenAndPinnedOrigin(t *testing.T) {
 	dir := t.TempDir()
 	var calls atomic.Int32

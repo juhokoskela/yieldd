@@ -44,7 +44,11 @@ func newRelayCache(socket, directory string, results *http.Transport) *relayCach
 		},
 		MaxConnsPerHost: 8, MaxIdleConnsPerHost: 8, IdleConnTimeout: time.Minute, ResponseHeaderTimeout: time.Minute,
 	}
-	c := &relayCache{client: &http.Client{Transport: transport, Timeout: 10 * time.Second}, transfers: make(map[string]struct{})}
+	// A job may open its native disk while all eight archive connections are streaming.
+	verifyTransport := transport.Clone()
+	verifyTransport.MaxConnsPerHost = 1
+	verifyTransport.MaxIdleConnsPerHost = 1
+	c := &relayCache{client: &http.Client{Transport: verifyTransport, Timeout: 10 * time.Second}, transfers: make(map[string]struct{})}
 	c.native = nativeCacheHandler(directory, c.verify)
 	c.proxy = &httputil.ReverseProxy{
 		Transport: transport,
