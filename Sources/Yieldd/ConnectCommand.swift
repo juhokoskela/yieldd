@@ -91,11 +91,14 @@ func runConnectedService(
             try MacOSVirtualizationBackend.validateTemplate(at: template)
             try VirtualizationEntitlement.requireCurrentProcess()
         }
+        let cacheConfiguration = try JobCacheConfiguration.load(in: directory)
         let backends = try platforms.map { platform -> RunnerSlotBackend in
             switch platform {
             case .linux:
                 let container = try resolveContainer()
-                try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline))
+                try AppleContainerBackend.requireNetworkSupport(containerURL: container,
+                    executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline),
+                    requiresNativeCache: cacheConfiguration != nil)
                 try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline), stateDirectory: directory).start()
                 try storage.validateContainer(containerExecutable: container)
                 return .linux(containerURL: container)
@@ -107,6 +110,12 @@ func runConnectedService(
         let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
+        let archiveService = try cacheConfiguration.map { configuration in
+            try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
+                policy: configuration.data, checkCancellation: stop.check)
+        }
+        defer { archiveService?.stop() }
+        let cacheSocket = archiveService?.socketURL
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
         if control?.isPaused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
@@ -118,22 +127,24 @@ func runConnectedService(
                 connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
             let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
+            let network = try RunnerNetwork(stateDirectory: directory, platform: platform, cacheSocket: cacheSocket)
+            let nativeCache = try cacheSocket.map { _ in try NativeCacheStore(storage: storage, platform: platform) }
             let backend: any RunnerBackend
             switch worker.backend {
             case let .linux(containerURL):
                 backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
-                    stateDirectory: directory, ownershipDescriptor: ownershipDescriptor,
+                    stateDirectory: directory, ownershipDescriptor: ownershipDescriptor, network: network,
                     checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                     dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
             case let .macOS(templateURL):
                 backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
                     cloneRootURL: RunnerStorage.cloneRoot(in: directory),
-                    executor: executor, checkCancellation: authorization.check, wait: stop.wait,
+                    executor: executor, network: network, checkCancellation: authorization.check, wait: stop.wait,
                     maximumExecutionDeadline: stop.executionDeadline)
             }
             let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
                 server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
-                authorization: authorization, wait: stop.wait,
+                authorization: authorization, wait: stop.wait, nativeCache: nativeCache,
                 stateChanged: {
                     control?.session(worker: workerID, state: $0)
                     reportRunnerServiceState($0, output: output)
@@ -148,6 +159,7 @@ func runConnectedService(
                 control?.update(worker: workerID, phase: .idle)
                 return try client.poll()
             }, decline: client.decline, run: { offer, allocation, release in
+                try archiveService?.ensureRunning(checkCancellation: stop.check)
                 control?.assign(worker: workerID, offer: offer)
                 output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                 try runner.run(offer, memory: allocation, releaseCapacity: release)

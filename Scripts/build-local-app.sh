@@ -17,6 +17,7 @@ then
 fi
 swift build -c release
 bash Scripts/build-network-relay.sh
+bash Scripts/build-cache-server.sh
 plutil -lint Packaging/Info.plist Packaging/dev.yieldd.agent.plist "$entitlements" >/dev/null
 
 staging=$(mktemp -d "$repository_directory/.build/.yieldd-package.XXXXXX")
@@ -29,7 +30,11 @@ mkdir -p \
 cp Packaging/Info.plist "$application/Contents/Info.plist"
 cp Packaging/dev.yieldd.agent.plist "$application/Contents/Library/LaunchAgents/"
 cp "$executable" "$application/Contents/MacOS/yieldd"
-cp .build/yieldd-network-relay "$application/Contents/Helpers/"
+mkdir -p "$application/Contents/Resources"
+cp .build/cache-server-LICENSE "$application/Contents/Resources/"
+cp .build/yieldd-network-relay .build/yieldd-cache-server "$application/Contents/Helpers/"
+codesign --force --sign "$signing_identity" --identifier dev.yieldd.cache-server \
+    "$application/Contents/Helpers/yieldd-cache-server"
 codesign --force --sign "$signing_identity" --identifier dev.yieldd.network-relay \
     "$application/Contents/Helpers/yieldd-network-relay"
 
@@ -38,6 +43,7 @@ codesign --force --sign "$signing_identity" --identifier dev.yieldd \
     "$application"
 codesign --verify --strict "$application"
 codesign --verify --strict "$application/Contents/Helpers/yieldd-network-relay"
+codesign --verify --strict "$application/Contents/Helpers/yieldd-cache-server"
 virtualization_entitlement=$(
     codesign --display --entitlements - --xml "$application" 2>/dev/null |
         plutil -extract 'com\.apple\.security\.virtualization' raw -

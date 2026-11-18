@@ -79,7 +79,7 @@ func installerRequiresACertificateFingerprint(identity: String) throws {
     #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
 }
 
-@Test(arguments: ["yieldd.app", "yieldd-network-relay"])
+@Test(arguments: ["yieldd.app", "yieldd-network-relay", "yieldd-cache-server"])
 func installerChecksTheSelectedCertificateBeforePreflight(artifact: String) throws {
     let fixture = try InstallerFixture(preflightResult: "macos")
     defer { fixture.remove() }
@@ -90,7 +90,7 @@ func installerChecksTheSelectedCertificateBeforePreflight(artifact: String) thro
     let verification = try #require(events.split(separator: "\n").last)
     #expect(verification.hasPrefix("codesign:"))
     #expect(verification.hasSuffix("/\(artifact)"))
-    let identifier = artifact == "yieldd.app" ? "dev.yieldd" : "dev.yieldd.network-relay"
+    let identifier = artifact == "yieldd.app" ? "dev.yieldd" : "dev.yieldd." + artifact.dropFirst("yieldd-".count)
     #expect(verification.contains("-R=identifier \"\(identifier)\" and anchor apple generic"))
     #expect(verification.contains("certificate leaf = H\"\(fingerprint)\""))
     #expect(verification.contains("certificate leaf[field.1.2.840.113635.100.6.1.12] exists"))
@@ -122,10 +122,13 @@ func enrollmentRetryVerifiesInstalledBundleBeforeExecution(rejectRelay: Bool) th
     let result = try fixture.run(retryEnrollment: true, rejectSignatureOf: rejectRelay ? "yieldd-network-relay" : nil)
     #expect((result.terminationStatus == 0) == !rejectRelay)
     let events = try String(contentsOf: fixture.logURL, encoding: .utf8).split(separator: "\n")
-    try #require(events.count == (rejectRelay ? 2 : 3))
+    try #require(events.count == (rejectRelay ? 2 : 4))
     #expect(events[0].hasSuffix(installed.path))
     #expect(events[1].hasSuffix(installed.appendingPathComponent("Contents/Helpers/yieldd-network-relay").path))
-    if !rejectRelay { #expect(events[2].hasPrefix("new:agent install --server")) }
+    if !rejectRelay {
+        #expect(events[2].hasSuffix(installed.appendingPathComponent("Contents/Helpers/yieldd-cache-server").path))
+        #expect(events[3].hasPrefix("new:agent install --server"))
+    }
 }
 
 @Test(arguments: [false, true])
