@@ -1,0 +1,73 @@
+name: Disposable guest without cache grants
+on:
+  push:
+    branches: [test/cache-result-artifact-20261118]
+permissions:
+  contents: read
+jobs:
+  no-cache-grants:
+    cache-mode: none
+    runs-on: yieldd-cache-proof-4e08d048bd12-linux-none
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Ordinary command
+        run: uname -m
+      - uses: ./actions/native-cache
+        id: native
+      - name: Verify the disk was skipped and create an artifact
+        shell: bash
+        env:
+          NATIVE_PATH: ${{ steps.native.outputs.path }}
+        run: |
+          set -eu
+          test "$NATIVE_PATH" = "$YIELDD_CACHE_PATH"
+          case "$NATIVE_PATH" in "$RUNNER_TEMP"/*) ;; *) exit 1;; esac
+          test ! -e /mnt/yieldd-cache
+          printf 'no-cache-fallback-ok\nrunner=%s\n' "$RUNNER_NAME" > "$NATIVE_PATH/none-proof.txt"
+          cp "$NATIVE_PATH/none-proof.txt" "$RUNNER_TEMP/none-proof.txt"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: no-cache-grants
+          path: ${{ runner.temp }}/none-proof.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  seed:
+    needs: no-cache-grants
+    runs-on: yieldd-cache-proof-4e08d048bd12-linux-seed
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: ./actions/native-cache
+      - name: Verify cache publication
+        shell: bash
+        run: |
+          set -eu
+          test "$YIELDD_CACHE_PATH" = /mnt/yieldd-cache
+          mountpoint -q "$YIELDD_CACHE_PATH"
+          test ! -e "$YIELDD_CACHE_PATH/contract.marker"
+          printf "published-%s\n" "$GITHUB_RUN_ID" > "$YIELDD_CACHE_PATH/contract.marker"
+
+  late-failure:
+    needs: seed
+    runs-on: yieldd-cache-proof-4e08d048bd12-linux-late-failure
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: ./actions/late-failure
+      - uses: ./actions/native-cache
+      - name: Verify cache publication
+        shell: bash
+        run: |
+          set -eu
+          test "$YIELDD_CACHE_PATH" = /mnt/yieldd-cache
+          mountpoint -q "$YIELDD_CACHE_PATH"
+          test "$(cat "$YIELDD_CACHE_PATH/contract.marker")" = "published-$GITHUB_RUN_ID"
+          printf "later failure\n" > "$YIELDD_CACHE_PATH/contract.marker"
