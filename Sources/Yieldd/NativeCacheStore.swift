@@ -18,6 +18,15 @@ struct NativeCacheStore {
         let bytes: Int64
     }
 
+    private struct Index: Codable {
+        var seeds: [String: Seed] = [:]
+        var lastEviction: UUID?
+
+        // An absent scope can have been published and evicted since a checkout.
+        // Conservatively invalidate missing-scope writers after any eviction.
+        func generation(for scope: String) -> UUID? { seeds[scope]?.generation ?? lastEviction }
+    }
+
     private let directory: URL
     private let platform: RunnerPlatform
     private let validate: () throws -> Void
@@ -80,9 +89,9 @@ struct NativeCacheStore {
         let job = try jobDirectory(id)
         let image = job.appendingPathComponent("cache.img")
         let (cold, previous) = try withLock {
-            let entries = try readIndex()
-            let sourceScope = readable.first { entries[$0] != nil }
-            if let sourceScope, let seed = entries[sourceScope] {
+            let catalog = try readIndex()
+            let sourceScope = readable.first { catalog.seeds[$0] != nil }
+            if let sourceScope, let seed = catalog.seeds[sourceScope] {
                 let source = seedFile(seed.generation)
                 guard clonefile(source.path, image.path, UInt32(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)) == 0 else {
                     throw lastError()
@@ -90,7 +99,7 @@ struct NativeCacheStore {
                 // Eviction tolerates a lost timestamp; a hit needs no journal write.
                 _ = utimensat(AT_FDCWD, source.path, nil, AT_SYMLINK_NOFOLLOW)
             }
-            return (sourceScope == nil, writable.flatMap { entries[$0]?.generation })
+            return (sourceScope == nil, writable.flatMap { catalog.generation(for: $0) })
         }
         if cold { try createBlank(at: image) }
         var info = stat()
@@ -116,10 +125,10 @@ struct NativeCacheStore {
             throw JobCacheError.invalidDisk
         }
         try withLock {
-            var entries = try readIndex()
-            let previous = Set(entries.values.map(\.generation))
+            var catalog = try readIndex()
+            let previous = Set(catalog.seeds.values.map(\.generation))
             try reapSeeds(keeping: previous)
-            guard entries[target]?.generation == disk.previous else { return }
+            guard catalog.generation(for: target) == disk.previous else { return }
             let fd = Darwin.open(disk.url.path, O_NOFOLLOW | O_NONBLOCK | O_RDONLY | O_CLOEXEC)
             guard fd >= 0 else { throw lastError() }
             defer { close(fd) }
@@ -135,9 +144,10 @@ struct NativeCacheStore {
             try newSeed.synchronize()
             try synchronizeRunnerState(seeds)
             // Commit the index last. An interrupted save leaves the previous seed readable.
-            entries[target] = Seed(generation: generation, lastUsed: Date(), bytes: info.st_blocks * 512)
-            if entries.count > 16 || entries.values.reduce(Int64(0), { $0 + $1.bytes }) > 16 << 30 {
-                let candidates = entries.mapValues { seed in
+            catalog.seeds[target] = Seed(generation: generation, lastUsed: Date(), bytes: info.st_blocks * 512)
+            if catalog.seeds.count > 16 || catalog.seeds.values.reduce(Int64(0), { $0 + $1.bytes }) > 16 << 30 {
+                catalog.lastEviction = UUID()
+                let candidates = catalog.seeds.mapValues { seed in
                     var seed = seed
                     let file = seedFile(seed.generation)
                     if let touched = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
@@ -145,16 +155,16 @@ struct NativeCacheStore {
                     }
                     return seed
                 }
-                entries.removeAll(keepingCapacity: true)
+                catalog.seeds.removeAll(keepingCapacity: true)
                 var bytes: Int64 = 0
                 for (scope, seed) in candidates.sorted(by: { $0.value.lastUsed > $1.value.lastUsed }) {
-                    guard entries.count < 16, bytes + seed.bytes <= 16 << 30 else { continue }
+                    guard catalog.seeds.count < 16, bytes + seed.bytes <= 16 << 30 else { continue }
                     bytes += seed.bytes
-                    entries[scope] = seed
+                    catalog.seeds[scope] = seed
                 }
             }
-            try writePrivateRunnerFile(JSONEncoder().encode(entries), to: index)
-            let removed = previous.union([generation]).subtracting(entries.values.map(\.generation))
+            try writePrivateRunnerFile(JSONEncoder().encode(catalog), to: index)
+            let removed = previous.union([generation]).subtracting(catalog.seeds.values.map(\.generation))
             for id in removed { try manager.removeItem(at: seedFile(id)) }
         }
     }
@@ -195,9 +205,14 @@ struct NativeCacheStore {
 
     private func seedFile(_ id: UUID) -> URL { seeds.appendingPathComponent(id.uuidString + ".img") }
 
-    private func readIndex() throws -> [String: Seed] {
-        guard let data = try readPrivateRunnerFile(index, maximumBytes: 64 * 1024) else { return [:] }
-        return try JSONDecoder().decode([String: Seed].self, from: data)
+    private func readIndex() throws -> Index {
+        guard let data = try readPrivateRunnerFile(index, maximumBytes: 64 * 1024) else { return Index() }
+        let decoder = JSONDecoder()
+        do {
+            return try decoder.decode(Index.self, from: data)
+        } catch DecodingError.keyNotFound(let key, _) where key.stringValue == "seeds" {
+            return try Index(seeds: decoder.decode([String: Seed].self, from: data))
+        }
     }
 
     private func reapSeeds(keeping generations: Set<UUID>) throws {

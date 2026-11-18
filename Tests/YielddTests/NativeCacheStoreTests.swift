@@ -166,7 +166,10 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     try store.discard(first)
     let area = root.appendingPathComponent(RunnerPlatform.linux.rawValue)
     let index = area.appendingPathComponent("index.json")
-    let before = try Data(contentsOf: index)
+    // A store created before eviction tracking still serves its existing generations.
+    let encoded = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
+    let before = try JSONSerialization.data(withJSONObject: try #require(encoded["seeds"]))
+    try writePrivateRunnerFile(before, to: index)
     let orphan = area.appendingPathComponent("seeds/\(UUID().uuidString).img")
     try Data().write(to: orphan)
     let second = runner()
@@ -177,4 +180,25 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     try store.publish(disk)
     #expect(!FileManager.default.fileExists(atPath: orphan.path))
     try store.discard(second)
+}
+
+@Test func evictionCannotMakeAStaleWriterFirstAgain() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let otherSlot = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let original = try store.open(runner(), readable: [], writable: mainScope)
+    let stale = try otherSlot.open(runner(), readable: [], writable: mainScope)
+    try store.publish(original)
+    for n in 0..<16 {
+        let next = try store.open(runner(), readable: [], writable: String(format: "%064x", n))
+        try store.publish(next)
+    }
+    #expect(try store.open(runner(), readable: [mainScope], writable: nil).isCold)
+    try otherSlot.publish(stale)
+    #expect(try store.open(runner(), readable: [mainScope], writable: nil).isCold)
+    let fresh = try store.open(runner(), readable: [mainScope], writable: mainScope)
+    try mark(fresh, "fresh")
+    try store.publish(fresh)
+    #expect(try read(store.open(runner(), readable: [mainScope], writable: nil)) == "fresh")
 }
