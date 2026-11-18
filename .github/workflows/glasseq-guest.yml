@@ -1,0 +1,62 @@
+name: Build changed GlassEQ
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        required: true
+      label:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ${{ inputs.label }}
+    timeout-minutes: 35
+    env:
+      BENCH_STAGE: ${{ inputs.stage }}
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Check out benchmark
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Check out GlassEQ
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: juhokoskela/GlassEQ
+          ref: 44afeded668e014e7436c9d2a6b6855b7527e5a7
+          path: GlassEQ
+          persist-credentials: false
+      - name: Prepare build inputs
+        run: python3 .github/glasseq-bench/work.py prepare
+      - name: Mount native cache
+        uses: ./actions/native-cache
+        if: startsWith(inputs.stage, 'native-')
+      - name: Restore parent archive
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        if: (startsWith(inputs.stage, 'remote-') || startsWith(inputs.stage, 'local-')) && !endsWith(inputs.stage, '-seed')
+        id: restore
+        with:
+          path: /Volumes/YielddCache/swiftpm
+          key: yieldd-glasseq-${{ github.run_id }}-parent
+          fail-on-cache-miss: true
+      - name: Build test package and verify
+        run: python3 .github/glasseq-bench/work.py work
+        env:
+          ARCHIVE_HIT: ${{ steps.restore.outputs.cache-hit }}
+      - name: Save complete build archive
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        if: startsWith(inputs.stage, 'remote-') || startsWith(inputs.stage, 'local-')
+        with:
+          path: /Volumes/YielddCache/swiftpm
+          key: yieldd-glasseq-${{ github.run_id }}-${{ endsWith(inputs.stage, '-seed') && 'parent' || inputs.stage }}
+      - name: Upload measurement record
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: glasseq-${{ inputs.stage }}
+          path: ${{ runner.temp }}/glasseq-evidence
+          if-no-files-found: error
+          retention-days: 7
