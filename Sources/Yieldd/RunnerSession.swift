@@ -1,10 +1,6 @@
 import Foundation
 
-protocol RunnerSessionRunning {
-    func run(id: RunnerID, repository: GitHubRepository) throws
-}
-
-struct EphemeralRunnerSession: RunnerSessionRunning {
+struct EphemeralRunnerSession {
     static let configurationTimeout: TimeInterval = 5 * 60
     static let jobOutputTailBytes = 1_024 * 1_024
 

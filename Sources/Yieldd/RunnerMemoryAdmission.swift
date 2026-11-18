@@ -26,8 +26,7 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
     }
 
     func connectedWorkerCount(for platform: RunnerPlatform) -> Int {
-        let limit = platform == .macOS ? RunnerServiceConfiguration.maximumMacOSSlots : RunnerPool.maximumSlots
-        return Int(min(UInt64(limit), budgetBytes / platform.memoryReservationBytes))
+        Int(min(UInt64(platform.maximumSlots), budgetBytes / platform.memoryReservationBytes))
     }
 
     func validateCapacity(reserving reservationBytes: UInt64) throws {

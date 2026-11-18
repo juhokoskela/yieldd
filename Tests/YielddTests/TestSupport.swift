@@ -146,3 +146,17 @@ enum TestFailure: Error, Equatable {
     case unexpectedProcessRequest
     case unexpectedBackendCall
 }
+
+extension AgentConfigurationStore {
+    func save(_ configuration: AgentConfiguration) throws {
+        let slots = configuration.runners.slots
+        var record: [String: Any] = [
+            "repositories": slots.filter { $0.platform == .linux }.map(\.repository.fullName),
+            "macOSRepositories": slots.filter { $0.platform == .macOS }.map(\.repository.fullName),
+            "githubCLIExecutable": configuration.ghURL.path,
+        ]
+        record["containerExecutable"] = configuration.containerURL?.path
+        record["macOSTemplate"] = configuration.runners.macOSTemplateURL?.path
+        try writePrivateRunnerFile(JSONSerialization.data(withJSONObject: record), to: fileURL)
+    }
+}

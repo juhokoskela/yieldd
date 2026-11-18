@@ -24,21 +24,6 @@ struct AgentConfiguration: Equatable {
         self.ghURL = ghURL
     }
 
-    func requireGitHubCLI() throws {
-        guard FileManager.default.isExecutableFile(atPath: ghURL.path) else {
-            throw AgentConfigurationError.executableUnavailable(path: ghURL.path)
-        }
-    }
-
-    static func resolve(runners: RunnerServiceConfiguration, locateExecutable: (String) throws -> URL) throws -> Self {
-        let containerURL: URL?
-        do {
-            containerURL = try locateExecutable("container")
-        } catch ExecutableLocatorError.notFound where !runners.requiresLinux {
-            containerURL = nil
-        }
-        return try Self(runners: runners, containerURL: containerURL, ghURL: locateExecutable("gh"))
-    }
 }
 
 struct AgentConfigurationStore {
@@ -106,24 +91,6 @@ struct AgentConfigurationStore {
         }
     }
 
-    func save(_ configuration: AgentConfiguration) throws {
-        let stored = StoredAgentConfiguration(
-            repositories: configuration.runners.repositories(for: .linux).map(\.fullName),
-            macOSRepositories: configuration.runners.repositories(for: .macOS).map(\.fullName),
-            macOSTemplate: configuration.runners.macOSTemplateURL?.path,
-            containerExecutable: configuration.containerURL?.path,
-            githubCLIExecutable: configuration.ghURL.path
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(stored)
-        try data.write(to: fileURL, options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: fileURL.path
-        )
-    }
-
     func remove() throws {
         do {
             try FileManager.default.removeItem(at: fileURL)
@@ -146,7 +113,7 @@ enum AgentConfigurationError: Error, Equatable, LocalizedError {
         case .missingContainerExecutable:
             "Linux runner slots require a configured container executable."
         case .containerPathNotRecorded:
-            "Linux lease recovery needs a saved container path. Run agent uninstall to disable the agent, then agent install with the same slots and container on PATH to record its path. Retry cleanup afterward."
+            "Linux lease recovery needs a saved container path. Run yieldd recover with the original Container executable on PATH, then retry agent uninstall."
         case let .invalidExecutableURL(url):
             "The local agent executable URL must be an absolute file URL: \(url.absoluteString)"
         case let .missing(path):
@@ -159,7 +126,7 @@ enum AgentConfigurationError: Error, Equatable, LocalizedError {
     }
 }
 
-private struct StoredAgentConfiguration: Codable {
+private struct StoredAgentConfiguration: Decodable {
     let repositories: [String]
     let macOSRepositories: [String]
     let macOSTemplate: String?

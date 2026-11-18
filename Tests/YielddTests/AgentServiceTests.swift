@@ -4,84 +4,13 @@ import Testing
 @testable import Yieldd
 
 @Test
-func agentInstallRegistersAndSavesNewConfiguration() throws {
-    let fixture = try AgentServiceFixture(status: .notRegistered)
-    defer { fixture.remove() }
-
-    try installAgent(
-        configuration: fixture.configuration,
-        store: fixture.store,
-        service: fixture.service
-    )
-
-    #expect(fixture.registerCalls == 1)
-    #expect(try fixture.store.load() == fixture.configuration)
-}
-
-@Test(arguments: [SMAppService.Status.enabled, .requiresApproval])
-func agentInstallRepairsMissingConfiguration(
-    status: SMAppService.Status
-) throws {
-    let fixture = try AgentServiceFixture(status: status)
-    defer { fixture.remove() }
-
-    try installAgent(
-        configuration: fixture.configuration,
-        store: fixture.store,
-        service: fixture.service
-    )
-
-    #expect(fixture.registerCalls == 0)
-    #expect(try fixture.store.load() == fixture.configuration)
-}
-
-@Test
-func agentInstallRepairsInvalidConfiguration() throws {
-    let fixture = try AgentServiceFixture(status: .enabled)
-    defer { fixture.remove() }
-    try Data("{".utf8).write(to: fixture.store.fileURL)
-
-    try installAgent(
-        configuration: fixture.configuration,
-        store: fixture.store,
-        service: fixture.service
-    )
-
-    #expect(try fixture.store.load() == fixture.configuration)
-}
-
-@Test
-func agentInstallRejectsAChangedEnabledConfiguration() throws {
-    let fixture = try AgentServiceFixture(status: .enabled)
-    defer { fixture.remove() }
-    let existing = try AgentConfiguration(
-        repositories: [GitHubRepository("owner/other")],
-        containerURL: fixture.configuration.containerURL,
-        ghURL: fixture.configuration.ghURL
-    )
-    try fixture.store.save(existing)
-
-    #expect(throws: AgentError.configurationChanged) {
-        try installAgent(
-            configuration: fixture.configuration,
-            store: fixture.store,
-            service: fixture.service
-        )
-    }
-}
-
-@Test
 func agentInstallRecognizesApprovalAfterRegistrationError() throws {
     let fixture = try AgentServiceFixture(status: .notRegistered)
     defer { fixture.remove() }
     fixture.registerError = AgentServiceTestError.registrationDenied
     fixture.statusAfterRegister = .requiresApproval
 
-    try installAgent(
-        configuration: fixture.configuration,
-        store: fixture.store,
-        service: fixture.service
-    )
+    try enableAgent(service: fixture.service)
 
     #expect(fixture.registerCalls == 1)
 }
@@ -93,11 +22,7 @@ func agentInstallPreservesUnexpectedRegistrationErrors() throws {
     fixture.registerError = AgentServiceTestError.registrationFailed
 
     #expect(throws: AgentServiceTestError.registrationFailed) {
-        try installAgent(
-            configuration: fixture.configuration,
-            store: fixture.store,
-            service: fixture.service
-        )
+        try enableAgent(service: fixture.service)
     }
 }
 
@@ -107,11 +32,7 @@ func agentInstallDoesNotConcealServiceNotFound() throws {
     defer { fixture.remove() }
 
     #expect(throws: AgentError.serviceNotFound) {
-        try installAgent(
-            configuration: fixture.configuration,
-            store: fixture.store,
-            service: fixture.service
-        )
+        try enableAgent(service: fixture.service)
     }
     #expect(fixture.registerCalls == 0)
 }
@@ -225,26 +146,6 @@ func agentStatusReportsMacOSSlotsAndTemplate(mixed: Bool) throws {
     #expect(lines.contains { $0.hasPrefix("container:") } == mixed)
 }
 
-@Test
-func agentInstallRejectsChangedMacOSTemplateWhileEnabled() throws {
-    let fixture = try AgentServiceFixture(status: .enabled)
-    defer { fixture.remove() }
-    func configuration(_ name: String) throws -> AgentConfiguration {
-        try AgentConfiguration(
-            repositories: [], macOSRepositories: [GitHubRepository("owner/mac")],
-            macOSTemplateURL: fixture.directory.appendingPathComponent(name),
-            containerURL: nil, ghURL: fixture.configuration.ghURL
-        )
-    }
-    let existing = try configuration("Original.bundle")
-    try fixture.store.save(existing)
-    #expect(throws: AgentError.configurationChanged) {
-        try installAgent(configuration: configuration("Replacement.bundle"), store: fixture.store, service: fixture.service)
-    }
-    #expect(try fixture.store.load() == existing)
-    #expect(fixture.registerCalls == 0)
-}
-
 @Test(arguments: [false, true])
 func agentUninstallRecoversMacOSLeasesWithoutContainer(mixed: Bool) async throws {
     let fixture = try AgentServiceFixture(status: .enabled)
@@ -350,7 +251,6 @@ func mixedAgentRecoversMacOSAfterContainerBecomesUnavailable(nonExecutable: Bool
     let clone = try testCloneStores(in: fixture.directory)(.runners).bundleURL(for: macID)
     try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: true)
     let loaded = try fixture.store.load()
-    try loaded.requireGitHubCLI()
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult(stdout: #"[{"runners":[{"id":42,"name":"yieldd-z-macos","busy":false}]}]"#)),
         .success(processResult()),

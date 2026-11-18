@@ -27,15 +27,18 @@ enum RunnerPlatform: String, Codable, Sendable {
         }
     }
 
+    var maximumSlots: Int {
+        switch self {
+        case .linux: RunnerPool.maximumSlots
+        case .macOS: 2
+        }
+    }
+
     var runnerLabel: String {
         switch self {
         case .linux: "yieldd"
         case .macOS: "yieldd-macos"
         }
-    }
-
-    func makeServiceRunnerID() -> RunnerID {
-        RunnerID(value: "\(runnerLabel)-\(UUID().uuidString.lowercased())")
     }
 
     func makeTestRunnerID() -> RunnerID {

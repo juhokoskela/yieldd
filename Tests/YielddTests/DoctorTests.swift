@@ -4,7 +4,7 @@ import Testing
 
 @Test
 func doctorReportsSuccessfulChecks() throws {
-    let fixture = try ExecutableFixture(names: ["container", "gh"])
+    let fixture = try ExecutableFixture(names: ["container"])
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()),
@@ -27,8 +27,6 @@ func doctorReportsSuccessfulChecks() throws {
         .passed("reachable"),
         .passed("available"),
         .passed("available"),
-        .passed(fixture.executable(named: "gh").path),
-        .passed("authenticated"),
         .passed("quota-backed"),
     ])
     #expect(executor.requests.map(\.arguments) == [
@@ -36,7 +34,6 @@ func doctorReportsSuccessfulChecks() throws {
         ["machine", "create", "--help"],
         ["machine", "boot", "--help"],
         ["machine", "list", "--quiet"],
-        ["auth", "status", "--active", "--hostname", "github.com"],
     ])
     try report.requireSuccess()
 }
@@ -53,14 +50,9 @@ func doctorSkipsDependentChecksWhenContainerIsMissing() {
     ).run()
 
     #expect(!report.succeeded)
-    #expect(report.checks.count == 8)
+    #expect(report.checks.count == 6)
     #expect(report.checks[2].status == .skipped("container executable is unavailable"))
     #expect(report.checks[3].status == .skipped("container executable is unavailable"))
-    guard case .failed = report.checks[5].status else {
-        Issue.record("Expected the gh executable check to fail")
-        return
-    }
-    #expect(report.checks[6].status == .skipped("gh executable is unavailable"))
     #expect(executor.requests.isEmpty)
     #expect(throws: DoctorReportError.checksFailed) {
         try report.requireSuccess()
@@ -93,26 +85,6 @@ func doctorAggregatesHostAndSystemFailures() throws {
 }
 
 @Test
-func doctorChecksGitHubEvenWhenContainerIsMissing() throws {
-    let fixture = try ExecutableFixture(names: ["gh"])
-    defer { fixture.remove() }
-    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-
-    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
-        executor: executor,
-        executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        loadStorage: { nil }, supportsAppleSilicon: { true }
-    ).run()
-
-    #expect(!report.succeeded)
-    #expect(report.checks[5].status == .passed(fixture.executable(named: "gh").path))
-    #expect(report.checks[6].status == .passed("authenticated"))
-    #expect(executor.requests.map(\.arguments) == [
-        ["auth", "status", "--active", "--hostname", "github.com"],
-    ])
-}
-
-@Test
 func macOSDoctorDoesNotRequireOrInvokeContainer() throws {
     let fixture = try ExecutableFixture(names: ["gh"])
     defer { fixture.remove() }
@@ -135,7 +107,7 @@ func macOSDoctorDoesNotRequireOrInvokeContainer() throws {
         Issue.record("Expected missing template validation to fail")
         return
     }
-    #expect(executor.requests.map(\.arguments) == [["auth", "status", "--active", "--hostname", "github.com"]])
+    #expect(executor.requests.isEmpty)
 }
 
 private struct ExecutableFixture {

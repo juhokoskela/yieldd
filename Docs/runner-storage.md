@@ -66,7 +66,7 @@ ditto /Users/YOUR_USER/VM.bundle /Volumes/YielddRunners/VM.bundle
   --template /Volumes/YielddRunners/VM.bundle
 ```
 
-Use the new template path in `connect`, `serve`, or the agent configuration. The template must be outside both `macos-runners` and `macos-probes`, and on the same volume as the clones. No guest scripts need changing for storage quotas.
+Use the new template path in `connect` or the agent configuration. The template must be outside both `macos-runners` and `macos-probes`, and on the same volume as the clones. No guest scripts need changing for storage quotas.
 
 ## If the volume fills
 

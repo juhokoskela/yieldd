@@ -85,21 +85,9 @@ The label-based fallback dispatches a bootstrap workflow in `yieldd-infra` on a 
 
 Manual repository-JIT experiments established happy-path cross-repository execution on Ubuntu, plus same-repository failure, cancellation, and no-pickup behavior. Live coordinator tests subsequently confirmed automatic hosted execution, restart reconciliation, and workload failure with cleanup. The coordinator records intent before side effects, uses per-bootstrap secrets, bounds provisioning, and reconciles registrations and bootstrap runs. Missing pickup acknowledgement must never trigger replacement execution without reconciling the original attempt.
 
-## Standalone and connected modes
+## Mac operation
 
-Standalone mode keeps the current model:
-
-```sh
-yieldd serve OWNER/REPOSITORY [OWNER/REPOSITORY ...]
-```
-
-The repository list is local, and each argument creates one slot.
-
-The installed local agent persists this same repository list and runs the same pool through a per-user LaunchAgent. It is an unattended form of standalone mode, not the beginning of the server protocol.
-
-Connected mode moves repository authorization and scheduling to the server. Local configuration should then contain device identity, capacity policy, and server connection details rather than an authoritative repository list.
-
-Both modes should use the same local runner-session, cleanup, and recovery code. The standalone LaunchAgent's repository list is local-only and does not define the connected-client configuration.
+The coordinator owns unattended scheduling. The foreground client and login agent run the same connected service. A one-job diagnostic can still register a short-lived runner for a trusted repository to validate a particular Mac before enrollment.
 
 ## Open questions
 

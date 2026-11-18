@@ -6,8 +6,6 @@ struct RunnerSlot: Equatable, Sendable {
 }
 
 struct RunnerServiceConfiguration: Equatable, Sendable {
-    static let maximumMacOSSlots = 2
-
     let slots: [RunnerSlot]
     let macOSTemplateURL: URL?
 
@@ -22,7 +20,7 @@ struct RunnerServiceConfiguration: Equatable, Sendable {
         guard repositories.count + macOSRepositories.count <= RunnerPool.maximumSlots else {
             throw RunnerServiceConfigurationError.tooManySlots
         }
-        guard macOSRepositories.count <= Self.maximumMacOSSlots else {
+        guard macOSRepositories.count <= RunnerPlatform.macOS.maximumSlots else {
             throw RunnerServiceConfigurationError.tooManyMacOSSlots
         }
         guard macOSRepositories.isEmpty == (macOSTemplateURL == nil) else {
@@ -38,13 +36,6 @@ struct RunnerServiceConfiguration: Equatable, Sendable {
 
     var requiresLinux: Bool { slots.contains { $0.platform == .linux } }
 
-    func repositories(for platform: RunnerPlatform) -> [GitHubRepository] {
-        slots.filter { $0.platform == platform }.map(\.repository)
-    }
-
-    var memoryReservationBytes: UInt64 {
-        slots.reduce(0) { $0 + $1.platform.memoryReservationBytes }
-    }
 }
 
 enum RunnerServiceConfigurationError: Error, Equatable, LocalizedError {
@@ -53,7 +44,6 @@ enum RunnerServiceConfigurationError: Error, Equatable, LocalizedError {
     case tooManyMacOSSlots
     case templatePairRequired
     case invalidTemplateURL
-    case missingContainerExecutable
 
     var errorDescription: String? {
         switch self {
@@ -62,13 +52,11 @@ enum RunnerServiceConfigurationError: Error, Equatable, LocalizedError {
         case .tooManySlots:
             "The runner service supports at most \(RunnerPool.maximumSlots) runner slots."
         case .tooManyMacOSSlots:
-            "The runner service supports at most \(RunnerServiceConfiguration.maximumMacOSSlots) macOS runner slots."
+            "The runner service supports at most \(RunnerPlatform.macOS.maximumSlots) macOS runner slots."
         case .templatePairRequired:
             "--macos and --macos-template must be supplied together."
         case .invalidTemplateURL:
             "The macOS template must be an absolute filesystem URL."
-        case .missingContainerExecutable:
-            "Linux runner slots require a configured container executable."
         }
     }
 }

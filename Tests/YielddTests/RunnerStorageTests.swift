@@ -187,11 +187,6 @@ func doctorAndInstallerRejectMissingStorageWithoutStartingAnything() throws {
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path)).run()
     #expect(!report.succeeded)
     #expect(report.checks.last == DoctorCheck(name: "Runner storage", status: .failed(describeError(RunnerStorageError.notConfigured))))
-    let command = try AgentInstallCommand.parse(["owner/repo", "--preflight-only"])
-    #expect(throws: RunnerStorageError.notConfigured) {
-        try command.run(locateExecutable: { _ in URL(fileURLWithPath: "/usr/bin/true") }, stateDirectory: fixture.directory,
-                        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 32 * 1_024 * 1_024 * 1_024))
-    }
     #expect(executor.requests.isEmpty)
     #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("agent.json").path))
 }

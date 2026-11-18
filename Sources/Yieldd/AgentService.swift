@@ -9,31 +9,6 @@ struct LocalAgentService {
     let unregister: () async throws -> Void
 }
 
-func installAgent(
-    configuration: AgentConfiguration,
-    store: AgentConfigurationStore,
-    service: LocalAgentService
-) throws {
-    switch service.status() {
-    case .enabled, .requiresApproval:
-        do {
-            guard try store.load() == configuration else {
-                throw AgentError.configurationChanged
-            }
-        } catch AgentConfigurationError.missing,
-                AgentConfigurationError.invalidContents {
-            try store.save(configuration)
-        }
-    case .notRegistered:
-        try store.save(configuration)
-        try enableAgent(service: service)
-    case .notFound:
-        throw AgentError.serviceNotFound
-    @unknown default:
-        throw AgentError.unknownStatus
-    }
-}
-
 func reportAgentStatus(
     store: AgentConfigurationStore,
     service: LocalAgentService,
@@ -169,12 +144,15 @@ private func isMissingService(_ error: any Error) -> Bool {
 
 enum AgentError: Error, Equatable, LocalizedError {
     case notPackaged
+    case connectedConfigurationRequired
     case configurationChanged
     case serviceNotFound
     case unknownStatus
 
     var errorDescription: String? {
         switch self {
+        case .connectedConfigurationRequired:
+            "Install a coordinator-connected agent. For an older standalone installation, finish recovery and run agent uninstall first."
         case .notPackaged:
             "Local agent commands must run from the packaged yieldd application."
         case .configurationChanged:

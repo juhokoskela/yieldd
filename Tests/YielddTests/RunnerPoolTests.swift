@@ -108,46 +108,6 @@ func capacityWaitObservesPoolStop() throws {
     admission.release(reservation)
 }
 
-@Test
-func serviceCommandPreservesRepeatedRepositories() throws {
-    let command = try RunnerServiceCommand.parse([
-        firstPoolRepository.fullName,
-        firstPoolRepository.fullName,
-    ])
-
-    #expect(command.runners.repositories == [
-        firstPoolRepository.fullName,
-        firstPoolRepository.fullName,
-    ])
-}
-
-@Test
-func serviceCommandRejectsTooManyRunnerSlots() {
-    let arguments = Array(
-        repeating: firstPoolRepository.fullName,
-        count: RunnerPool.maximumSlots + 1
-    )
-
-    do {
-        _ = try RunnerServiceCommand.parse(arguments)
-        Issue.record("Expected excessive runner slots to be rejected")
-    } catch {
-        #expect(String(describing: error).contains(
-            "at most \(RunnerPool.maximumSlots) runner slots"
-        ))
-    }
-}
-
-@Test
-func serviceCommandAcceptsMaximumRunnerSlots() throws {
-    let arguments = Array(
-        repeating: firstPoolRepository.fullName,
-        count: RunnerPool.maximumSlots
-    )
-
-    _ = try RunnerServiceCommand.parse(arguments)
-}
-
 private final class ConcurrentSlotGate: @unchecked Sendable {
     private let condition = NSCondition()
     private let expected: Int

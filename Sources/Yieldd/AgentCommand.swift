@@ -10,7 +10,6 @@ struct AgentCommand: ParsableCommand {
         commandName: "agent",
         abstract: "Manage the installed local agent.",
         subcommands: [
-            AgentInstallCommand.self,
             AgentInstallConnectedCommand.self,
             AgentStatusCommand.self,
             AgentPauseCommand.self,
@@ -95,62 +94,6 @@ struct AgentVirtualizationProbeCommand: ParsableCommand {
 
     private var templateURL: URL {
         URL(fileURLWithPath: bundlePath).standardizedFileURL
-    }
-}
-
-struct AgentInstallCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "install",
-        abstract: "Configure and enable the local agent."
-    )
-
-    @OptionGroup
-    var runners: RunnerServiceOptions
-
-    @Flag(name: .long, help: .hidden)
-    var preflightOnly = false
-
-    mutating func run() throws {
-        let locator = ExecutableLocator()
-        try run(locateExecutable: locator.locate)
-    }
-
-    func run(
-        locateExecutable: (String) throws -> URL,
-        stateDirectory: URL? = nil,
-        memoryAdmission: RunnerMemoryAdmission = RunnerMemoryAdmission(),
-        loadStorage: ((URL) throws -> RunnerStorage?)? = nil,
-        relayURL: URL = RunnerNetwork.bundledRelayURL,
-        executor: any ProcessExecuting = ProcessExecutor()
-    ) throws {
-        let slots = try runners.serviceConfiguration()
-        try memoryAdmission.validateCapacity(reserving: slots.memoryReservationBytes)
-        let configuration = try AgentConfiguration.resolve(runners: slots, locateExecutable: locateExecutable)
-        let store = try AgentConfigurationStore(directory: stateDirectory)
-        let storage = try (loadStorage ?? { try RunnerStorage.validated(in: $0) })(store.directory)
-        if slots.requiresLinux, let storage { try storage.validatePath(storage.containerURL) }
-        if let templateURL = configuration.runners.macOSTemplateURL {
-            if let storage { try storage.validateMacOS(template: templateURL, clones: storage.clonesURL) }
-            try validateRunnerServiceTemplate(templateURL, stateDirectory: store.directory)
-        }
-        try RunnerNetwork.requireRelay(at: relayURL)
-        if slots.requiresLinux, let container = configuration.containerURL {
-            try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: executor)
-        }
-        guard !preflightOnly else {
-            // Machine-readable result consumed by install-local-agent.sh.
-            print(configuration.runners.requiresLinux ? "linux" : "macos")
-            return
-        }
-
-        guard try ConnectedAgentStore(directory: store.directory).load() == nil else { throw AgentError.configurationChanged }
-        let service = try localAgentService()
-        try installAgent(
-            configuration: configuration,
-            store: store,
-            service: service
-        )
-        print(registrationStatusDescription(service.status()))
     }
 }
 
@@ -251,21 +194,7 @@ struct AgentRunCommand: ParsableCommand {
                     resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
                 return
             }
-            let configuration = try store.load()
-            let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout)
-            try configuration.requireGitHubCLI()
-            try withRunnerOwnership(in: store.directory) { leaseStore in
-                let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
-                try runRunnerService(
-                    configuration: configuration.runners,
-                    leaseStore: leaseStore,
-                    containerURL: configuration.containerURL,
-                    ghURL: configuration.ghURL,
-                    stop: stop,
-                    output: .agentLog,
-                    prepareContainer: agentContainerPreparation(configuration: configuration, executor: executor, stateDirectory: store.directory)
-                )
-            }
+            throw AgentError.connectedConfigurationRequired
         } catch where isCancellation(error) {
             return
         } catch {
