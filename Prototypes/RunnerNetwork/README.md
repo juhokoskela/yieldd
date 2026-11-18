@@ -24,7 +24,7 @@ Run from the yieldd checkout:
 bash Prototypes/RunnerNetwork/check.sh
 ```
 
-This macOS check builds and signs both probes, runs the relay tests with the race detector, runs `go vet`, builds the modified Container services, and runs the Swift configuration, socket, VM-lifecycle, and relay-supervisor tests. The supervisor tests include the real Go relay. The macOS lifecycle tests use a controlled clock and callbacks to cover stalled startup, interruption, late startup, and bounded cleanup without a VM. The check does not boot a VM or change installed services. The prototype-only GitHub workflow runs the same command when the prototype or shared supervisor changes.
+This macOS check builds and signs both probes, runs the relay tests with the race detector, runs `go vet`, builds the modified Container services, and runs the Swift configuration, socket, VM-lifecycle, and relay-supervisor tests. The supervisor tests include the real Go relay. The macOS lifecycle tests use a controlled clock and callbacks to cover stalled startup, interruption, late startup, and bounded cleanup without a VM. The check does not boot a VM or change installed services. Main CI runs the Swift suite on every push to main and pull request. Local checks and manual network workflow dispatches also run the focused Swift network suite.
 
 Public-network and fuzz checks are separate:
 
