@@ -53,15 +53,10 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if err != nil {
 		return nil, err
 	}
-	logger := slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())
-	client, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
+	worker, err := newQueueWorker(saved, store, token, maxFallbackRunners)
 	if err != nil {
-		return nil, &sdkError{"initialize client", err}
+		return nil, err
 	}
-	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
-	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: maxFallbackRunners}
 	loopContext, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	p.loop = newCoordinatorLoop(loopContext, worker)
@@ -102,6 +97,19 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	return p, nil
 }
 
+func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRunners int) (*coordinator, error) {
+	cfg := saved.Config
+	logger := slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())
+	client, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
+	if err != nil {
+		return nil, &sdkError{"initialize client", err}
+	}
+	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+	return &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: maxFallbackRunners}, nil
+}
+
 func newScaleSetClient(configURL, token string) (*scaleset.Client, error) {
 	// A lost registration POST must never be retried automatically. Let the SDK
 	// create separate HTTP clients, rather than sharing its mutable auth policy.
@@ -125,6 +133,13 @@ func (p *platformCoordinator) close(ctx context.Context) {
 	if p.cancel != nil {
 		p.cancel()
 	}
+	p.closeSession(ctx)
+	if err := p.store.Close(); err != nil {
+		slog.Error("Close state store", "error", err)
+	}
+}
+
+func (p *platformCoordinator) closeSession(ctx context.Context) {
 	if p.session != nil {
 		if err := p.session.Close(ctx); err != nil {
 			slog.Error("Close scale set session", "error", &sdkError{"close message session", err})
@@ -132,33 +147,28 @@ func (p *platformCoordinator) close(ctx context.Context) {
 			p.session = nil
 		}
 	}
-	if err := p.store.Close(); err != nil {
-		slog.Error("Close state store", "error", err)
-	}
 }
 
 func (p *platformCoordinator) run(ctx context.Context, recoverOnly bool) error {
 	if recoverOnly {
-		for {
-			done, err := p.loop.worker.reconcile(ctx, true)
-			if err != nil || done {
-				return err
-			}
-			if err := waitForRetry(ctx, cleanupRetryDelay); err != nil {
-				return err
-			}
-		}
+		return recoverUntilDone(ctx, func() (bool, error) { return p.loop.worker.reconcile(ctx, true) })
 	}
 	defer p.cancel()
 	worker := p.loop.worker
 	// Remove a failed waiter's FIFO entry, never its issued capacity reservation.
 	defer worker.device.forget(worker.state.Owner)
-	worker.logger.Info("Serving scale set", "scale_set", worker.state.ScaleSetID, "capacity", maximumAssignments, "fallback_capacity", worker.maxFallbackRunners, "local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
+	logger := worker.logger.With("local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
 	done := make(chan error, 1)
 	go func() { done <- p.loop.run(); p.cancel() }()
-	err := p.listen()
+	err := p.listen(logger)
 	p.cancel()
 	loopErr := <-done
+	if ctx.Err() == nil {
+		// Release this queue’s session even if healthy siblings keep the process running.
+		closeCtx, cancel := context.WithTimeout(context.Background(), listenerRetryDelay)
+		p.closeSession(closeCtx)
+		cancel()
+	}
 	if loopErr != nil && !onlyCancellation(loopErr) {
 		return loopErr
 	}
@@ -181,57 +191,49 @@ func (p *platformCoordinator) openMessages(ctx context.Context) error {
 	return err
 }
 
-func (p *platformCoordinator) listen() error {
+func (p *platformCoordinator) listen(logger *slog.Logger) error {
 	ctx := p.loop.ctx
 	delay := listenerRetryDelay
 	for {
-		started := time.Now()
 		var err error
 		if p.messages == nil {
 			err = p.openMessages(ctx)
+			if err == nil {
+				logger.Info("Serving scale set", "scale_set", p.scaleSetID, "capacity", maximumAssignments, "fallback_capacity", p.loop.worker.maxFallbackRunners)
+			}
 		}
 		if err == nil {
+			started := time.Now()
 			err = p.messages.Run(ctx, p.loop)
-		}
-		var callback *callbackError
-		if errors.As(err, &callback) {
-			return callback
+			var callback *callbackError
+			if errors.As(err, &callback) {
+				return callback
+			}
+			if ctx.Err() == nil {
+				if err := p.loop.suspendProvisioning(); err != nil {
+					return err
+				}
+			}
+			if time.Since(started) >= listenerMaximumRetryDelay {
+				delay = listenerRetryDelay
+			}
+			p.messages = nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := p.loop.suspendProvisioning(); err != nil {
+		if isJournalWrite(err) {
 			return err
 		}
-		if time.Since(started) >= listenerMaximumRetryDelay {
-			delay = listenerRetryDelay
+		logger.Warn("Demand listener unavailable; retaining assignments", "retry_delay", delay, "error", &sdkError{"listen for demand", err})
+		if err := waitForRetry(ctx, delay); err != nil {
+			return err
 		}
-		p.loop.worker.logger.Warn("Demand listener interrupted; retaining assignments and reconnecting", "retry_delay", delay, "error", &sdkError{"listen for demand", err})
-		for {
-			if err := waitForRetry(ctx, delay); err != nil {
-				return err
-			}
-			delay = min(delay*2, listenerMaximumRetryDelay)
-			if p.session != nil {
-				closeCtx, cancel := context.WithTimeout(ctx, listenerRetryDelay)
-				err := p.session.Close(closeCtx)
-				cancel()
-				if err == nil {
-					p.session = nil
-				}
-				if err != nil && ctx.Err() == nil {
-					p.loop.worker.logger.Warn("Previous demand session could not be closed", "error", &sdkError{"close message session", err})
-				}
-			}
-			if err := p.openMessages(ctx); err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				p.loop.worker.logger.Warn("Demand listener reconnect failed; retaining assignments", "retry_delay", delay, "error", err)
-				continue
-			}
-			p.loop.worker.logger.Info("Demand listener reconnected", "scale_set", p.scaleSetID)
-			break
+		delay = min(delay*2, listenerMaximumRetryDelay)
+		if p.session != nil {
+			closeCtx, cancel := context.WithTimeout(ctx, listenerRetryDelay)
+			p.closeSession(closeCtx)
+			cancel()
 		}
 	}
 }

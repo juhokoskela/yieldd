@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -83,4 +84,21 @@ func fallbackLabels(value string) ([]string, error) {
 		return nil, errors.New("fallback must be a JSON label string or array")
 	}
 	return labels, nil
+}
+
+func (c config) sameRoute(other config) bool {
+	if c == other {
+		return true
+	}
+	raw := c.Fallback
+	c.Fallback = other.Fallback
+	if c != other || c.LocalOnly {
+		return false
+	}
+	left, err := fallbackLabels(raw)
+	if err != nil {
+		return false
+	}
+	right, err := fallbackLabels(other.Fallback)
+	return err == nil && slices.Equal(left, right)
 }
