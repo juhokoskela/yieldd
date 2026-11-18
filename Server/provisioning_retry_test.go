@@ -47,6 +47,52 @@ func TestRefreshedDemandSurvivesProvisioningRedrives(t *testing.T) {
 	})
 }
 
+func TestMatchingDemandAboveCapacityEndsRefresh(t *testing.T) {
+	c, w, _ := newFixture(t)
+	count := maximumAssignments + 1
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), count); err != nil {
+		t.Fatal(err)
+	}
+	c.refreshDemand, w.assignedJobs = true, count
+	for range 2 {
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), count); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w.demandCalls != 1 || w.dispatched != 1 {
+		t.Fatal("matching counts kept refreshing at capacity", w.demandCalls, w.dispatched)
+	}
+}
+
+func TestExpiredOfferRechecksDemandBeforePaidFallback(t *testing.T) {
+	for _, fresh := range []int{0, 1} {
+		t.Run(fmt.Sprintf("assigned=%d", fresh), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c, w, _ := concurrentFixture(t, 2)
+				issued := issueLocal(t, c, 0, 2)
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+					t.Fatal(err)
+				}
+				offer := c.device.pollNow(1)
+				if offer == nil {
+					t.Fatal("missing second offer")
+				}
+				if err := c.completeDevice(t.Context(), issued); err != nil {
+					t.Fatal(err)
+				}
+				w.assignedJobs = fresh
+				time.Sleep(offerLifetime)
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+					t.Fatal(err)
+				}
+				if w.dispatched != fresh || w.demandCalls == 0 || (c.state.Leases[offer.Runner] != nil) != (fresh == 1) {
+					t.Fatal("offer expiry ignored current demand", w.dispatched, w.demandCalls)
+				}
+			})
+		})
+	}
+}
+
 func TestIdentityPauseSurvivesTransientVerificationFailures(t *testing.T) {
 	for _, failure := range []error{&apiError{status: 502}, &apiError{status: 429}, context.DeadlineExceeded} {
 		for _, slots := range []int{0, 1} {

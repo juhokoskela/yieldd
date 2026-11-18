@@ -232,7 +232,16 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, nil
 	}
 	expired := l.Local.expired()
-	if recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull())) {
+	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull()))
+	if expired && !retire && a.refreshDemand {
+		// Cleanup may have invalidated the demand that justified this offer.
+		count, err := a.currentDemand(ctx)
+		if err != nil {
+			return false, err
+		}
+		retire = a.surplusAssignments(count)[l.Name]
+	}
+	if retire {
 		if err := a.beginCleanup(""); err != nil {
 			return false, err
 		}

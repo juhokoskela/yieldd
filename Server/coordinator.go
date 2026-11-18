@@ -397,20 +397,17 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	listenerCount := count
 	if count > 0 && c.refreshDemand {
-		set, err := c.runners.GetRunnerScaleSetByID(ctx, c.state.ScaleSetID)
+		var err error
+		count, err = c.currentDemand(ctx)
 		if err != nil {
-			return &sdkError{"refresh demand after cleanup", err}
+			return err
 		}
-		if set == nil || set.ID != c.state.ScaleSetID || set.Statistics == nil || set.Statistics.TotalAssignedJobs < 0 {
-			return errors.New("invalid scale set statistics after cleanup")
-		}
-		count = set.Statistics.TotalAssignedJobs
 	}
+	countsAgree := count == listenerCount
 	count = min(count, maximumAssignments)
 	if count <= len(c.state.Leases) {
-		// A stale positive listener count still needs refreshing after GitHub
-		// reports no work. Keep that protection until positive demand is satisfied.
-		if count > 0 && listenerCount == count {
+		// The listener can repeat a stale positive count on every empty poll.
+		if count > 0 && countsAgree {
 			c.refreshDemand = false
 		}
 		c.device.forget(c.state.Owner)
@@ -437,7 +434,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	} else if c.state.Config.LocalOnly {
 		return nil
 	} else if c.fallbackFull() {
-		if listenerCount == count {
+		if countsAgree {
 			c.refreshDemand = false
 		}
 		if c.state.Config.DeviceID != "" {
@@ -459,6 +456,17 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	// Give device requests a turn before the next provisioning operation.
 	c.device.redrive(c.state.Owner)
 	return nil
+}
+
+func (c *coordinator) currentDemand(ctx context.Context) (int, error) {
+	set, err := c.runners.GetRunnerScaleSetByID(ctx, c.state.ScaleSetID)
+	if err != nil {
+		return 0, &sdkError{"refresh demand after cleanup", err}
+	}
+	if set == nil || set.ID != c.state.ScaleSetID || set.Statistics == nil || set.Statistics.TotalAssignedJobs < 0 {
+		return 0, errors.New("invalid scale set statistics after cleanup")
+	}
+	return set.Statistics.TotalAssignedJobs, nil
 }
 
 func (c *coordinator) nextHostedCleanup() *assignment {
