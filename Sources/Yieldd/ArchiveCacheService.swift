@@ -46,7 +46,8 @@ final class ArchiveCacheService: @unchecked Sendable {
             try storage.validatePath(archives)
             try RunnerNetworkDirectories.createPrivateDirectory(root)
             try RunnerNetworkDirectories.createPrivateDirectory(archives)
-            let volume = ArchiveCacheVolume(directory: archives, maximumMiB: min(16 << 10, (storageVolume.quotaBytes / 8) >> 20),
+            let volume = ArchiveCacheVolume(directory: archives, mount: ArchiveCacheVolume.mountPoint(in: stateDirectory),
+                                            maximumMiB: min(16 << 10, (storageVolume.quotaBytes / 8) >> 20),
                                             ownershipDescriptor: ownershipDescriptor)
             self.volume = volume
             var ready = false

@@ -6,7 +6,7 @@ import Testing
 @Test func archiveVolumeBoundsConcurrentUnfinishedWritesAcrossRestart() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try RunnerNetworkDirectories.createPrivateDirectory(root)
-    let volume = ArchiveCacheVolume(directory: root, maximumMiB: 128, ownershipDescriptor: nil)
+    let volume = ArchiveCacheVolume(directory: root, mount: ArchiveCacheVolume.mountPoint(in: root), maximumMiB: 128, ownershipDescriptor: nil)
     defer {
         // Never remove a fixture until its mount is gone.
         if (try? volume.detach()) != nil { try? FileManager.default.removeItem(at: root) }
@@ -26,7 +26,7 @@ import Testing
     #expect(bytes > 96 << 20)
     #expect(bytes <= 128 << 20)
     // A new owner adopts an interrupted mount with its unfinished bytes still charged.
-    let recovered = try ArchiveCacheVolume(directory: root, maximumMiB: 128, ownershipDescriptor: nil).open()
+    let recovered = try ArchiveCacheVolume(directory: root, mount: ArchiveCacheVolume.mountPoint(in: root), maximumMiB: 128, ownershipDescriptor: nil).open()
     #expect(recovered.directory == store.directory)
     #expect(try String(contentsOf: published, encoding: .utf8) == "keep")
     try volume.detach()
@@ -39,9 +39,9 @@ import Testing
 
 @Test func archiveVolumePreservesUnexpectedMountContentsOnFailedAttach() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    let mount = root.appendingPathComponent("volume")
+    let mount = ArchiveCacheVolume.mountPoint(in: root)
     try RunnerNetworkDirectories.createPrivateDirectory(root)
-    let volume = ArchiveCacheVolume(directory: root, maximumMiB: 128, ownershipDescriptor: nil)
+    let volume = ArchiveCacheVolume(directory: root, mount: ArchiveCacheVolume.mountPoint(in: root), maximumMiB: 128, ownershipDescriptor: nil)
     defer {
         if (try? volume.detach()) != nil { try? FileManager.default.removeItem(at: root) }
     }

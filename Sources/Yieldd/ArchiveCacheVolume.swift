@@ -5,10 +5,10 @@ import Foundation
 // on this filesystem. The kernel enforces one limit across simultaneous requests.
 struct ArchiveCacheVolume {
     let directory: URL
+    let mount: URL
     let maximumMiB: UInt64
     let ownershipDescriptor: Int32?
     private var image: URL { directory.appendingPathComponent("archives.sparseimage") }
-    private var mount: URL { directory.appendingPathComponent("volume", isDirectory: true) }
 
     struct Store {
         let directory: URL
@@ -42,12 +42,12 @@ struct ArchiveCacheVolume {
               info.st_uid == getuid(), info.st_nlink == 1 else { throw VolumeError.wrongImage }
         if try !attached() {
             try RunnerNetworkDirectories.createPrivateDirectory(mount)
-            guard try device(mount) == device(directory),
+            guard try device(mount) == device(mount.deletingLastPathComponent()),
                   try manager.contentsOfDirectory(atPath: mount.path).isEmpty else { throw VolumeError.wrongImage }
             try run(["attach", "-quiet", "-nobrowse", "-owners", "off", "-mountpoint", mount.path, image.path])
             guard try attached() else { throw VolumeError.wrongImage }
         }
-        guard try device(mount) != device(directory) else { throw VolumeError.wrongImage }
+        guard try device(mount) != device(mount.deletingLastPathComponent()) else { throw VolumeError.wrongImage }
         let size = try filesystemSize(mount, available: false)
         guard size <= maximumMiB << 20 else { throw VolumeError.wrongImage }
         // The bare mount point is kept empty. Losing the mount before spawn makes the
@@ -57,10 +57,17 @@ struct ArchiveCacheVolume {
         return Store(directory: store, evictionBytes: size / 2)
     }
 
+    // User-owned agent state supports unprivileged mounts even when ownership
+    // is disabled on the volume containing the sparse image.
+    static func mountPoint(in stateDirectory: URL) -> URL {
+        stateDirectory.appendingPathComponent("archive-volume", isDirectory: true)
+    }
+
     static func recover(in stateDirectory: URL, ownershipDescriptor: Int32?) throws {
         guard let storage = try RunnerStorage.load(in: stateDirectory) else { return }
         let directory = storage.volumeURL.appendingPathComponent("job-caches/archives")
-        let volume = ArchiveCacheVolume(directory: directory, maximumMiB: 0, ownershipDescriptor: ownershipDescriptor)
+        let volume = ArchiveCacheVolume(directory: directory, mount: mountPoint(in: stateDirectory),
+                                        maximumMiB: 0, ownershipDescriptor: ownershipDescriptor)
         var info = stat()
         guard lstat(volume.image.path, &info) == 0 else {
             if errno == ENOENT { return }
