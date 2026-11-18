@@ -42,7 +42,7 @@ func newRelayCache(socket, directory string, results *http.Transport) *relayCach
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "unix", socket)
 		},
-		MaxIdleConns: 8, IdleConnTimeout: time.Minute, ResponseHeaderTimeout: time.Minute,
+		MaxConnsPerHost: 8, MaxIdleConnsPerHost: 8, IdleConnTimeout: time.Minute, ResponseHeaderTimeout: time.Minute,
 	}
 	c := &relayCache{client: &http.Client{Transport: transport, Timeout: 10 * time.Second}, transfers: make(map[string]struct{})}
 	c.native = nativeCacheHandler(directory, c.verify)
