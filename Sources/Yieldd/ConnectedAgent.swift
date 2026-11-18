@@ -215,7 +215,9 @@ struct AgentInstallCommand: ParsableCommand {
         try ConnectedHTTPClient.validateToken(token)
         let service = try localAgentService()
         if preflightOnly {
-            guard service.status() == .notRegistered, try store.load() == nil else { throw AgentError.configurationChanged }
+            let status = service.status()
+            if status == .notFound { throw AgentError.serviceNotFound }
+            guard status == .notRegistered, try store.load() == nil else { throw AgentError.configurationChanged }
             try withRunnerOwnership(in: directory, connected: true) { try validateEnrollment(configuration, leases: $0) }
             print(platforms.contains(.linux) ? "linux" : "macos")
             return

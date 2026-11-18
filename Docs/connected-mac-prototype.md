@@ -110,7 +110,7 @@ To upgrade, run `agent drain` and then `agent uninstall` from the installed app.
 
 When preparing a new installable release, increase `CFBundleVersion` in `Packaging/Info.plist` above the previous installed build, including any locally versioned build. Reuse the signing identity across upgrades. Enrollment refreshes Launch Services at the final bundle path before registering the login item.
 
-If initial enrollment stops after the installer copies the signed app, inspect its `agent status` and retry its `agent install` with the same arguments and token. A saved pause survives reinstall. Check readiness and resume when ready to accept jobs.
+If initial enrollment stops after the installer copies the signed app, run `Scripts/install-local-agent.sh --retry-enrollment` followed by the original arguments, with the same certificate fingerprint and token. This verifies the installed app and relay and retries enrollment without rebuilding or moving the bundle. A saved pause survives reinstall. Check readiness and resume when ready to accept jobs.
 
 Use `yieldd agent status` from the installed app to inspect registration and configuration, and `yieldd agent uninstall` to disable it and recover outstanding assignments. Configuration and the Keychain token remain if recovery fails. The agent uses unified logging under subsystem `dev.yieldd`, category `agent`, and has a 50-second shutdown budget. Foreground `connect` remains available for diagnostics.
 

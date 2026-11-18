@@ -3,7 +3,7 @@
 set -eu
 
 if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 --server URL --device-id UUID [--platform linux|macos ...] [--macos-template PATH]" >&2
+    echo "Usage: $0 [--retry-enrollment] --server URL --device-id UUID [--platform linux|macos ...] [--macos-template PATH]" >&2
     exit 64
 fi
 
@@ -38,11 +38,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [ -e "$installed_application" ]; then
-    echo "Drain and uninstall the existing agent, then move $installed_application aside before installing." >&2
-    exit 1
-fi
-
 is_certificate_fingerprint() {
     case "$1" in *[!0-9A-Fa-f]*) return 1 ;; esac
     [ "${#1}" -eq 40 ]
@@ -52,11 +47,26 @@ if ! is_certificate_fingerprint "${YIELDD_SIGNING_IDENTITY-}"; then
     exit 1
 fi
 
+verify_application() {
+    signer="anchor apple generic and certificate leaf = H\"$YIELDD_SIGNING_IDENTITY\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
+    codesign --verify --strict -R="identifier \"dev.yieldd\" and $signer" "$1"
+    codesign --verify --strict -R="identifier \"dev.yieldd.network-relay\" and $signer" "$1/Contents/Helpers/yieldd-network-relay"
+}
+
+if [ "$1" = --retry-enrollment ]; then
+    shift
+    verify_application "$installed_application"
+    "$installed_application/Contents/MacOS/yieldd" agent install "$@"
+    exit 0
+fi
+if [ -e "$installed_application" ]; then
+    echo "Drain and uninstall the existing agent, then move $installed_application aside before installing." >&2
+    exit 1
+fi
+
 "$script_directory/build-local-app.sh"
 ditto "$source_application" "$staged"
-signer="anchor apple generic and certificate leaf = H\"$YIELDD_SIGNING_IDENTITY\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
-codesign --verify --strict -R="identifier \"dev.yieldd\" and $signer" "$staged"
-codesign --verify --strict -R="identifier \"dev.yieldd.network-relay\" and $signer" "$staged/Contents/Helpers/yieldd-network-relay"
+verify_application "$staged"
 platform=$("$staged/Contents/MacOS/yieldd" agent install --preflight-only "$@")
 case "$platform" in
     linux)
