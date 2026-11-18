@@ -11,12 +11,12 @@ struct MacOSGuestSSH {
     private let privateKeyURL: URL
     private let knownHostsURL: URL
     private let executor: any ProcessExecuting
-    private let socketURL: URL?
+    private let socketURL: URL
 
     init(
         templateURL: URL,
         executableURL: URL = URL(fileURLWithPath: "/usr/bin/ssh"),
-        socketURL: URL? = nil,
+        socketURL: URL,
         executor: any ProcessExecuting
     ) {
         self.executableURL = executableURL
@@ -45,21 +45,19 @@ struct MacOSGuestSSH {
         }
     }
 
-    func checkTransport(address: String, timeout: TimeInterval) throws {
-        try run("/usr/bin/true", address: address, timeout: timeout)
+    func checkTransport(timeout: TimeInterval) throws {
+        try run("/usr/bin/true", timeout: timeout)
     }
 
-    func validateGuest(address: String, timeout: TimeInterval) throws {
+    func validateGuest(timeout: TimeInterval) throws {
         try run(
             "/Users/runner/bin/yieldd-runner-control ready",
-            address: address,
             timeout: timeout
         )
     }
 
     @discardableResult func execute(
         _ arguments: [String],
-        address: String? = nil,
         standardInput: Data? = nil,
         timeout: TimeInterval?,
         outputCapture: ProcessOutputCapture,
@@ -76,7 +74,6 @@ struct MacOSGuestSSH {
         }.joined(separator: " ")
         return try run(
             command,
-            address: address,
             timeout: timeout,
             standardInput: standardInput,
             outputCapture: outputCapture,
@@ -86,28 +83,17 @@ struct MacOSGuestSSH {
 
     @discardableResult private func run(
         _ command: String,
-        address: String?,
         timeout: TimeInterval?,
         standardInput: Data? = nil,
         outputCapture: ProcessOutputCapture = .tail(maxBytes: Self.outputTailBytes),
         cancellable: Bool = true
     ) throws -> ProcessResult {
-        let destination: String
-        if socketURL != nil {
-            destination = Self.hostKeyAlias
-        } else {
-            guard let address, !address.isEmpty, address != Self.hostKeyAlias else {
-                throw MacOSGuestSSHError.missingAddress
-            }
-            destination = address
-        }
         let request = ProcessRequest(
             executableURL: executableURL,
-            arguments: (socketURL.map {
-                ["-o", "ProxyCommand=/usr/bin/nc -U '" + $0.path
+            arguments: [
+                "-o", "ProxyCommand=/usr/bin/nc -U '" + socketURL.path
                     .replacingOccurrences(of: "'", with: "'\\''")
-                    .replacingOccurrences(of: "%", with: "%%") + "'"]
-            } ?? []) + [
+                    .replacingOccurrences(of: "%", with: "%%") + "'",
                 "-F", "/dev/null",
                 "-i", privateKeyURL.path,
                 "-o", "BatchMode=yes",
@@ -121,7 +107,7 @@ struct MacOSGuestSSH {
                 "-o", "PasswordAuthentication=no",
                 "-o", "StrictHostKeyChecking=yes",
                 "-o", "UserKnownHostsFile=\(Self.configurationValue(knownHostsURL.path))",
-                "runner@\(destination)",
+                "runner@\(Self.hostKeyAlias)",
                 // OpenSSH sends one command through the remote login shell.
                 command,
             ],
@@ -180,71 +166,39 @@ struct MacOSGuestConnection {
     static let retryDelay: TimeInterval = 0.5
     static let sshAttemptTimeout: TimeInterval = 5
 
-    private let resolver: any MacOSGuestAddressResolving
-    private let checkTransport: (String, TimeInterval) throws -> Void
-    private let validateGuest: (String, TimeInterval) throws -> Void
+    private let checkTransport: (TimeInterval) throws -> Void
+    private let validateGuest: (TimeInterval) throws -> Void
     private let currentTime: () -> TimeInterval
 
     init(
-        resolver: any MacOSGuestAddressResolving = MacOSGuestAddressResolver(),
         ssh: MacOSGuestSSH,
         currentTime: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
         }
     ) {
-        self.resolver = resolver
         checkTransport = ssh.checkTransport
         validateGuest = ssh.validateGuest
         self.currentTime = currentTime
     }
 
     init(
-        resolver: any MacOSGuestAddressResolving,
         currentTime: @escaping () -> TimeInterval,
-        checkTransport: @escaping (String, TimeInterval) throws -> Void,
-        validateGuest: @escaping (String, TimeInterval) throws -> Void
+        checkTransport: @escaping (TimeInterval) throws -> Void,
+        validateGuest: @escaping (TimeInterval) throws -> Void
     ) {
-        self.resolver = resolver
         self.currentTime = currentTime
         self.checkTransport = checkTransport
         self.validateGuest = validateGuest
     }
 
     func waitUntilReady(
-        macAddress: String,
         timeout: TimeInterval = Self.readinessTimeout,
         checkCancellation: () throws -> Void = {},
         wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:)
-    ) throws -> String {
+    ) throws {
         precondition(timeout.isFinite && timeout > 0)
         let deadline = currentTime() + timeout
-        let address = try waitForAddress(
-            macAddress: macAddress,
-            deadline: deadline,
-            checkCancellation: checkCancellation,
-            wait: wait
-        )
-        try waitUntilReady(address: address, deadline: deadline, checkCancellation: checkCancellation, wait: wait)
-        return address
-    }
-
-    func waitUntilReady(
-        timeout: TimeInterval = Self.readinessTimeout,
-        checkCancellation: () throws -> Void = {},
-        wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:)
-    ) throws {
-        precondition(timeout.isFinite && timeout > 0)
-        try waitUntilReady(address: MacOSGuestSSH.hostKeyAlias, deadline: currentTime() + timeout, checkCancellation: checkCancellation, wait: wait)
-    }
-
-    private func waitUntilReady(
-        address: String,
-        deadline: TimeInterval,
-        checkCancellation: () throws -> Void,
-        wait: (TimeInterval) throws -> Void
-    ) throws {
         try waitForSSH(
-            address: address,
             deadline: deadline,
             attempt: checkTransport,
             shouldRetry: Self.isRetryableTransportFailure,
@@ -253,7 +207,6 @@ struct MacOSGuestConnection {
             wait: wait
         )
         try waitForSSH(
-            address: address,
             deadline: deadline,
             attempt: validateGuest,
             shouldRetry: { error in
@@ -269,29 +222,9 @@ struct MacOSGuestConnection {
         )
     }
 
-    private func waitForAddress(
-        macAddress: String,
-        deadline: TimeInterval,
-        checkCancellation: () throws -> Void,
-        wait: (TimeInterval) throws -> Void
-    ) throws -> String {
-        while true {
-            try checkCancellation()
-            let remaining = deadline - currentTime()
-            guard remaining > 0 else {
-                throw MacOSGuestConnectionError.addressTimedOut(macAddress: macAddress)
-            }
-            if let address = try resolver.address(for: macAddress) {
-                return address
-            }
-            try wait(min(Self.retryDelay, remaining))
-        }
-    }
-
     private func waitForSSH(
-        address: String,
         deadline: TimeInterval,
-        attempt: (String, TimeInterval) throws -> Void,
+        attempt: (TimeInterval) throws -> Void,
         shouldRetry: (ProcessExecutionError) -> Bool,
         timeoutError: (String, ProcessExecutionError?) -> MacOSGuestConnectionError,
         checkCancellation: () throws -> Void,
@@ -304,10 +237,10 @@ struct MacOSGuestConnection {
             try checkCancellation()
             let remaining = deadline - currentTime()
             guard remaining > 0 else {
-                throw timeoutError(address, readinessError ?? lastError)
+                throw timeoutError(MacOSGuestSSH.hostKeyAlias, readinessError ?? lastError)
             }
             do {
-                try attempt(address, min(Self.sshAttemptTimeout, remaining))
+                try attempt(min(Self.sshAttemptTimeout, remaining))
                 return
             } catch let error as ProcessExecutionError {
                 guard shouldRetry(error) else {
@@ -341,7 +274,6 @@ struct MacOSGuestConnection {
 }
 
 enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
-    case missingAddress
     case invalidCommandArgument
     case insecurePrivateKey(path: String, permissions: mode_t)
     case insecureKnownHosts(path: String, permissions: mode_t)
@@ -350,8 +282,6 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingAddress:
-            "A direct macOS guest SSH connection requires an explicit address."
         case .invalidCommandArgument:
             "macOS guest command arguments must not contain NUL bytes."
         case let .insecurePrivateKey(path, permissions):
@@ -369,14 +299,11 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 }
 
 enum MacOSGuestConnectionError: Error, LocalizedError {
-    case addressTimedOut(macAddress: String)
     case transportTimedOut(address: String, lastError: ProcessExecutionError?)
     case guestReadinessTimedOut(address: String, lastError: ProcessExecutionError?)
 
     var errorDescription: String? {
         switch self {
-        case let .addressTimedOut(macAddress):
-            "Timed out waiting for a DHCP lease for macOS guest \(macAddress)."
         case let .transportTimedOut(address, lastError):
             if let lastError {
                 "Timed out waiting for SSH on macOS guest \(address): \(describeError(lastError))"

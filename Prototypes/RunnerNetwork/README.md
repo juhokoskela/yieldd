@@ -1,6 +1,6 @@
 # Runner network prototype
 
-This directory contains the relay and experimental VM probes. Normal Linux and macOS runner commands use the same relay and socket adapter. Linux requires the [pinned Container fork](../../Docs/linux-runner-network.md); its [validation boundary](../../Docs/linux-runner-network.md#validation-boundary) tracks current acceptance coverage. The manual template probe retains NAT. Do not treat this as a finished sandbox.
+This directory contains the relay and experimental VM probes. Normal Linux and macOS runner commands use the same relay and socket adapter. Linux requires the [pinned Container fork](../../Docs/linux-runner-network.md); its [validation boundary](../../Docs/linux-runner-network.md#validation-boundary) tracks current acceptance coverage. Do not treat this as a finished sandbox.
 
 Each guest gets one `VZFileHandleNetworkDeviceAttachment`, connected to its own host-side relay through a private Unix datagram socket. The relay uses gVisor's TCP/IP stack via `gvisor-tap-vsock`. A small upstream patch lets yieldd check the numeric destination immediately before opening a host TCP or UDP socket. There is no vmnet interface, host-address translation, or guest-accessible HTTP management service.
 

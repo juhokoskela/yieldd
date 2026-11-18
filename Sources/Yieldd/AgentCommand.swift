@@ -17,84 +17,8 @@ struct AgentCommand: ParsableCommand {
             AgentDrainCommand.self,
             AgentUninstallCommand.self,
             AgentRunCommand.self,
-            AgentVirtualizationProbeCommand.self,
         ]
     )
-}
-
-struct AgentVirtualizationProbeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "virtualization-probe",
-        abstract: "Run the packaged macOS virtualization probe.",
-        shouldDisplay: false
-    )
-
-    @Flag(name: .long, help: .hidden)
-    var hold = false
-
-    @Argument(help: "macOS VM template bundle. The probe boots a disposable copy-on-write clone.")
-    var bundlePath: String
-
-    mutating func validate() throws {
-        do {
-            try MacOSVirtualizationBackend.validateTemplate(at: templateURL)
-        } catch {
-            throw ValidationError(describeError(error))
-        }
-    }
-
-    mutating func run() throws {
-        try withRunnerOwnership { leaseStore in
-            let signalMonitor = try SignalMonitor()
-            let memoryAdmission = RunnerMemoryAdmission()
-            let reservation = try memoryAdmission.acquire(
-                reserving: MacOSVirtualMachineLifecycle.memoryBytes,
-                checkCancellation: signalMonitor.check,
-                onBlocked: {
-                    print("Virtualization probe is waiting for available host memory.")
-                }
-            )
-            defer { memoryAdmission.release(reservation) }
-            let guestConnection = MacOSGuestConnection(
-                ssh: MacOSGuestSSH(
-                    templateURL: templateURL,
-                    executor: ProcessExecutor(checkCancellation: signalMonitor.check)
-                )
-            )
-
-            try validateRunnerServiceTemplate(templateURL, stateDirectory: leaseStore.directory)
-            try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: Set(leaseStore.load().map(\.runnerID)))
-            try MacOSVirtualizationProbe(stateDirectory: leaseStore.directory).run(
-                templateURL: templateURL,
-                cloneRootURL: RunnerStorage.required(in: leaseStore.directory).probesURL,
-                memory: reservation.allocation,
-                hold: hold,
-                checkCancellation: signalMonitor.check,
-                wait: signalMonitor.wait,
-                waitUntilGuestReady: { macAddress, timeout in
-                    let address = try guestConnection.waitUntilReady(
-                        macAddress: macAddress,
-                        timeout: timeout,
-                        checkCancellation: signalMonitor.check,
-                        wait: signalMonitor.wait
-                    )
-                    print("macOS guest \(address) is ready over SSH.")
-                },
-                started: {
-                    if hold {
-                        print("macOS virtual machine started without a window. Press Ctrl+C to stop it.")
-                    } else {
-                        print("macOS virtual machine started without a window.")
-                    }
-                }
-            )
-            print("macOS virtualization probe passed and the VM was force-stopped.")
-        }
-    }
-
-    private var templateURL: URL {
-        URL(fileURLWithPath: bundlePath).standardizedFileURL
-    }
 }
 
 struct AgentStatusCommand: ParsableCommand {

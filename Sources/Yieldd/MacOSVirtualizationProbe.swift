@@ -58,8 +58,7 @@ struct MacOSVirtualizationProbeClone {
     static func create(
         templateURL: URL,
         cloneRootURL: URL,
-        id: RunnerID = RunnerID(value: "yieldd-virtualization-probe-\(UUID().uuidString.lowercased())"),
-        macAddress: String? = nil
+        id: RunnerID = RunnerID(value: "yieldd-virtualization-probe-\(UUID().uuidString.lowercased())")
     ) throws -> Self {
         let store = MacOSRunnerCloneStore(rootURL: cloneRootURL)
         let creatingURL = try store.creatingURL(for: id)
@@ -119,9 +118,6 @@ struct MacOSVirtualizationProbeClone {
                 named: "MachineIdentifier",
                 to: cloneURL
             )
-            if let macAddress {
-                try writePrivateFile(Data("\(macAddress)\n".utf8), named: "MACAddress", to: cloneURL)
-            }
             // moveItem refuses an existing destination; publish only a complete clone.
             try fileManager.moveItem(at: cloneURL, to: publishedURL)
             return Self(url: publishedURL)
@@ -342,13 +338,6 @@ struct MacOSVirtualizationProbeClone {
 #endif
     }
 
-    static func macAddressString() throws -> String {
-#if arch(arm64)
-        VZMACAddress.randomLocallyAdministered().string
-#else
-        throw MacOSVirtualizationProbeError.requiresAppleSilicon
-#endif
-    }
 }
 
 enum MacOSVirtualMachineState {
@@ -379,136 +368,6 @@ protocol MacOSVirtualMachineControlling: Sendable {
 }
 
 private let macOSVirtualMachineCheckInterval: TimeInterval = 0.1
-
-struct MacOSVirtualizationProbe {
-    static let runDuration: TimeInterval = 5
-
-    private let requireEntitlement: () throws -> Void
-    private let loadStorage: () throws -> RunnerStorage?
-    private let makeMachine: (URL, UInt64) throws -> any MacOSVirtualMachineControlling
-
-    init(
-        stateDirectory: URL,
-        requireEntitlement: @escaping () throws -> Void =
-            VirtualizationEntitlement.requireCurrentProcess,
-        loadStorage: (() throws -> RunnerStorage?)? = nil,
-        makeMachine: @escaping (URL, UInt64) throws -> any MacOSVirtualMachineControlling =
-            { try MacOSVirtualMachineLifecycle.makeMachine(bundleURL: $0, memoryBytes: $1, networkSocketURL: nil) }
-    ) {
-        self.requireEntitlement = requireEntitlement
-        self.loadStorage = loadStorage ?? { try RunnerStorage.validated(in: stateDirectory) }
-        self.makeMachine = makeMachine
-    }
-
-    func run(
-        templateURL: URL,
-        cloneRootURL: URL,
-        memory allocation: RunnerMemoryAllocation = .full,
-        hold: Bool = false,
-        bootTimeout: TimeInterval = MacOSVirtualMachineLifecycle.bootTimeout,
-        stopTimeout: TimeInterval = MacOSVirtualMachineLifecycle.stopTimeout,
-        checkCancellation: () throws -> Void = {},
-        wait: (TimeInterval) throws -> Void = Thread.sleep(forTimeInterval:),
-        waitUntilGuestReady: (String, TimeInterval) throws -> Void = { _, _ in },
-        started: () -> Void = {}
-    ) throws {
-        try requireEntitlement()
-        try checkCancellation()
-        try loadStorage()?.validateMacOS(template: templateURL, clones: cloneRootURL)
-        let macAddress = try MacOSVirtualizationProbeClone.macAddressString()
-        let clone = try MacOSVirtualizationProbeClone.create(
-            templateURL: templateURL,
-            cloneRootURL: cloneRootURL,
-            macAddress: macAddress
-        )
-        var machine: (any MacOSVirtualMachineControlling)?
-        let operation = Result<Void, any Error> {
-            try checkCancellation()
-            let createdMachine = try makeMachine(
-                clone.url,
-                MacOSVirtualMachineLifecycle.memoryBytes(for: allocation)
-            )
-            machine = createdMachine
-            let completion = VirtualMachineCompletion<Void>()
-            createdMachine.start(completion: completion.complete)
-            try completion.wait(
-                operation: "starting the macOS virtual machine",
-                deadline: ProcessInfo.processInfo.systemUptime + bootTimeout,
-                checkCancellation: checkCancellation
-            )
-            started()
-            try waitUntilGuestIsReady(
-                machine: createdMachine,
-                macAddress: macAddress,
-                hold: hold,
-                checkCancellation: checkCancellation,
-                attempt: waitUntilGuestReady
-            )
-            repeat {
-                try wait(Self.runDuration)
-                try checkCancellation()
-                try MacOSVirtualMachineLifecycle.requireRunning(createdMachine)
-            } while hold
-        }
-        let stopResult = Result<Void, any Error> {
-            if let machine {
-                try MacOSVirtualMachineLifecycle.forceStop(machine, timeout: stopTimeout)
-            }
-        }
-        let removalResult = Result<Void, any Error> {
-            try loadStorage()?.validatePath(cloneRootURL)
-            try clone.remove()
-        }
-        let cleanup: Result<Void, any Error>
-        switch (stopResult, removalResult) {
-        case (.success, .success):
-            cleanup = .success(())
-        case (.failure(let error), .success), (.success, .failure(let error)):
-            cleanup = .failure(error)
-        case (.failure(let stopError), .failure(let removalError)):
-            cleanup = .failure(
-                MacOSVirtualizationProbeError.operationAndCleanupFailed(
-                    operation: stopError,
-                    cleanup: removalError
-                ))
-        }
-
-        switch (operation, cleanup) {
-        case (.success, .success):
-            try checkCancellation()
-        case (.failure(let error), .success), (.success, .failure(let error)):
-            throw error
-        case (.failure(let operationError), .failure(let cleanupError)):
-            throw MacOSVirtualizationProbeError.operationAndCleanupFailed(
-                operation: operationError,
-                cleanup: cleanupError
-            )
-        }
-    }
-
-    private func waitUntilGuestIsReady(
-        machine: any MacOSVirtualMachineControlling,
-        macAddress: String,
-        hold: Bool,
-        checkCancellation: () throws -> Void,
-        attempt: (String, TimeInterval) throws -> Void
-    ) throws {
-        while true {
-            try checkCancellation()
-            try MacOSVirtualMachineLifecycle.requireRunning(machine)
-            do {
-                try attempt(
-                    macAddress,
-                    hold ? Self.runDuration : MacOSGuestConnection.readinessTimeout
-                )
-                return
-            } catch is MacOSGuestConnectionError where hold {
-                try checkCancellation()
-                try MacOSVirtualMachineLifecycle.requireRunning(machine)
-            }
-        }
-    }
-}
 
 enum MacOSVirtualMachineLifecycle {
     static let bootTimeout: TimeInterval = 60
@@ -604,13 +463,13 @@ enum MacOSVirtualMachineLifecycle {
     static func makeMachine(
         bundleURL: URL,
         memoryBytes: UInt64,
-        networkSocketURL: URL?
+        networkSocketURL: URL
     ) throws -> any MacOSVirtualMachineControlling {
 #if arch(arm64)
         try requireSupportedHost()
         return try VirtualizationFrameworkMachine(
             bundleURL: bundleURL, memoryBytes: memoryBytes,
-            packetSocket: networkSocketURL.map { try PacketSocket(path: $0.path) }
+            packetSocket: try PacketSocket(path: networkSocketURL.path)
         )
 #else
         throw MacOSVirtualizationProbeError.requiresAppleSilicon
@@ -626,10 +485,10 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
 
     private let queue: DispatchQueue
     private let machine: VZVirtualMachine
-    private let packetSocket: PacketSocket?
+    private let packetSocket: PacketSocket
     private var failure: (any Error)?
 
-    init(bundleURL: URL, memoryBytes: UInt64, packetSocket: PacketSocket?) throws {
+    init(bundleURL: URL, memoryBytes: UInt64, packetSocket: PacketSocket) throws {
         self.packetSocket = packetSocket
         let configuration = try Self.configuration(
             bundleURL: bundleURL,
@@ -715,7 +574,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
     private static func configuration(
         bundleURL: URL,
         memoryBytes: UInt64,
-        packetSocket: PacketSocket?
+        packetSocket: PacketSocket
     ) throws -> VZVirtualMachineConfiguration {
         let hardwareModelURL = bundleURL.appendingPathComponent("HardwareModel")
         let machineIdentifierURL = bundleURL.appendingPathComponent("MachineIdentifier")
@@ -761,22 +620,6 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
             pixelsPerInch: 80
         )]
 
-        let network: VZVirtioNetworkDeviceConfiguration
-        if let packetSocket {
-            network = packetSocket.device()
-        } else {
-            let macAddressURL = bundleURL.appendingPathComponent("MACAddress")
-            let macAddressString = try String(contentsOf: macAddressURL, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let macAddress = VZMACAddress(string: macAddressString) else {
-                throw MacOSVirtualizationProbeError.invalidMACAddress(path: macAddressURL.path)
-            }
-            // Only the manual template probe uses NAT. Runner creation requires a relay socket.
-            network = VZVirtioNetworkDeviceConfiguration()
-            network.attachment = VZNATNetworkDeviceAttachment()
-            network.macAddress = macAddress
-        }
-
         let configuration = VZVirtualMachineConfiguration()
         configuration.bootLoader = VZMacOSBootLoader()
         configuration.platform = platform
@@ -784,7 +627,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
         configuration.memorySize = memoryBytes
         configuration.storageDevices = [storage]
         configuration.graphicsDevices = [graphics]
-        configuration.networkDevices = [network]
+        configuration.networkDevices = [packetSocket.device()]
         configuration.audioDevices = [MacOSVirtualMachineLifecycle.makeAudioDevice()]
         configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         configuration.keyboards = [VZMacKeyboardConfiguration()]
@@ -847,7 +690,6 @@ enum MacOSVirtualizationProbeError: Error {
     case invalidHardwareModel(path: String)
     case unsupportedHardwareModel
     case invalidMachineIdentifier(path: String)
-    case invalidMACAddress(path: String)
     case templateFileIsNotRegular(path: String)
     case cloneRequiresSameVolume(templatePath: String, cloneRootPath: String)
     case cloneUnsupported(templatePath: String, cloneRootPath: String)
@@ -877,8 +719,6 @@ extension MacOSVirtualizationProbeError: LocalizedError {
             "The macOS VM hardware model is not supported on this host."
         case let .invalidMachineIdentifier(path):
             "The macOS VM machine identifier is invalid: \(path)"
-        case let .invalidMACAddress(path):
-            "The macOS VM MAC address is invalid: \(path)"
         case let .templateFileIsNotRegular(path):
             "The macOS VM template file is not a regular file: \(path)"
         case let .cloneRequiresSameVolume(templatePath, cloneRootPath):
