@@ -1287,6 +1287,17 @@ private struct ConnectedFixture {
 
 @Test(arguments: [ExecutionRenewal.jobSucceeded, .revoked, .active], [true, false])
 func connectedNativeCachePublicationUsesFinalJobResult(_ result: ExecutionRenewal, resultBeforeExit: Bool) throws {
+    try checkNativeCachePublication(result, resultBeforeExit: resultBeforeExit)
+}
+
+@Test
+func connectedForbiddenCacheResultDiscardsDiskAndCompletesAssignment() throws {
+    try checkNativeCachePublication(.revoked, resultBeforeExit: false,
+        lookupError: .http(403, request: "POST /v1/job-result (linux ARM64 slot 0)"))
+}
+
+private func checkNativeCachePublication(_ result: ExecutionRenewal, resultBeforeExit: Bool,
+                                         lookupError: ConnectedRunnerError? = nil) throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     let id = RunnerID(value: connectedOffer.runner)
@@ -1321,6 +1332,7 @@ func connectedNativeCachePublicationUsesFinalJobResult(_ result: ExecutionRenewa
             events.append("result")
             resultQueries += 1
             if resultQueries == 1 || result == .active { return .pending }
+            if let lookupError { throw lookupError }
             return result == .jobSucceeded ? .succeeded : .unavailable
         }, checkCancellation: {
             if result == .active && !resultBeforeExit && resultQueries > 0 { throw CancellationError() }

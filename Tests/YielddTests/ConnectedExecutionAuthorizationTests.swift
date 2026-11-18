@@ -178,6 +178,21 @@ func nativeCacheRejectsRevocationAndBoundsMissingCompletion() throws {
 }
 
 @Test
+func shutdownDuringForbiddenCacheResultLookupStillCancelsTheWorker() throws {
+    var stopped = false
+    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in throw TestFailure.unexpectedBackendCall },
+        jobResult: { _, _ in
+            stopped = true
+            throw ConnectedRunnerError.http(403, request: "POST /v1/job-result (linux ARM64 slot 0)")
+        }, checkCancellation: { if stopped { throw CancellationError() } })
+    authorization.start(authorizationOffer, pendingNativeSave: { true })
+    authorization.endGuestExecution()
+    #expect(throws: CancellationError.self) {
+        try authorization.confirmNativeSave { _ in Issue.record("unexpected retry") }
+    }
+}
+
+@Test
 func successfulCompletionDoesNotExtendGuestExecutionWithoutPendingSave() throws {
     let authorization = ConnectedExecutionAuthorization(renew: { _, _ in .jobSucceeded }, checkCancellation: {})
     authorization.start(authorizationOffer)

@@ -78,6 +78,10 @@ final class ConnectedExecutionAuthorization {
                 return false
             } catch where isTransientConnectedFailure(error) {
                 // The listener can exit before its completion event reaches the coordinator.
+            } catch where !isCancellation(error) {
+                // A failed result lookup rules out publishing this disk. Shutdown still wins.
+                try checkDeadline()
+                return false
             }
             if !jobSucceeded {
                 let remaining = until - currentTime()
