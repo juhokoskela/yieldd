@@ -51,6 +51,10 @@ jobs:
           test -n "$YIELDD_CACHE_PATH"
           test "$YIELDD_CACHE_PATH" = "$NATIVE_PATH"
           test -d "$NATIVE_PATH"
+          case "$PLATFORM" in
+            macos) test "$NATIVE_PATH" = /Volumes/YielddCache ;;
+            linux) test "$NATIVE_PATH" = /mnt/yieldd-cache ;;
+          esac
           expected="$(cat proof-dependency-key)"
           archive="$HOME/.yieldd-proof-archive"
           gomod="$(go env GOMODCACHE)"
