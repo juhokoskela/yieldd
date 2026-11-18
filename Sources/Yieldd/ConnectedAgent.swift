@@ -124,11 +124,13 @@ func installConnectedAgent(configuration: ConnectedAgentConfiguration, token: St
         guard previous == configuration, try credentials.load(previous.credentialAccount) == token else {
             throw AgentError.configurationChanged
         }
+        try service.refreshBundleRegistration()
     } else {
-        guard service.status() == .notRegistered else { throw AgentError.configurationChanged }
         try withRunnerOwnership(in: store.directory, connected: true) { leases in
             guard try store.load() == nil else { throw AgentError.configurationChanged }
             try validateEnrollment(configuration, leases: leases)
+            try service.refreshBundleRegistration()
+            guard service.status() == .notRegistered else { throw AgentError.configurationChanged }
             try credentials.save(configuration.credentialAccount, token)
             try store.save(configuration)
         }
@@ -211,7 +213,7 @@ struct AgentInstallCommand: ParsableCommand {
         let store = ConnectedAgentStore(directory: directory)
         let token = ProcessInfo.processInfo.environment["YIELDD_CLIENT_TOKEN"] ?? ""
         try ConnectedHTTPClient.validateToken(token)
-        let service = try localAgentService(refreshRegistration: !preflightOnly)
+        let service = try localAgentService()
         if preflightOnly {
             guard service.status() == .notRegistered, try store.load() == nil else { throw AgentError.configurationChanged }
             try withRunnerOwnership(in: directory, connected: true) { try validateEnrollment(configuration, leases: $0) }

@@ -8,6 +8,7 @@ struct LocalAgentService {
     let status: () -> SMAppService.Status
     let register: () throws -> Void
     let unregister: () async throws -> Void
+    var refreshBundleRegistration: () throws -> Void = {}
 }
 
 func enableAgent(service: LocalAgentService) throws {
@@ -39,7 +40,7 @@ func disableAgent(service: LocalAgentService) async throws {
     }
 }
 
-func localAgentService(bundle: Bundle = .main, refreshRegistration: Bool = false) throws -> LocalAgentService {
+func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {
     let plistURL = bundle.bundleURL
         .appendingPathComponent("Contents/Library/LaunchAgents", isDirectory: true)
         .appendingPathComponent(agentPlistName, isDirectory: false)
@@ -48,10 +49,6 @@ func localAgentService(bundle: Bundle = .main, refreshRegistration: Bool = false
         throw AgentError.notPackaged
     }
 
-    if refreshRegistration {
-        let status = LSRegisterURL(bundle.bundleURL as CFURL, true)
-        guard status == noErr else { throw AgentError.bundleRegistration(status) }
-    }
     let service = SMAppService.agent(plistName: agentPlistName)
     return LocalAgentService(
         status: { service.status },
@@ -67,6 +64,10 @@ func localAgentService(bundle: Bundle = .main, refreshRegistration: Bool = false
                     }
                 }
             }
+        },
+        refreshBundleRegistration: {
+            let status = LSRegisterURL(bundle.bundleURL as CFURL, true)
+            guard status == noErr else { throw AgentError.bundleRegistration(status) }
         }
     )
 }
