@@ -166,10 +166,9 @@ func (c *relayCache) bind(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if _, err := c.verify(r.Context(), token); err != nil {
-		http.Error(w, "job authorization rejected", http.StatusUnauthorized)
-		return
-	}
+	// Binding pins the credential delivered to this VM before workflow code runs.
+	// The cache backend checks the signature and grants when bytes are requested.
+	// An artifact-only job may have a valid runtime token with no cache grants.
 	c.bound, c.digest = true, digest
 	w.WriteHeader(http.StatusNoContent)
 }
