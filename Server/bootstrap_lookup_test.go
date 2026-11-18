@@ -48,8 +48,10 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 				if err := hosted.replace(&next); err != nil {
 					t.Fatal(err)
 				}
-				w.run = &workflowRun{ID: 102, DisplayTitle: "Bootstrap " + hostedName, Status: "completed", Conclusion: "success"}
-				w.runs[101] = w.run
+				api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
+					fmt.Fprint(response, `{"id":101,"path":".github/workflows/other.yml","status":"completed","conclusion":"success"}`)
+				})
+				c.bootstrap = bootstrapLookup{w, api.getRun}
 				pending := &assignment{coordinator: c}
 				l := &lease{Name: pendingName, Created: time.Now().UTC()}
 				if pendingKind == "expired-local-offer" {

@@ -264,7 +264,7 @@ func TestRunLookupRequiresBootstrapWorkflow(t *testing.T) {
 				if err != nil || run == nil || run.ID != 99 || run.Conclusion != "startup_failure" {
 					t.Fatalf("bootstrap startup failure was rejected: run=%v error=%v", run, err)
 				}
-			} else if err == nil || run != nil {
+			} else if !errors.Is(err, bootstrapIdentityMismatch) || run != nil {
 				t.Fatalf("unexpected workflow path %q was accepted: run=%v error=%v", path, run, err)
 			}
 		})
