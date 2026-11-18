@@ -189,24 +189,6 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         )
     }
 
-    func stopRunner(on id: RunnerID) throws {
-        try lock.withLock {
-            guard let guest = guests[id], let machine = guest.machine else { return }
-            switch machine.state {
-            case .stopped, .failed: return
-            case .running, .stoppable, .transitioning: break
-            }
-            guard case .ready = guest.phase else { return }
-            try guest.relay.check()
-            try guest.ssh.execute(
-                ["/Users/runner/bin/yieldd-runner-control", "stop"],
-                timeout: try runnerStopTimeout(),
-                outputCapture: .tail(maxBytes: MacOSGuestSSH.outputTailBytes),
-                cancellable: false
-            )
-        }
-    }
-
     func destroy(_ id: RunnerID) throws {
         try lock.withLock {
             // Validate paths even when no in-memory VM survived.
@@ -258,14 +240,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         }
     }
 
-    private func runnerStopTimeout() throws -> TimeInterval {
-        guard let deadline = maximumExecutionDeadline() else { return 20 }
-        let now = DispatchTime.now()
-        guard deadline > now else {
-            throw MacOSVirtualizationProbeError.timedOut(operation: "cleaning up the macOS runner")
-        }
-        return min(20, Double(deadline.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000_000)
-    }
+
 }
 
 enum MacOSVirtualizationBackendError: Error, LocalizedError {

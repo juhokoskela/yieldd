@@ -143,6 +143,5 @@ private final class AssignmentBackend: RunnerBackend {
         }
         return processResult()
     }
-    func stopRunner(on id: RunnerID) throws {}
     func destroy(_ id: RunnerID) throws {}
 }

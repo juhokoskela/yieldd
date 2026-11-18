@@ -64,7 +64,6 @@ protocol RunnerBackend {
         as user: RunnerGuestUser,
         on id: RunnerID
     ) throws -> ProcessResult
-    func stopRunner(on id: RunnerID) throws
     func destroy(_ id: RunnerID) throws
 }
 

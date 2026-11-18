@@ -1343,7 +1343,6 @@ private final class ConnectedBackend: RunnerBackend {
         }
         return processResult()
     }
-    func stopRunner(on id: RunnerID) throws { Issue.record("Guest destruction must bound connected cleanup") }
     func destroy(_ id: RunnerID) throws {
         try onOperation()
         if failure == .destroy { throw TestFailure.machineCleanup }

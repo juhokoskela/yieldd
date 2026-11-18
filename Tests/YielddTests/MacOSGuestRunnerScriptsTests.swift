@@ -87,8 +87,7 @@ func macOSRunnerControlKeepsOneListenerAliveAcrossClientDisconnects() throws {
     let fixture = try MacOSGuestRunnerFixture(runScript: """
         #!/bin/bash
         printf 'started\n' >> "$HOME/runner-starts"
-        trap 'exit 0' TERM
-        while :; do sleep 1; done
+        sleep 1.5
         """)
     defer { fixture.remove() }
     try fixture.configure()
@@ -112,9 +111,7 @@ func macOSRunnerControlKeepsOneListenerAliveAcrossClientDisconnects() throws {
     #expect(starts.count == 1)
     #expect(processGroupIsRunning(processGroup))
 
-    let stopRequest = fixture.controlRequest("stop", timeout: 5)
-    try ProcessExecutor().execute(stopRequest).requireSuccess(for: stopRequest)
-    #expect(!processGroupIsRunning(processGroup))
+    try waitForFile(fixture.diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: fixture.diagnosticsDirectory)
 }
 
 @Test
@@ -123,8 +120,7 @@ func macOSRunnerControlSerializesConcurrentStarts() throws {
         #!/bin/bash
         printf 'started\n' >> "$HOME/runner-starts"
         /bin/ps -o pgid= -p "$$" | tr -d ' ' >> "$HOME/runner-groups"
-        trap 'exit 0' TERM
-        while :; do sleep 1; done
+        sleep 1.5
         """)
     defer { fixture.remove() }
     try fixture.configure()
@@ -141,7 +137,6 @@ func macOSRunnerControlSerializesConcurrentStarts() throws {
                 sleep 0.01
             done
             sleep 0.25
-            HOME="$1" "$2" stop
             wait || true
             """,
             "parallel-runner-starts",
@@ -156,79 +151,7 @@ func macOSRunnerControlSerializesConcurrentStarts() throws {
     #expect(try fixture.recordedLines(filename: "runner-starts").count == 1)
     let processGroups = try fixture.recordedPIDs(filename: "runner-groups")
     #expect(processGroups.count == 1)
-    if let processGroup = processGroups.first {
-        #expect(!processGroupIsRunning(processGroup))
-    }
-}
-
-@Test
-func macOSRunnerControlStopsTheActualListenerProcessGroup() throws {
-    let fixture = try MacOSGuestRunnerFixture(
-        runScript: """
-            #!/bin/bash
-            if [[ "${RUNNER_MANUALLY_TRAP_SIG:-}" == 1 ]]; then
-                set -m
-                trap 'kill -INT -$PID' INT TERM
-                ./run-helper.sh &
-                PID=$!
-                wait "$PID"
-                exit $?
-            fi
-            ./run-helper.sh
-            """,
-        runHelperScript: """
-            #!/bin/bash
-            printf '%s\n' "$$" > "$HOME/helper-pid"
-            trap '' INT
-            trap 'exit 0' TERM
-            while :; do sleep 1; done
-            """
-    )
-    defer { fixture.remove() }
-    try fixture.configure()
-
-    try fixture.start()
-    try waitForFile(
-        fixture.homeURL.appendingPathComponent("helper-pid"),
-        diagnosticsDirectory: fixture.diagnosticsDirectory
-    )
-    let helperPID = try #require(fixture.recordedPID(filename: "helper-pid"))
-    #expect(processIsRunning(helperPID))
-
-    let stopRequest = fixture.controlRequest("stop", timeout: 5)
-    try ProcessExecutor().execute(stopRequest).requireSuccess(for: stopRequest)
-
-    try waitForProcessToStop(helperPID)
-}
-
-@Test
-func macOSRunnerControlDoesNotSignalACompletedRunsStoredProcessGroup() throws {
-    let fixture = try MacOSGuestRunnerFixture(runScript: """
-        #!/bin/bash
-        printf 'started\n' >> "$HOME/runner-starts"
-        trap 'exit 0' TERM
-        while :; do sleep 1; done
-        """)
-    defer { fixture.remove() }
-    try fixture.configure()
-
-    try fixture.start()
-    try waitForFile(
-        fixture.homeURL.appendingPathComponent("runner-starts"),
-        diagnosticsDirectory: fixture.diagnosticsDirectory
-    )
-    let processGroup = try #require(fixture.recordedProcessGroup())
-    defer { _ = Darwin.kill(-processGroup, SIGKILL) }
-    try Data("0\n".utf8).write(
-        to: fixture.diagnosticsDirectory.appendingPathComponent("exit-status"),
-        options: .atomic
-    )
-
-    let stopRequest = fixture.controlRequest("stop", timeout: 5)
-    try ProcessExecutor().execute(stopRequest).requireSuccess(for: stopRequest)
-
-    #expect(processGroupIsRunning(processGroup))
-    #expect(fixture.recordedProcessGroup() == nil)
+    try waitForFile(fixture.diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: fixture.diagnosticsDirectory)
 }
 
 @Test
@@ -279,20 +202,6 @@ private func processGroupIsRunning(_ processGroup: pid_t) -> Bool {
     Darwin.kill(-processGroup, 0) == 0 || errno == EPERM
 }
 
-private func processIsRunning(_ process: pid_t) -> Bool {
-    Darwin.kill(process, 0) == 0 || errno == EPERM
-}
-
-private func waitForProcessToStop(_ process: pid_t) throws {
-    for _ in 0..<300 {
-        if !processIsRunning(process) {
-            return
-        }
-        Thread.sleep(forTimeInterval: 0.01)
-    }
-    throw MacOSGuestRunnerTestError.processDidNotStop(process)
-}
-
 private struct MacOSGuestRunnerFixture {
     let homeURL = FileManager.default.temporaryDirectory.appendingPathComponent(
         "yieldd-macos-runner-\(UUID().uuidString)",
@@ -313,7 +222,6 @@ private struct MacOSGuestRunnerFixture {
 
     init(
         runScript: String = "#!/bin/bash\nexit 0\n",
-        runHelperScript: String? = nil,
         configScript: String = "#!/bin/bash\nexit 0\n"
     ) throws {
         try FileManager.default.createDirectory(
@@ -321,12 +229,6 @@ private struct MacOSGuestRunnerFixture {
             withIntermediateDirectories: true
         )
         try writeExecutable(runScript, to: runnerDirectory.appendingPathComponent("run.sh"))
-        if let runHelperScript {
-            try writeExecutable(
-                runHelperScript,
-                to: runnerDirectory.appendingPathComponent("run-helper.sh")
-            )
-        }
         try writeExecutable(configScript, to: runnerDirectory.appendingPathComponent("config.sh"))
     }
 
@@ -371,10 +273,6 @@ private struct MacOSGuestRunnerFixture {
         recordedPID(at: processGroupURL)
     }
 
-    func recordedPID(filename: String) -> pid_t? {
-        recordedPID(at: homeURL.appendingPathComponent(filename))
-    }
-
     func recordedPIDs(filename: String) throws -> [pid_t] {
         try recordedLines(filename: filename).compactMap { line in
             let process = pid_t(line.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -400,20 +298,6 @@ private struct MacOSGuestRunnerFixture {
     }
 
     func remove() {
-        if let processGroup = recordedProcessGroup() {
-            _ = Darwin.kill(-processGroup, SIGKILL)
-        }
-        if let processGroups = try? recordedPIDs(filename: "runner-groups") {
-            for processGroup in Set(processGroups) where processGroup != Darwin.getpgrp() {
-                _ = Darwin.kill(-processGroup, SIGKILL)
-            }
-        }
-        if let helperPID = recordedPID(filename: "helper-pid") {
-            if Darwin.getpgid(helperPID) == helperPID {
-                _ = Darwin.kill(-helperPID, SIGKILL)
-            }
-            _ = Darwin.kill(helperPID, SIGKILL)
-        }
         try? FileManager.default.removeItem(at: homeURL)
     }
 
@@ -428,7 +312,6 @@ private struct MacOSGuestRunnerFixture {
 
 private enum MacOSGuestRunnerTestError: Error {
     case fileDidNotAppear(String)
-    case processDidNotStop(pid_t)
 }
 
 private let macOSGuestDirectory = URL(fileURLWithPath: #filePath)

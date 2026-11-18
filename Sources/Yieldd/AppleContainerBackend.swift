@@ -5,7 +5,6 @@ final class AppleContainerBackend: RunnerBackend {
     static let creationTimeout: TimeInterval = 5 * 60
     static let memoryConfigurationTimeout: TimeInterval = 30
     static let cleanupTimeout: TimeInterval = 90
-    static let runnerStopTimeout: TimeInterval = 30
     static let inspectionTimeout: TimeInterval = 10
     static let preflightTimeout: TimeInterval = 5
     static let virtualCPUs = 4
@@ -196,25 +195,6 @@ final class AppleContainerBackend: RunnerBackend {
         let boot = ProcessRequest(executableURL: containerURL, arguments: ["machine", "boot", "--help"],
                                   timeout: Self.preflightTimeout, outputCapture: .tail(maxBytes: 64 * 1_024))
         try executor.execute(boot).requireSuccess(for: boot)
-    }
-
-    func stopRunner(on id: RunnerID) throws {
-        // Recovery must not boot an abandoned guest, including after a rollback
-        // to stock Container, which would discard its isolated network setting.
-        guard lock.withLock({ guests[id]?.booted == true }) else { return }
-        _ = try loadStorage()
-        _ = try run(
-            [
-                "machine", "run",
-                "--name", id.value,
-                "--user", RunnerGuestUser.root.rawValue,
-                "--",
-                "yieldd-runner-control", "stop",
-            ],
-            timeout: Self.runnerStopTimeout,
-            outputCapture: .tail(maxBytes: 64 * 1_024),
-            cancellable: false
-        )
     }
 
     private func run(

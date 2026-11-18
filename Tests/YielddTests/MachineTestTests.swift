@@ -233,9 +233,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
         }
     }
 
-    func stopRunner(on id: RunnerID) throws {
-        Issue.record("Machine tests must not stop a runner")
-    }
+
 }
 
 private enum RunnerBackendCall: Equatable {

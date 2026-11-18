@@ -63,7 +63,7 @@ status() {
 
 usage() {
     echo "usage: yieldd-runner-control memory constrained|full" >&2
-    echo "       yieldd-runner-control start|status|output|stop" >&2
+    echo "       yieldd-runner-control start|status|output" >&2
     exit 2
 }
 
@@ -86,16 +86,6 @@ if [[ "$#" -eq 1 ]]; then
             IFS= read -r exit_status < "$state_directory/exit-status"
             cat "$state_directory/output.log"
             exit "$exit_status"
-            ;;
-        stop)
-            if [[ "$(systemctl show yieldd-runner.service --property=LoadState --value)" == "not-found" ]]; then
-                exit 0
-            fi
-            if systemctl stop yieldd-runner.service; then
-                exit 0
-            fi
-            [[ "$(systemctl show yieldd-runner.service --property=LoadState --value)" == "not-found" ]]
-            exit
             ;;
         *)
             usage

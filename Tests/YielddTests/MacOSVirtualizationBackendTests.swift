@@ -74,8 +74,7 @@ func macOSBackendPinsSSHToResolvedTemplateAfterSymlinkRetargeting() throws {
 
     try backend.create(id: macOSBackendID, memory: .full)
     try backend.exec(["/usr/bin/true"], on: macOSBackendID)
-    try backend.stopRunner(on: macOSBackendID)
-    #expect(executor.requests.count == 4)
+    #expect(executor.requests.count == 3)
     let resolved = fixture.templateURL.resolvingSymlinksInPath()
     for request in executor.requests {
         #expect(request.arguments.contains(resolved.appendingPathComponent("SSHPrivateKey").path))
@@ -109,10 +108,6 @@ func macOSBackendCreatesOnceAndDestroysRepeatedly() throws {
         #expect(request.arguments.contains("StrictHostKeyChecking=yes"))
         #expect(request.arguments.contains("HostKeyAlias=yieldd-macos-template"))
     }
-    try backend.stopRunner(on: macOSBackendID)
-    let stop = try #require(executor.requests.last)
-    #expect(!stop.cancellable)
-    #expect(stop.timeout == 20)
     try backend.destroy(macOSBackendID)
     try backend.destroy(macOSBackendID)
     #expect(machine.stopCount == 1)
@@ -255,7 +250,6 @@ func macOSBackendDoesNotSendCommandsAfterRelayExit() throws {
     let relay = try #require(network.relays.first)
     relay.failure = TestFailure.runnerJob
     #expect(throws: TestFailure.runnerJob) { try backend.exec(["true"], on: macOSBackendID) }
-    #expect(throws: TestFailure.runnerJob) { try backend.stopRunner(on: macOSBackendID) }
     #expect(executor.requests.count == 2)
     try backend.destroy(macOSBackendID)
     #expect(machine.isStopped)
@@ -280,7 +274,6 @@ func macOSBackendReleasesTerminallyFailedMachine(replaceDirectly: Bool) throws {
     )
     try backend.create(id: macOSBackendID, memory: .full)
     firstMachine?.setState(.failed(TestFailure.runnerJob))
-    try backend.stopRunner(on: macOSBackendID)
     if !replaceDirectly {
         try backend.destroy(macOSBackendID)
         try backend.destroy(macOSBackendID)
@@ -418,28 +411,6 @@ func macOSClonePublicationDoesNotOverwriteExistingBundle() throws {
     }
     #expect(try Data(contentsOf: identityURL) == identity)
     #expect(try fixture.cloneRootContents().map(\.lastPathComponent) == [clone.url.lastPathComponent])
-}
-
-@Test
-func macOSBackendBoundsRunnerStopByRemainingShutdownTime() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let machine = ProbeVirtualMachine()
-    let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 3))
-    var deadline: DispatchTime?
-    let backend = try makeBackend(fixture,
-        executor: executor, maximumExecutionDeadline: { deadline }, makeMachine: { _, _, _ in machine }
-    )
-    try backend.create(id: macOSBackendID, memory: .full)
-    deadline = .now() + 5
-    try backend.stopRunner(on: macOSBackendID)
-    let timeout = try #require(executor.requests.last?.timeout)
-    #expect(timeout > 0 && timeout <= 5)
-    deadline = .now()
-    #expect(throws: MacOSVirtualizationProbeError.self) { try backend.stopRunner(on: macOSBackendID) }
-    #expect(executor.requests.count == 3)
-    deadline = nil
-    try backend.destroy(macOSBackendID)
 }
 
 @Test
