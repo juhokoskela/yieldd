@@ -21,7 +21,10 @@ case "$#:${1:-}" in
             sleep 0.1
         done
         test -f "$image"
-        if [ "$2" = cold ]; then mkfs.ext4 -q -F -L yieldd-cache "$image"; fi
+        if [ "$2" = cold ]; then
+            # The host creates cold disks by extending a new empty file. Every block already reads zero.
+            mkfs.ext4 -q -F -E nodiscard,assume_storage_prezeroed=1 -L yieldd-cache "$image"
+        fi
         mount -t ext4 -o loop,nosuid,nodev "$image" "$path"
         if [ "$2" = cold ]; then chown runner:runner "$path"; fi
         ;;
