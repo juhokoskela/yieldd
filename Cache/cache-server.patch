@@ -129,10 +129,18 @@ index fee420a..0bfe703 100644
          .route(
              "/devstoreaccount1/upload/{upload_id}",
 diff --git a/src/routes/cache.rs b/src/routes/cache.rs
-index 318e039..4b49b79 100644
+index 318e039..f50a0ac 100644
 --- a/src/routes/cache.rs
 +++ b/src/routes/cache.rs
-@@ -59,20 +59,17 @@ impl crate::twirp::CacheService for AppState {
+@@ -36,6 +36,7 @@ fn save_identity(scope: &CacheScope, key: String, version: String) -> twirp::Res
+         .write_scope()
+         .ok_or_else(|| twirp::permission_denied("No scope with write permission found"))?;
+     Ok(EntryIdentity {
++        writer: scope.writer,
+         key: non_empty(key)?,
+         version: non_empty(version)?,
+         scope: write_scope.scope.clone(),
+@@ -59,20 +60,23 @@ impl crate::twirp::CacheService for AppState {
          &self,
          req: Request<CreateCacheEntryRequest>,
      ) -> twirp::Result<twirp::Response<CreateCacheEntryResponse>> {
@@ -143,31 +151,52 @@ index 318e039..4b49b79 100644
          match self.storage.create_upload(&identity).await? {
              CreatedUpload::Created { upload, capability } => {
 -                Ok(twirp::Response::new(CreateCacheEntryResponse {
-+                let url = format!("{}/devstoreaccount1/upload/{}?sig={capability}", self.config.api_base_url, upload.id);
-+                crate::yieldd::transfer(CreateCacheEntryResponse {
-                     ok: true,
+-                    ok: true,
 -                    // The capability is base64url, so it needs no escaping.
 -                    signed_upload_url: format!(
 -                        "{}/devstoreaccount1/upload/{}?sig={capability}",
 -                        self.config.api_base_url, upload.id
 -                    ),
-+                    signed_upload_url: url.clone(),
-                     message: String::new(),
+-                    message: String::new(),
 -                }))
-+                }, &url)
++                let url = format!(
++                    "{}/devstoreaccount1/upload/{}?sig={capability}",
++                    self.config.api_base_url, upload.id
++                );
++                crate::yieldd::transfer(
++                    CreateCacheEntryResponse {
++                        ok: true,
++                        signed_upload_url: url.clone(),
++                        message: String::new(),
++                    },
++                    &url,
++                )
              }
              // GitHub answers a duplicate reservation with 409, not 200 with ok: false.
              CreatedUpload::AlreadyExists => Err(twirp::already_exists(
-@@ -85,7 +82,7 @@ impl crate::twirp::CacheService for AppState {
+@@ -85,12 +89,18 @@ impl crate::twirp::CacheService for AppState {
          &self,
          req: Request<FinalizeCacheEntryUploadRequest>,
      ) -> twirp::Result<twirp::Response<FinalizeCacheEntryUploadResponse>> {
 -        let scope = self.verifier.cache_scope(req.headers()).await?;
+-        let FinalizeCacheEntryUploadRequest { key, version, .. } = req.into_body();
 +        let scope = self.archive_scope(req.headers()).await?;
-         let FinalizeCacheEntryUploadRequest { key, version, .. } = req.into_body();
++        let FinalizeCacheEntryUploadRequest {
++            key,
++            version,
++            size_bytes,
++        } = req.into_body();
++        let size = u64::try_from(size_bytes)
++            .map_err(|_| twirp::invalid_argument("invalid archive size"))?;
          let identity = save_identity(&scope, key, version)?;
          let upload = self
-@@ -105,7 +102,7 @@ impl crate::twirp::CacheService for AppState {
+             .storage
+-            .complete_upload(&identity)
++            .complete_upload(&identity, (size > 0).then_some(size))
+             .await?
+             .ok_or_else(|| twirp::not_found("Upload not found"))?;
+         self.metrics.record_upload();
+@@ -105,7 +115,7 @@ impl crate::twirp::CacheService for AppState {
          &self,
          req: Request<GetCacheEntryDownloadUrlRequest>,
      ) -> twirp::Result<twirp::Response<GetCacheEntryDownloadUrlResponse>> {
@@ -176,46 +205,60 @@ index 318e039..4b49b79 100644
          let GetCacheEntryDownloadUrlRequest {
              key,
              restore_keys,
-@@ -124,14 +121,16 @@ impl crate::twirp::CacheService for AppState {
+@@ -124,14 +134,15 @@ impl crate::twirp::CacheService for AppState {
          } else {
              LookupResult::Miss
          });
 -        Ok(twirp::Response::new(matched.map_or_else(
-+        let response = matched.map_or_else(
-             Default::default,
-             |matched| GetCacheEntryDownloadUrlResponse {
+-            Default::default,
+-            |matched| GetCacheEntryDownloadUrlResponse {
++        let response = matched.map_or_else(Default::default, |matched| {
++            GetCacheEntryDownloadUrlResponse {
                  ok: true,
                  signed_download_url: matched.download_url,
                  matched_key: matched.entry.key,
-             },
+-            },
 -        )))
-+        );
++            }
++        });
 +        let url = response.signed_download_url.clone();
 +        crate::yieldd::transfer(response, &url)
      }
  }
- 
+
 diff --git a/src/scope.rs b/src/scope.rs
-index 1080961..bad4199 100644
+index 1080961..28b3eef 100644
 --- a/src/scope.rs
 +++ b/src/scope.rs
-@@ -36,6 +36,7 @@ pub(crate) struct CacheScope {
+@@ -11,6 +11,7 @@ use jsonwebtoken::jwk::{
+ };
+ use jsonwebtoken::{Algorithm, AlgorithmFamily, DecodingKey, Header, Validation};
+ use serde::Deserialize;
++use sha2::{Digest as _, Sha256};
+ use tokio::sync::{Mutex, OnceCell};
+
+ use crate::config::Config;
+@@ -33,9 +34,11 @@ pub(crate) struct ScopeGrant {
+ /// Scopes and repository a request may access.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct CacheScope {
++    pub(crate) writer: [u8; 32],
      /// Never empty.
      pub(crate) scopes: Vec<ScopeGrant>,
      pub(crate) repo_id: String,
 +    pub(crate) repository: Option<String>,
  }
- 
+
  impl CacheScope {
-@@ -67,6 +68,7 @@ pub(crate) struct Unauthorized(pub(crate) &'static str);
+@@ -67,6 +70,7 @@ pub(crate) struct Unauthorized(pub(crate) &'static str);
  struct Claims {
      ac: Option<String>,
      repository_id: Option<String>,
 +    repository: Option<String>,
  }
- 
+
  /// Matches the original server's OIDC and JWKS fetch timeout.
-@@ -286,6 +288,9 @@ impl TokenVerifier {
+@@ -286,6 +290,9 @@ impl TokenVerifier {
          };
          let scopes: Vec<ScopeGrant> = serde_json::from_str(&scopes)
              .map_err(|_parse_error| Unauthorized("Invalid JSON in cache scopes"))?;
@@ -225,21 +268,29 @@ index 1080961..bad4199 100644
          if scopes.is_empty() {
              return Err(Unauthorized("Token does not contain any cache scopes"));
          }
-@@ -295,7 +300,7 @@ impl TokenVerifier {
+@@ -295,7 +302,12 @@ impl TokenVerifier {
          let Some(repo_id) = claims.repository_id.filter(|id| !id.is_empty()) else {
              return Err(Unauthorized("Token does not contain repository id"));
          };
 -        Ok(CacheScope { scopes, repo_id })
-+        Ok(CacheScope { scopes, repo_id, repository: claims.repository })
++        Ok(CacheScope {
++            scopes,
++            repo_id,
++            repository: claims.repository,
++            writer: Sha256::digest(token).into(),
++        })
      }
  }
- 
+
 diff --git a/src/scope/tests.rs b/src/scope/tests.rs
-index e2e2fcf..7149ab3 100644
+index e2e2fcf..672c20c 100644
 --- a/src/scope/tests.rs
 +++ b/src/scope/tests.rs
-@@ -152,6 +152,7 @@ fn permissions_are_bit_flags() {
+@@ -150,8 +150,10 @@ fn permissions_are_bit_flags() {
+         permission,
+     };
      let scope = CacheScope {
++        writer: [0; 32],
          scopes: vec![grant("read", 1), grant("write", 2), grant("both", 3)],
          repo_id: "1".to_owned(),
 +        repository: None,
@@ -259,7 +310,7 @@ index facb97e..ff4d834 100644
          metrics.contains("process_start_time_seconds"),
          "process metrics are wired up"
 diff --git a/src/storage.rs b/src/storage.rs
-index 13862d9..068ece2 100644
+index 13862d9..ef4728f 100644
 --- a/src/storage.rs
 +++ b/src/storage.rs
 @@ -6,10 +6,10 @@ mod leases;
@@ -436,7 +487,7 @@ index 13862d9..068ece2 100644
          self.adapter
              .upload_stream(
                  &part_object(&upload.folder_name, part_index),
-@@ -659,6 +713,10 @@ impl Storage {
+@@ -659,11 +713,19 @@ impl Storage {
      /// Reserves `identity` for a new upload; a concurrent reservation of the same identity loses
      /// on the unique reservation hash.
      pub(crate) async fn create_upload(&self, identity: &EntryIdentity) -> Result<CreatedUpload> {
@@ -446,12 +497,67 @@ index 13862d9..068ece2 100644
 +        };
          let id = random_upload_id();
          let capability = random_capability()?;
++        let folder_name = identity.upload_folder(id);
++        // Take the unique reservation first. Publishing swaps reservation for
++        // entry in one transaction, so another create sees one or the other.
++        let tx = self.db.pool.begin().await?;
          let inserted = uploads::Entity::insert(uploads::ActiveModel {
-@@ -689,15 +747,24 @@ impl Storage {
+             id: Set(id),
+-            folder_name: Set(id.to_string()),
++            folder_name: Set(folder_name.clone()),
+             created_at: Set(now_ms()),
+             key: Set(identity.key.clone()),
+             version: Set(identity.version.clone()),
+@@ -673,39 +735,71 @@ impl Storage {
+             capability_hash: Set(Some(capability_hash(&capability))),
+             ..Default::default()
+         })
+-        .exec_without_returning(&self.db.pool)
++        .exec_without_returning(&tx)
+         .await;
+-        match inserted {
+-            Ok(_) => Ok(CreatedUpload::Created {
+-                upload: AuthorizedUpload {
+-                    id,
+-                    folder_name: id.to_string(),
+-                },
+-                capability,
+-            }),
+-            Err(error) if is_unique_violation(&error) => Ok(CreatedUpload::AlreadyExists),
+-            Err(error) => Err(error.into()),
++        if let Err(error) = inserted {
++            return if is_unique_violation(&error) {
++                Ok(CreatedUpload::AlreadyExists)
++            } else {
++                Err(error.into())
++            };
++        }
++        if cache_entries::Entity::find()
++            .select_only()
++            .column(cache_entries::Column::Id)
++            .filter(entry_identity(identity))
++            .into_tuple::<String>()
++            .one(&tx)
++            .await?
++            .is_some()
++        {
++            tx.rollback().await?;
++            return Ok(CreatedUpload::AlreadyExists);
+         }
++        tx.commit().await?;
++        Ok(CreatedUpload::Created {
++            upload: AuthorizedUpload { id, folder_name },
++            capability,
++        })
      }
 
-     pub(crate) async fn complete_upload(&self, identity: &EntryIdentity) -> Result<Option<Upload>> {
+-    pub(crate) async fn complete_upload(&self, identity: &EntryIdentity) -> Result<Option<Upload>> {
 -        let upload = uploads::Entity::find()
++    pub(crate) async fn complete_upload(
++        &self,
++        identity: &EntryIdentity,
++        expected_size: Option<u64>,
++    ) -> Result<Option<Upload>> {
 +        let id: Option<i64> = uploads::Entity::find()
 +            .select_only()
 +            .column(uploads::Column::Id)
@@ -473,12 +579,95 @@ index 13862d9..068ece2 100644
 +        let Some(upload) = uploads::Entity::find_by_id(id).one(&self.db.reads).await? else {
              return Ok(None);
          };
++        if upload.folder_name != identity.upload_folder(id) {
++            return Ok(None);
++        }
          if upload.finished_part_upload_count == 0 {
-@@ -799,7 +866,14 @@ impl Storage {
+             return Err(self
+                 .abandon_upload(&upload, "No parts have been uploaded".to_owned())
+                 .await);
+         }
+-        if upload.started_part_upload_count != upload.finished_part_upload_count {
++        // Older clients can omit the size; fail conservatively if a part failed.
++        if expected_size.is_none()
++            && upload.started_part_upload_count != upload.finished_part_upload_count
++        {
+             let reason = format!(
+                 "Not all parts have been uploaded (only {} of {} parts uploaded)",
+                 upload.finished_part_upload_count, upload.started_part_upload_count
+@@ -717,17 +811,22 @@ impl Storage {
+             .list_folder(&parts_folder(&upload.folder_name))
+             .await?;
+         let part_count = i32::try_from(parts.len()).unwrap_or(i32::MAX);
+-        if part_count != upload.finished_part_upload_count {
+-            let reason = format!(
+-                "Uploaded part count does not match actual part count in storage (expected {} but \
+-                 found {part_count})",
+-                upload.finished_part_upload_count
+-            );
+-            return Err(self.abandon_upload(&upload, reason).await);
++        if part_count == 0 || !(0..part_count).all(|i| parts.contains_key(&i.to_string())) {
++            return Err(self
++                .abandon_upload(&upload, "Archive parts are incomplete".to_owned())
++                .await);
+         }
+         let size_bytes = parts
+             .values()
+             .fold(0_u64, |total, bytes| total.saturating_add(*bytes));
++        if expected_size.is_some_and(|expected| expected != size_bytes) {
++            return Err(self
++                .abandon_upload(
++                    &upload,
++                    "Archive size differs from finalized size".to_owned(),
++                )
++                .await);
++        }
+         let location = StorageLocation {
+             id: uuid::Uuid::new_v4().to_string(),
+             folder_name: upload.folder_name.clone(),
+@@ -768,38 +867,25 @@ impl Storage {
+         storage_locations::Entity::insert(location.clone().into_active_model())
              .exec_without_returning(&tx)
              .await?;
-         }
--        uploads::Entity::delete_by_id(upload.id).exec(&tx).await?;
+-        let existing: Option<String> = cache_entries::Entity::find()
+-            .select_only()
+-            .column(cache_entries::Column::Id)
+-            .inner_join(storage_locations::Entity)
+-            .filter(entry_identity(identity))
+-            .into_tuple()
+-            .one(&tx)
+-            .await?;
+-        let entry = cache_entries::ActiveModel {
++        cache_entries::Entity::insert(cache_entries::ActiveModel {
++            id: Set(uuid::Uuid::new_v4().to_string()),
++            key: Set(upload.key.clone()),
++            version: Set(upload.version.clone()),
++            scope: Set(identity.scope.clone()),
++            repo_id: Set(identity.repo_id.clone()),
+             updated_at: Set(now_ms()),
+             location_id: Set(location.id.clone()),
+-            ..Default::default()
+-        };
+-        if let Some(id) = existing {
+-            cache_entries::Entity::update_many()
+-                .set(entry)
+-                .filter(cache_entries::COLUMN.id.eq(id))
+-                .exec(&tx)
+-                .await?;
+-        } else {
+-            cache_entries::Entity::insert(cache_entries::ActiveModel {
+-                id: Set(uuid::Uuid::new_v4().to_string()),
+-                key: Set(upload.key.clone()),
+-                version: Set(upload.version.clone()),
+-                scope: Set(identity.scope.clone()),
+-                repo_id: Set(identity.repo_id.clone()),
+-                ..entry
+-            })
+-            .exec_without_returning(&tx)
+-            .await?;
++        })
++        .exec_without_returning(&tx)
++        .await?;
 +        if uploads::Entity::delete_by_id(upload.id)
 +            .exec(&tx)
 +            .await?
@@ -486,11 +675,12 @@ index 13862d9..068ece2 100644
 +            == 0
 +        {
 +            return Err(Failure::msg("upload expired before finalization"));
-+        }
+         }
+-        uploads::Entity::delete_by_id(upload.id).exec(&tx).await?;
          tx.commit().await?;
          Ok(())
      }
-@@ -929,8 +1003,12 @@ impl Storage {
+@@ -929,8 +1015,12 @@ impl Storage {
          location: &StorageLocation,
          range: Option<RangeRequest>,
      ) -> Result<DownloadStream, ReadError> {
@@ -696,10 +886,36 @@ index d0e3bcf..bbebee2 100644
                  .min(Semaphore::MAX_PERMITS),
              // `i32` caps it like v9, at the largest delay a Node timer accepts.
 diff --git a/src/tests/downloads.rs b/src/tests/downloads.rs
-index 168c3ed..e14ac22 100644
+index 168c3ed..4f72036 100644
 --- a/src/tests/downloads.rs
 +++ b/src/tests/downloads.rs
-@@ -453,3 +453,37 @@ async fn closes_a_download_whose_client_stopped_reading() {
+@@ -155,8 +155,24 @@ async fn serves_ranges_of_unmerged_entries_and_pins_bytes_to_a_location() {
+     let server = TestServer::start().await;
+     let key = uuid::Uuid::new_v4().to_string();
+     let first = save_parts(server.storage(), &key, &parts()).await;
++    assert!(matches!(
++        server
++            .storage()
++            .create_upload(&super::harness::identity(&key))
++            .await
++            .unwrap(),
++        crate::storage::CreatedUpload::AlreadyExists
++    ));
++    server
++        .storage()
++        .delete_storage_location(&first.id)
++        .await
++        .unwrap();
+     let resaved = save_parts(server.storage(), &key, &[b"re".to_vec(), b"saved".to_vec()]).await;
+-    assert_ne!(first.id, resaved.id, "a re-save gets a new location");
++    assert_ne!(
++        first.id, resaved.id,
++        "a save after eviction gets a new location"
++    );
+
+     let stale = get(&server, &first.id, Some("bytes=0-10")).await;
+     assert_eq!(
+@@ -453,3 +469,37 @@ async fn closes_a_download_whose_client_stopped_reading() {
          "the client sees a failed download, not a complete one"
      );
  }
@@ -821,10 +1037,70 @@ index 3839641..8fed83c 100644
                  match self.storage.adapter.delete_folder(folder_name).await {
                      Ok(deleted) => summary.reclaimed(deleted.objects, deleted.bytes),
 diff --git a/src/tests/cleanup.rs b/src/tests/cleanup.rs
-index 14106b5..7570b53 100644
+index 14106b5..ea83b9d 100644
 --- a/src/tests/cleanup.rs
 +++ b/src/tests/cleanup.rs
-@@ -415,3 +415,87 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
+@@ -140,7 +140,10 @@ async fn finalization_succeeds_when_eviction_fails() {
+         |mode| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode)).unwrap();
+     set_mode(0o555);
+     let writable = std::fs::write(root.join("probe"), b"").is_ok();
+-    let completed = server.storage().complete_upload(&identity("evict")).await;
++    let completed = server
++        .storage()
++        .complete_upload(&identity("evict"), None)
++        .await;
+     set_mode(0o755);
+     if writable {
+         return; // running as root: permissions cannot make the deletion fail
+@@ -327,11 +330,12 @@ async fn failed_finalization_removes_the_upload_folder() {
+     else {
+         panic!("fresh key");
+     };
+-    put(server.adapter(), &format!("{id}/untracked"), b"partial").await;
++    let folder = identity("partial").upload_folder(id);
++    put(server.adapter(), &format!("{folder}/untracked"), b"partial").await;
+
+     let error = server
+         .storage()
+-        .complete_upload(&identity("partial"))
++        .complete_upload(&identity("partial"), None)
+         .await
+         .unwrap_err();
+     assert!(
+@@ -341,7 +345,7 @@ async fn failed_finalization_removes_the_upload_folder() {
+     assert!(
+         server
+             .adapter()
+-            .list_folder(&id.to_string())
++            .list_folder(&folder)
+             .await
+             .unwrap()
+             .is_empty(),
+@@ -363,7 +367,13 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
+     else {
+         panic!("fresh key");
+     };
+-    put(server.adapter(), &format!("{id}/parts/0"), b"authorized").await;
++    let folder = identity("authorized").upload_folder(id);
++    put(
++        server.adapter(),
++        &format!("{folder}/parts/0"),
++        b"authorized",
++    )
++    .await;
+     put(server.adapter(), "orphaned/parts/0", b"orphaned").await;
+     put(server.adapter(), "orphaned/parts/1", b"!").await;
+
+@@ -377,7 +387,7 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
+         "reclaimed what was deleted"
+     );
+     assert_eq!(
+-        part_count(&server, &id.to_string()).await,
++        part_count(&server, &folder).await,
+         1,
+         "authorized by its upload"
+     );
+@@ -415,3 +425,91 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
          "nothing was deleted"
      );
  }
@@ -896,8 +1172,12 @@ index 14106b5..7570b53 100644
 +            .is_none()
 +    );
 +    let storage = std::sync::Arc::clone(&server.state.storage);
-+    let finalize =
-+        tokio::spawn(async move { storage.complete_upload(&identity("slow")).await.unwrap() });
++    let finalize = tokio::spawn(async move {
++        storage
++            .complete_upload(&identity("slow"), None)
++            .await
++            .unwrap()
++    });
 +    tokio::task::yield_now().await;
 +    assert!(!finalize.is_finished());
 +    release.send(()).unwrap();
@@ -906,9 +1186,215 @@ index 14106b5..7570b53 100644
 +    assert!(
 +        server
 +            .storage()
-+            .complete_upload(&identity("slow"))
++            .complete_upload(&identity("slow"), None)
 +            .await
 +            .unwrap()
 +            .is_none()
 +    );
++}
+diff --git a/src/db.rs b/src/db.rs
+index 76dab62..6530f47 100644
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -272,6 +272,7 @@ fn is_retryable_lock_error(failure: &Failure) -> bool {
+ /// upload may hold a reservation at a time.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct EntryIdentity {
++    pub(crate) writer: [u8; 32],
+     pub(crate) key: String,
+     pub(crate) version: String,
+     pub(crate) scope: String,
+@@ -279,6 +280,17 @@ pub(crate) struct EntryIdentity {
+ }
+
+ impl EntryIdentity {
++    // Finalize v2 identifies only a key/version. The opaque storage folder
++    // binds this reservation to the job that created it across helper restarts.
++    pub(crate) fn upload_folder(&self, id: i64) -> String {
++        let mut hash = Sha256::new();
++        hash.update(b"yieldd/upload-owner/v1\0");
++        hash.update(id.to_be_bytes());
++        hash.update(self.reservation_hash());
++        hash.update(self.writer);
++        format!("{:x}", hash.finalize())
++    }
++
+     /// SHA-256 of the JSON array `[key, version, scope, repoId]`, byte-identical to the original
+     /// server's `JSON.stringify`, so both can share a database during a rollout.
+     pub(crate) fn reservation_hash(&self) -> String {
+diff --git a/src/db/tests.rs b/src/db/tests.rs
+index e9f0000..06bbb01 100644
+--- a/src/db/tests.rs
++++ b/src/db/tests.rs
+@@ -57,6 +57,8 @@ async fn attempts(
+ #[test]
+ fn hashes_reservations_like_json_stringify() {
+     let identity = |key: &str, version: &str, scope: &str, repo_id: &str| EntryIdentity {
++        writer: [0; 32],
++
+         key: key.to_owned(),
+         version: version.to_owned(),
+         scope: scope.to_owned(),
+diff --git a/src/tests/harness.rs b/src/tests/harness.rs
+index 628098b..49754a9 100644
+--- a/src/tests/harness.rs
++++ b/src/tests/harness.rs
+@@ -336,6 +336,7 @@ pub(crate) fn query(keys: &[&str]) -> CacheQuery {
+
+ pub(crate) fn identity(key: &str) -> EntryIdentity {
+     EntryIdentity {
++        writer: [0; 32],
+         key: key.to_owned(),
+         version: VERSION.to_owned(),
+         scope: SCOPE.to_owned(),
+@@ -363,7 +364,7 @@ pub(crate) async fn save_parts(storage: &Storage, key: &str, parts: &[Vec<u8>])
+             .unwrap();
+     }
+     storage
+-        .complete_upload(&identity(key))
++        .complete_upload(&identity(key), None)
+         .await
+         .unwrap()
+         .unwrap();
+diff --git a/src/tests/reservations.rs b/src/tests/reservations.rs
+index f78d74c..02245fa 100644
+--- a/src/tests/reservations.rs
++++ b/src/tests/reservations.rs
+@@ -345,3 +345,137 @@ async fn matches_scopes_then_keys_then_exact_before_prefix() {
+         "no candidate matches"
+     );
+ }
++
++#[tokio::test]
++async fn expiration_never_lets_a_previous_writer_finalize_a_reused_key() {
++    use crate::cleanup::Task;
++    use crate::db::now_ms;
++    use sea_orm::QueryFilter as _;
++
++    let server = TestServer::start().await;
++    let storage = server.storage();
++    let first = identity("reuse");
++    let mut second = first.clone();
++    second.writer = [1; 32];
++    let CreatedUpload::Created { upload: old, .. } = storage.create_upload(&first).await.unwrap()
++    else {
++        panic!("new upload")
++    };
++    // Pre-owner-binding reservations used numeric folders. They cannot be
++    // finalized after an upgrade, but the normal expiry sweep still reclaims them.
++    uploads::Entity::update_many()
++        .set(uploads::ActiveModel {
++            folder_name: Set(old.id.to_string()),
++            ..Default::default()
++        })
++        .filter(uploads::COLUMN.id.eq(old.id))
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    assert!(
++        storage
++            .complete_upload(&first, None)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    uploads::Entity::update_many()
++        .set(uploads::ActiveModel {
++            created_at: Set(now_ms() - 120_000),
++            ..Default::default()
++        })
++        .filter(uploads::COLUMN.id.eq(old.id))
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    assert_eq!(
++        server
++            .state
++            .cleanup
++            .run(Task::Uploads)
++            .await
++            .unwrap()
++            .unwrap()
++            .deleted_uploads,
++        1
++    );
++    let CreatedUpload::Created { upload: new, .. } = storage.create_upload(&second).await.unwrap()
++    else {
++        panic!("new upload after expiry")
++    };
++    assert!(
++        !storage
++            .upload_part(&old, 0, byte_stream("old"), Some(3))
++            .await
++            .unwrap()
++    );
++    assert!(
++        storage
++            .upload_part(&new, 0, byte_stream("new"), Some(3))
++            .await
++            .unwrap()
++    );
++    assert!(
++        storage
++            .complete_upload(&first, Some(3))
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let (saved, denied) = tokio::join!(
++        storage.complete_upload(&second, Some(3)),
++        storage.create_upload(&first)
++    );
++    assert!(saved.unwrap().is_some());
++    assert!(matches!(denied.unwrap(), CreatedUpload::AlreadyExists));
++    assert!(matches!(
++        storage.create_upload(&first).await.unwrap(),
++        CreatedUpload::AlreadyExists
++    ));
++    let location = matched(storage, &["reuse"]).await.unwrap().location_id;
++    let data = storage.download(&location, None).await.unwrap().unwrap();
++    assert_eq!(super::harness::read_all(data.stream).await.unwrap(), b"new");
++}
++
++#[tokio::test]
++async fn repeated_blocks_preserve_the_distinct_inventory_and_final_length() {
++    let server = TestServer::start().await;
++    let storage = server.storage();
++    for (key, indices, expected_size, valid) in [
++        ("lost-ack", [0, 0, 1], 4_u64, true),
++        ("missing-block", [0, 0, 2], 4, false),
++        ("short-body", [0, 0, 1], 5, false),
++    ] {
++        let entry = identity(key);
++        let CreatedUpload::Created { upload, .. } = storage.create_upload(&entry).await.unwrap()
++        else {
++            panic!("new upload")
++        };
++        for i in indices {
++            assert!(
++                storage
++                    .upload_part(
++                        &upload,
++                        i,
++                        byte_stream(if i == 0 { "aa" } else { "bb" }),
++                        Some(2)
++                    )
++                    .await
++                    .unwrap()
++            );
++        }
++        let result = storage.complete_upload(&entry, Some(expected_size)).await;
++        if valid {
++            assert!(result.unwrap().is_some());
++            let location = matched(storage, &[key]).await.unwrap().location_id;
++            let data = storage.download(&location, None).await.unwrap().unwrap();
++            assert_eq!(
++                super::harness::read_all(data.stream).await.unwrap(),
++                b"aabb"
++            );
++        } else {
++            assert!(result.is_err());
++            assert!(matched(storage, &[key]).await.is_none());
++        }
++    }
 +}
