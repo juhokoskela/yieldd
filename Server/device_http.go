@@ -110,6 +110,9 @@ func (s *coordinatorLoop) run() error {
 			stop()
 			cancel()
 			call.result <- err
+			if isJournalWrite(err) {
+				return err
+			}
 		}
 		timer.Stop()
 	}

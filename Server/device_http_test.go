@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -196,5 +197,43 @@ func TestLongPollTimeoutAndWakeup(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestDeviceJournalErrorAfterPublicationStopsQueue(t *testing.T) {
+	c, _, store, req := localFixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	loop := newCoordinatorLoop(ctx, c)
+	token := strings.Repeat("x", 32)
+	h := deviceHandlerFor(t, loop, token)
+	failure := errors.New("directory sync failed after rename")
+	c.save = func(s *state) error {
+		if err := store.save(s); err != nil {
+			return err
+		}
+		return failure
+	}
+	done := make(chan error, 1)
+	go func() { done <- loop.run() }()
+	body, _ := json.Marshal(req)
+	r := httptest.NewRequest("POST", "/v1/accept", bytes.NewReader(body)).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 503 {
+		t.Fatal(w.Code)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, failure) {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("queue continued after uncertain publication")
+	}
+	saved, err := store.load(c.state.Config)
+	if err != nil || saved.Leases[req.Runner].Local.Phase != localAccepted {
+		t.Fatal(saved, err)
 	}
 }
