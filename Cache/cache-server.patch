@@ -258,3 +258,152 @@ index facb97e..ff4d834 100644
      assert!(
          metrics.contains("process_start_time_seconds"),
          "process metrics are wired up"
+diff --git a/src/storage.rs b/src/storage.rs
+index 13862d9..28641b7 100644
+--- a/src/storage.rs
++++ b/src/storage.rs
+@@ -659,6 +659,10 @@ impl Storage {
+     /// Reserves `identity` for a new upload; a concurrent reservation of the same identity loses
+     /// on the unique reservation hash.
+     pub(crate) async fn create_upload(&self, identity: &EntryIdentity) -> Result<CreatedUpload> {
++        let _metadata = match self.adapter.as_ref() {
++            Adapter::Filesystem(fs) => Some(fs.reserve_metadata()?),
++            Adapter::Object(_) => None,
++        };
+         let id = random_upload_id();
+         let capability = random_capability()?;
+         let inserted = uploads::Entity::insert(uploads::ActiveModel {
+diff --git a/src/storage/filesystem.rs b/src/storage/filesystem.rs
+index f7fb624..5933975 100644
+--- a/src/storage/filesystem.rs
++++ b/src/storage/filesystem.rs
+@@ -3,6 +3,7 @@
+ use std::collections::HashMap;
+ use std::io::{self, SeekFrom};
+ use std::path::{Component, Path, PathBuf};
++use std::sync::{Arc, Mutex};
+ use std::time::UNIX_EPOCH;
+
+ use futures_util::{StreamExt as _, TryStreamExt as _};
+@@ -22,6 +23,42 @@ const READ_CHUNK_BYTES: usize = 256 * 1024;
+ #[derive(Debug)]
+ pub(crate) struct FilesystemAdapter {
+     root: PathBuf,
++    writing: Arc<Mutex<u64>>,
++}
++
++pub(crate) struct WriteReservation {
++    writing: Arc<Mutex<u64>>,
++    bytes: u64,
++}
++
++impl Drop for WriteReservation {
++    fn drop(&mut self) {
++        let mut writing = self
++            .writing
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        *writing -= self.bytes;
++    }
++}
++
++fn reserve(root: &Path, writing: &Arc<Mutex<u64>>, bytes: u64) -> io::Result<WriteReservation> {
++    let mut pending = writing
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner);
++    let stats = rustix::fs::statvfs(root)?;
++    let capacity = stats.f_blocks.saturating_mul(stats.f_frsize);
++    let available = stats.f_bavail.saturating_mul(stats.f_frsize);
++    // Cleanup and SQLite can still commit when multiple writers fill this filesystem.
++    let headroom = (capacity / 8).min(64 << 20);
++    let bytes = bytes.max(16 << 10);
++    if available.saturating_sub(headroom).saturating_sub(*pending) < bytes {
++        return Err(io::Error::from(io::ErrorKind::StorageFull));
++    }
++    *pending += bytes;
++    Ok(WriteReservation {
++        writing: Arc::clone(writing),
++        bytes,
++    })
+ }
+
+ fn is_not_found(error: &io::Error) -> bool {
+@@ -50,7 +87,14 @@ impl FilesystemAdapter {
+     pub(crate) async fn new(root: &Path) -> Result<Self> {
+         let root = std::path::absolute(root)?;
+         fs::create_dir_all(&root).await?;
+-        Ok(Self { root })
++        Ok(Self {
++            root,
++            writing: Arc::default(),
++        })
++    }
++
++    pub(crate) fn reserve_metadata(&self) -> io::Result<WriteReservation> {
++        reserve(&self.root, &self.writing, 64 << 10)
+     }
+
+     /// Resolves an object name below the root, rejecting names that escape it.
+@@ -147,9 +191,22 @@ impl FilesystemAdapter {
+         // stay perpetually fresh and never age out.
+         let temp = self.safe_path(&format!("tmp-{}", uuid::Uuid::new_v4()))?;
+         let written: Result<()> = async {
++            // Charge a window rather than a statvfs call for every network frame.
++            // Flush before releasing the claim: Tokio can buffer a pending file write.
++            const WINDOW: u64 = 1 << 20;
++            let mut claim = Some(reserve(&self.root, &self.writing, WINDOW)?);
++            let mut remaining = WINDOW;
+             let mut file = fs::File::create(&temp).await?;
+             while let Some(chunk) = stream.try_next().await? {
++                let length = chunk.len() as u64;
++                if length > remaining {
++                    file.flush().await?;
++                    drop(claim.take());
++                    remaining = length.max(WINDOW);
++                    claim = Some(reserve(&self.root, &self.writing, remaining)?);
++                }
+                 file.write_all(&chunk).await?;
++                remaining -= length;
+             }
+             file.flush().await?;
+             if let Some(parent) = path.parent() {
+@@ -180,10 +237,14 @@ impl FilesystemAdapter {
+             .collect::<Result<Vec<_>>>()?;
+         let written = {
+             let temp = temp.clone();
++            let root = self.root.clone();
++            let writing = Arc::clone(&self.writing);
+             tokio::task::spawn_blocking(move || {
+                 let mut merged = std::fs::File::create(&temp)?;
+                 for source in sources {
+-                    io::copy(&mut std::fs::File::open(source)?, &mut merged)?;
++                    let mut part = std::fs::File::open(source)?;
++                    let _claim = reserve(&root, &writing, part.metadata()?.len())?;
++                    io::copy(&mut part, &mut merged)?;
+                 }
+                 if let Some(parent) = path.parent() {
+                     std::fs::create_dir_all(parent)?;
+diff --git a/src/storage/filesystem/tests.rs b/src/storage/filesystem/tests.rs
+index f2265a4..695825c 100644
+--- a/src/storage/filesystem/tests.rs
++++ b/src/storage/filesystem/tests.rs
+@@ -25,6 +25,19 @@ async fn read_all(stream: ByteStream) -> Vec<u8> {
+         .unwrap()
+ }
+
++#[tokio::test]
++async fn concurrent_writers_cannot_double_spend_the_free_bytes() {
++    let (_dir, adapter) = adapter().await;
++    let stats = adapter.usage().unwrap();
++    let headroom = (stats.capacity_bytes / 8).min(64 << 20);
++    let available = stats.capacity_bytes - stats.used_bytes - headroom;
++    let size = available - available / 3;
++    let first = reserve(&adapter.root, &adapter.writing, size).unwrap();
++    assert!(reserve(&adapter.root, &adapter.writing, size).is_err());
++    drop(first);
++    assert!(reserve(&adapter.root, &adapter.writing, size).is_ok());
++}
++
+ #[tokio::test]
+ async fn rejects_names_escaping_the_root() {
+     let (_dir, adapter) = adapter().await;
