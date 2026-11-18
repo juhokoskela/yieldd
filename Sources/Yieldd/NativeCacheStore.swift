@@ -9,7 +9,7 @@ struct NativeCacheDisk {
 struct NativeCacheStore {
     private struct Seed: Codable {
         let generation: UUID
-        let published: Date
+        var lastUsed: Date
         let bytes: Int64
     }
 
@@ -86,16 +86,19 @@ struct NativeCacheStore {
         let staging = job.appendingPathComponent(UUID().uuidString + ".raw")
         defer { try? manager.removeItem(at: staging) }
         let (cold, previous) = try withLock {
-            let entries = try readIndex()
+            var entries = try readIndex()
             try reapSeeds(keeping: Set(entries.values.map(\.generation)))
-            let seed = readable.lazy.compactMap { entries[$0] }.first
-            if let seed {
+            let sourceScope = readable.first { entries[$0] != nil }
+            if let sourceScope, var seed = entries[sourceScope] {
                 let source = seedFile(seed.generation)
                 guard clonefile(source.path, staging.path, UInt32(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)) == 0 else {
                     throw lastError()
                 }
+                seed.lastUsed = Date()
+                entries[sourceScope] = seed
+                try writePrivateRunnerFile(JSONEncoder().encode(entries), to: index)
             }
-            return (seed == nil, writable.flatMap { entries[$0]?.generation })
+            return (sourceScope == nil, writable.flatMap { entries[$0]?.generation })
         }
         if cold { try createBlank(at: staging) }
         var info = stat()
@@ -146,10 +149,10 @@ struct NativeCacheStore {
             try newSeed.synchronize()
             try synchronizeRunnerState(seeds)
             // Commit the index last. An interrupted save leaves the previous seed readable.
-            entries[target] = Seed(generation: generation, published: Date(), bytes: info.st_blocks * 512)
+            entries[target] = Seed(generation: generation, lastUsed: Date(), bytes: info.st_blocks * 512)
             var retained: [String: Seed] = [:]
             var bytes: Int64 = 0
-            for (scope, seed) in entries.sorted(by: { $0.value.published > $1.value.published }) {
+            for (scope, seed) in entries.sorted(by: { $0.value.lastUsed > $1.value.lastUsed }) {
                 guard retained.count < 16, bytes + seed.bytes <= 16 << 30 else { continue }
                 bytes += seed.bytes
                 retained[scope] = seed

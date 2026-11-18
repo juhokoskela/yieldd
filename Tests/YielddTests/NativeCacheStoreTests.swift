@@ -68,6 +68,23 @@ private func read(_ disk: NativeCacheDisk) throws -> String {
     #expect(try read(store.open(check, readable: [mainScope], writable: nil)) == "first")
 }
 
+@Test func frequentlyRestoredBaseSurvivesPullRequestEviction() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 1 << 20)
+    let first = runner()
+    try mark(store.open(first, readable: [], writable: mainScope), "main1")
+    try store.finish(first, publish: true)
+    for n in 0..<17 {
+        let id = runner()
+        let pr = String(format: "%064x", n)
+        #expect(try !store.open(id, readable: [pr, mainScope], writable: pr).isCold)
+        try store.finish(id, publish: true)
+    }
+    let reader = runner()
+    #expect(try read(store.open(reader, readable: [mainScope], writable: nil)) == "main1")
+}
+
 @Test(arguments: ["replace", "symlink", "resize", "hardlink"])
 func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     let root = try workspace()
