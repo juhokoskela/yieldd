@@ -51,7 +51,11 @@ func TestArchiveRouting(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		payload, err := json.Marshal(map[string]any{"iss": issuer.URL, "exp": time.Now().Add(time.Hour).Unix(), "repository_id": repo, "ac": string(grants)})
+		claims := map[string]any{"iss": issuer.URL, "exp": time.Now().Add(time.Hour).Unix(), "repository_id": repo}
+		if permission != 0 {
+			claims["ac"] = string(grants)
+		}
+		payload, err := json.Marshal(claims)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,6 +154,13 @@ func TestArchiveRouting(t *testing.T) {
 	rpc(noAccess, "GetCacheEntryDownloadURL", "invalid", 401)
 	rpc(noAccess, "CreateCacheEntry", "invalid", 401)
 	request(noAccess, "POST", "/yieldd/native/open", "invalid", "", 403)
+	artifactOnly := token("123", "refs/heads/main", 0)
+	artifactGuest := newGuest(artifactOnly)
+	if got := request(artifactGuest, "POST", artifactRPC+"CreateArtifact", artifactOnly, "{}", 200); string(got) != "fixture artifact" {
+		t.Fatal("artifact-only job could not use GitHub")
+	}
+	rpc(artifactGuest, "CreateCacheEntry", artifactOnly, 401)
+	request(artifactGuest, "POST", "/yieldd/native/open", artifactOnly, "", 403)
 	request(writer, "POST", "/yieldd/verify", primary, "", 404)
 	request(writer, "GET", "/management-api/cache-entries", primary, "", 404)
 	rpc(writer, "CreateCacheEntry", reader, 401)
