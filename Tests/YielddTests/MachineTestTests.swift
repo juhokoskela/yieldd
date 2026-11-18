@@ -174,6 +174,7 @@ func interruptionAfterCreateCleansUpWithoutRunningChecks() {
 private final class RecordingRunnerBackend: RunnerBackend {
     let platform: RunnerPlatform
     private(set) var calls: [RunnerBackendCall] = []
+    var onCreate: () throws -> Void = {}
     private let createError: (any Error)?
     private var execOutcomes: [Result<Void, any Error>]
     private let destroyError: (any Error)?
@@ -192,6 +193,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
 
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
         calls.append(.create(id, memory))
+        try onCreate()
         if let createError {
             throw createError
         }
@@ -271,4 +273,30 @@ func machineTestRecoveryRejectsOtherMachineNames() throws {
     let store = try RunnerLeaseStore(directory: directory)
     try writePrivateRunnerFile(Data("someone-elses-machine".utf8), to: directory.appendingPathComponent("linux-machine-test"))
     #expect(throws: RunnerLeaseError.self) { try store.recoverMachineTest { throw TestFailure.unexpectedBackendCall } }
+}
+
+@Test
+func machineTestJournalAndOwnershipSurviveKilledCreator() async throws {
+    let result = try await #require(processExitsWith: .signal(SIGKILL), observing: [\.standardOutputContent]) {
+        let uuid = UUID()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("machine-crash-\(uuid)")
+        try withRunnerOwnership(in: directory, recoveringMachineTest: true) { store in
+            let backend = RecordingRunnerBackend()
+            backend.onCreate = {
+                try FileHandle.standardOutput.write(contentsOf: Data(uuid.uuidString.utf8))
+                raise(SIGKILL)
+            }
+            try machineTestRunner(backend: backend).run(
+                id: RunnerID(value: "yieldd-test-\(uuid.uuidString.lowercased())"), journal: store)
+        }
+    }
+    let uuid = try #require(UUID(uuidString: String(decoding: result.standardOutputContent, as: UTF8.self)))
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("machine-crash-\(uuid)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let recovered = RecordingRunnerBackend()
+    try withRunnerOwnership(in: directory, recoveringMachineTest: true) { store in
+        try store.recoverMachineTest { recovered }
+        #expect(try store.pendingMachineTest() == nil)
+    }
+    #expect(recovered.calls == [.destroy(RunnerID(value: "yieldd-test-\(uuid.uuidString.lowercased())"))])
 }
