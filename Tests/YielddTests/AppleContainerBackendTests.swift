@@ -354,7 +354,7 @@ func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
     let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: containerURL, id: runnerID)
 
     try backend.exec(
-        ["yieldd-runner-control", "run"],
+        ["yieldd-runner-control", "output"],
         timeout: nil,
         outputCapture: .tail(maxBytes: 1_024),
         as: .root,
@@ -368,7 +368,7 @@ func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
             "--name", runnerID.value,
             "--user", "root",
             "--",
-            "yieldd-runner-control", "run",
+            "yieldd-runner-control", "output",
         ],
         outputCapture: .tail(maxBytes: 1_024)
     )])

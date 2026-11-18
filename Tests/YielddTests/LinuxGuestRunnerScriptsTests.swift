@@ -6,6 +6,9 @@ import Testing
 func linuxJITIsDeliveredWithoutRegistrationOrArgumentsAndConsumedOnce() throws {
     let fixture = try LinuxRunnerScriptFixture()
     defer { fixture.remove() }
+    let premature = try ProcessExecutor().execute(fixture.request("control", ["output"]))
+    #expect(premature.terminationStatus != 0)
+    #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("starts").path))
     let configure = fixture.request("configure", ["--jit"], input: "private-jit\n")
     try ProcessExecutor().execute(configure).requireSuccess(for: configure)
     #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("config-arguments").path))
@@ -26,7 +29,7 @@ func linuxJITIsDeliveredWithoutRegistrationOrArgumentsAndConsumedOnce() throws {
 func linuxJITConfigurationRejectsUnusedNameAndInvalidArgumentCounts() throws {
     let fixture = try LinuxRunnerScriptFixture()
     defer { fixture.remove() }
-    for arguments in [[], ["--jit", "unused-name"], ["owner/repo"], ["a", "b", "c", "d"]] {
+    for arguments in [[], ["--jit", "unused-name"], ["owner/repo"], ["owner/repo", "name"], ["owner/repo", "name", "label"], ["a", "b", "c", "d"]] {
         #expect(try ProcessExecutor().execute(fixture.request("configure", arguments)).terminationStatus == 2)
     }
 }
@@ -35,18 +38,15 @@ func linuxJITConfigurationRejectsUnusedNameAndInvalidArgumentCounts() throws {
 func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
     let fixture = try LinuxRunnerScriptFixture()
     defer { fixture.remove() }
-    let configure = fixture.request("configure", ["owner/repo", "yieldd-test", "yieldd-request-test"], input: "token\n")
+    let configure = fixture.request("configure", ["--jit"], input: "token\n")
     try ProcessExecutor().execute(configure).requireSuccess(for: configure)
-    let arguments = try String(contentsOf: fixture.directory.appendingPathComponent("config-arguments"), encoding: .utf8)
-    #expect(arguments.contains("--labels\nyieldd-request-test\n"))
-    #expect(!arguments.contains("--labels\nyieldd\n"))
     let start = fixture.request("control", ["start"])
     try ProcessExecutor().execute(start).requireSuccess(for: start)
     try ProcessExecutor().execute(start).requireSuccess(for: start)
     let status = fixture.request("control", ["status"])
     #expect(try ProcessExecutor().execute(status).requireSuccess(for: status).stdoutText ==
             "{\"phase\":\"exited\",\"jobStarted\":true,\"exitStatus\":7}\n")
-    let replay = try ProcessExecutor().execute(fixture.request("control", ["run"]))
+    let replay = try ProcessExecutor().execute(fixture.request("control", ["output"]))
     #expect(replay.terminationStatus == 7)
     #expect(replay.stdoutText == "listener output\n")
     let outcomes: [Result<ProcessResult, any Error>] = [
@@ -60,7 +60,7 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
             Issue.record("The listener has already completed")
         }, stateChanged: { _ in }).run(
             id: RunnerID(value: "yieldd-test"),
-            pickupTimeout: 300, executionTimeout: 10
+            pickupTimeout: 300
         )
         Issue.record("Expected listener failure")
     } catch let error as RunnerAssignmentError {
@@ -68,7 +68,7 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
         #expect(describeError(error).contains("listener output"))
         #expect(describeError(error).contains("listener exited with status 7"))
     }
-    #expect(executor.requests.last?.outputCapture == .tail(maxBytes: EphemeralRunnerSession.jobOutputTailBytes))
+    #expect(executor.requests.last?.outputCapture == .tail(maxBytes: 1_024 * 1_024))
     #expect(try String(contentsOf: fixture.directory.appendingPathComponent("starts"), encoding: .utf8) == "start\n")
     #expect(try ProcessExecutor().execute(configure).terminationStatus == 2)
 }

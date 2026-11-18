@@ -3,19 +3,12 @@ set -euo pipefail
 umask 077
 
 if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
-    printf '1\n'
+    printf '2\n'
     exit 0
 fi
 
-if ! { [[ "$#" -eq 1 && "$1" == --jit ]] || [[ "$#" -ge 2 && "$#" -le 3 && "$1" != --jit ]]; }; then
-    echo "usage: yieldd-configure-runner OWNER/REPOSITORY RUNNER_NAME [ROUTING_LABEL]" >&2
-    echo "       yieldd-configure-runner --jit" >&2
-    exit 2
-fi
-
-label="${3:-yieldd-macos}"
-if [[ "$#" -eq 3 ]] && [[ ! "$label" =~ ^yieldd-request-[a-z0-9-]+$ || ${#label} -gt 63 ]]; then
-    echo "invalid reservation routing label" >&2
+if [[ "$#" -ne 1 || "$1" != --jit ]]; then
+    echo "usage: yieldd-configure-runner --jit" >&2
     exit 2
 fi
 IFS= read -r credential
@@ -26,37 +19,23 @@ if [[ -z "$credential" ]]; then
 fi
 
 cd "$HOME/actions-runner"
-if [[ "$#" -eq 3 || "$1" == --jit ]]; then
-    for marker in exit-status process-group launched job-started; do
-        if [[ -e ".yieldd-runner/$marker" ]]; then
-            echo "runner lifecycle state already exists; use a fresh guest" >&2
-            exit 2
-        fi
-    done
-    mkdir -p .yieldd-runner
-    cat > "$HOME/.yieldd-job-started.sh" <<'HOOK'
+if [[ -e .runner || -e .credentials || -e .yieldd-runner/jit-config ]]; then
+    echo "runner credentials already exist; use a fresh guest" >&2
+    exit 2
+fi
+for marker in exit-status process-group launched job-started; do
+    if [[ -e ".yieldd-runner/$marker" ]]; then
+        echo "runner lifecycle state already exists; use a fresh guest" >&2
+        exit 2
+    fi
+done
+mkdir -p .yieldd-runner
+cat > "$HOME/.yieldd-job-started.sh" <<'HOOK'
 #!/bin/bash
 set -euo pipefail
 state_directory="$HOME/actions-runner/.yieldd-runner"
 printf 'started\n' > "$state_directory/job-started.$$"
 mv -f "$state_directory/job-started.$$" "$state_directory/job-started"
 HOOK
-    chmod 0700 "$HOME/.yieldd-job-started.sh"
-fi
-if [[ "$1" == --jit ]]; then
-    if [[ -e .runner || -e .credentials || -e .yieldd-runner/jit-config ]]; then
-        echo "runner credentials already exist; use a fresh guest" >&2
-        exit 2
-    fi
-    printf '%s\n' "$credential" > .yieldd-runner/jit-config
-    exit 0
-fi
-exec ./config.sh \
-    --unattended \
-    --ephemeral \
-    --url "https://github.com/$1" \
-    --token "$credential" \
-    --name "$2" \
-    --no-default-labels \
-    --labels "$label" \
-    --work _work
+chmod 0700 "$HOME/.yieldd-job-started.sh"
+printf '%s\n' "$credential" > .yieldd-runner/jit-config

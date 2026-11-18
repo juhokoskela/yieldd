@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
-    printf '1\n'
+    printf '2\n'
     exit 0
 fi
 
@@ -19,7 +19,7 @@ output_chunk_bytes=$((64 * 1024))
 control_script="$(cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"
 
 usage() {
-    echo "usage: yieldd-runner-control ready|run|start|status|stop" >&2
+    echo "usage: yieldd-runner-control ready|start|status|output|stop" >&2
     exit 2
 }
 
@@ -87,10 +87,10 @@ worker() {
     local status
 
     cd "$runner_directory"
-    if [[ -f "$state_directory/jit-config" ]]; then
-        export ACTIONS_RUNNER_INPUT_JITCONFIG="$(< "$state_directory/jit-config")"
-        rm "$state_directory/jit-config"
-    fi
+    IFS= read -r ACTIONS_RUNNER_INPUT_JITCONFIG < "$state_directory/jit-config"
+    [[ -n "$ACTIONS_RUNNER_INPUT_JITCONFIG" ]] || return 1
+    export ACTIONS_RUNNER_INPUT_JITCONFIG
+    rm "$state_directory/jit-config"
     if [[ -x "$HOME/.yieldd-job-started.sh" ]]; then
         export ACTIONS_RUNNER_HOOK_JOB_STARTED="$HOME/.yieldd-job-started.sh"
     fi
@@ -193,37 +193,6 @@ ready() {
     fi
 }
 
-run() {
-    local process_group
-    local state
-    local status
-
-    mkdir -p "$state_directory"
-    state="$(/usr/bin/lockf -k "$lock_file" "$control_script" _start_or_attach_locked)"
-    if [[ "$state" != complete ]]; then
-        process_group="$state"
-        [[ "$process_group" =~ ^[0-9]+$ ]] || {
-            echo "the runner recorded an invalid process group" >&2
-            return 1
-        }
-        while [[ ! -f "$status_file" ]]; do
-            if ! process_group_is_running "$process_group"; then
-                sleep 0.1
-                if [[ ! -f "$status_file" ]]; then
-                    echo "the runner stopped without recording an exit status" >&2
-                    return 1
-                fi
-                break
-            fi
-            sleep 0.1
-        done
-    fi
-
-    status="$(read_status)"
-    cat "$output_file"
-    return "$status"
-}
-
 stop() {
     mkdir -p "$state_directory"
     /usr/bin/lockf -k "$lock_file" "$control_script" _stop_locked
@@ -255,8 +224,10 @@ case "$1" in
     ready)
         ready
         ;;
-    run)
-        run
+    output)
+        result="$(read_status)"
+        cat "$output_file"
+        exit "$result"
         ;;
     start)
         mkdir -p "$state_directory"

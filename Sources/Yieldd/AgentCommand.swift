@@ -10,7 +10,7 @@ struct AgentCommand: ParsableCommand {
         commandName: "agent",
         abstract: "Manage the installed local agent.",
         subcommands: [
-            AgentInstallConnectedCommand.self,
+            AgentInstallCommand.self,
             AgentStatusCommand.self,
             AgentPauseCommand.self,
             AgentResumeCommand.self,
@@ -31,26 +31,16 @@ struct AgentStatusCommand: ParsableCommand {
     var json = false
 
     mutating func run() throws {
-        let store = try AgentConfigurationStore()
-        if FileManager.default.fileExists(atPath: ConnectedAgentStore(directory: store.directory).file.path) {
-            let service = try localAgentService()
-            let report = connectedAgentStatus(registration: AgentRegistrationState(service.status()), directory: store.directory)
-            if json {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                encoder.dateEncodingStrategy = .iso8601
-                print(String(decoding: try encoder.encode(report), as: UTF8.self))
-            } else {
-                print(renderAgentStatus(report))
-            }
-            return
+        let report = try connectedAgentStatus(registration: AgentRegistrationState(localAgentService().status()),
+                                              directory: yielddApplicationSupportDirectory())
+        if json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            print(String(decoding: try encoder.encode(report), as: UTF8.self))
+        } else {
+            print(renderAgentStatus(report))
         }
-        guard !json else { throw ValidationError("JSON status requires an installed connected agent.") }
-        try reportAgentStatus(
-            store: store,
-            service: localAgentService(),
-            output: { print($0) }
-        )
     }
 }
 
@@ -68,25 +58,12 @@ struct AgentUninstallCommand: AsyncParsableCommand {
             )
         }
 
-        let store = try AgentConfigurationStore()
-        let connectedStore = ConnectedAgentStore(directory: store.directory)
-        if FileManager.default.fileExists(atPath: connectedStore.file.path) {
-            try await uninstallConnectedAgent(store: connectedStore, credentials: .keychain, service: service) { configuration, token in
-                try recoverConnectedAgent(configuration: configuration, token: token, directory: store.directory,
-                    stop: RunnerPoolStop.monitoringSignals())
-            }
-            print("Connected agent unregistered and configuration removed.")
-            return
+        let store = try ConnectedAgentStore(directory: yielddApplicationSupportDirectory())
+        try await uninstallConnectedAgent(store: store, credentials: .keychain, service: service) { configuration, token in
+            try recoverConnectedAgent(configuration: configuration, token: token, directory: store.directory,
+                stop: RunnerPoolStop.monitoringSignals())
         }
-        try await uninstallAgent(
-            store: store,
-            service: service,
-            recover: {
-                let stop = try RunnerPoolStop.monitoringSignals()
-                try recoverAgentRunners(store: store, stop: stop, executor: ProcessExecutor(checkCancellation: stop.check))
-            }
-        )
-        print("Local agent unregistered and configuration removed.")
+        print("Agent unregistered and configuration removed.")
     }
 }
 
@@ -103,22 +80,19 @@ struct AgentRunCommand: ParsableCommand {
         defer { agentLogger.notice("Stopping yieldd.") }
         var stateDirectory: URL?
         do {
-            let store = try AgentConfigurationStore()
+            let store = try ConnectedAgentStore(directory: yielddApplicationSupportDirectory())
             stateDirectory = store.directory
-            if let connected = try ConnectedAgentStore(directory: store.directory).load() {
-                let control = ConnectedAgentControl(directory: store.directory, configuration: connected)
-                let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout, onStop: control.stopping)
-                let endpoint = AgentControlEndpoint(control: control)
-                endpoint.start()
-                defer { endpoint.stop() }
-                try prepareConnectedAgentKeychain()
-                let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
-                try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
-                    platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
-                    resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
-                return
-            }
-            throw AgentError.connectedConfigurationRequired
+            guard let connected = try store.load() else { throw AgentError.connectedConfigurationRequired }
+            let control = ConnectedAgentControl(directory: store.directory, configuration: connected)
+            let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout, onStop: control.stopping)
+            let endpoint = AgentControlEndpoint(control: control)
+            endpoint.start()
+            defer { endpoint.stop() }
+            try prepareConnectedAgentKeychain()
+            let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
+            try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
+                platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
+                resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
         } catch where isCancellation(error) {
             return
         } catch {
@@ -129,50 +103,6 @@ struct AgentRunCommand: ParsableCommand {
             agentLogger.error("Local agent failed: \(describeError(error), privacy: .public)")
             throw error
         }
-    }
-}
-
-func recoverAgentRunners(store: AgentConfigurationStore, stop: RunnerPoolStop, executor: any ProcessExecuting,
-                         makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
-    try withRunnerOwnership(in: store.directory) { leaseStore in
-        if try leaseStore.load().isEmpty {
-            try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: [], makeCloneStore: makeCloneStore)
-            return
-        }
-
-        let configuration = try store.load()
-        let recovery = makeRunnerRecovery(
-            leaseStore: leaseStore,
-            resolveContainer: agentContainerPreparation(configuration: configuration, executor: executor, stateDirectory: store.directory),
-            ghURL: configuration.ghURL,
-            stop: stop,
-            executor: executor,
-            makeCloneStore: makeCloneStore,
-            stateChanged: { reportRunnerRecoveryState($0) }
-        )
-        for id in try recovery.run() {
-            print("Cleaned up abandoned runner \(id.value).")
-        }
-    }
-}
-
-func agentContainerPreparation(
-    configuration: AgentConfiguration, executor: any ProcessExecuting, stateDirectory: URL
-) -> () throws -> URL {
-    // Startup and recovery call this synchronously, before concurrent runner slots begin.
-    var prepared: Result<URL, any Error>?
-    return {
-        if let prepared { return try prepared.get() }
-        let result = Result {
-            guard let url = configuration.containerURL else { throw AgentConfigurationError.containerPathNotRecorded }
-            guard FileManager.default.isExecutableFile(atPath: url.path) else {
-                throw AgentConfigurationError.executableUnavailable(path: url.path)
-            }
-            try AppleContainerSystem(containerURL: url, executor: executor, stateDirectory: stateDirectory).start()
-            return url
-        }
-        prepared = result
-        return try result.get()
     }
 }
 

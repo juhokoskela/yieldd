@@ -87,7 +87,7 @@ Manual repository-JIT experiments established happy-path cross-repository execut
 
 ## Mac operation
 
-The coordinator owns unattended scheduling. The foreground client and login agent run the same connected service. A one-job diagnostic can still register a short-lived runner for a trusted repository to validate a particular Mac before enrollment.
+The coordinator owns unattended scheduling. The foreground client and login agent run the same connected service. After enrollment, a trusted workflow can verify local job pickup through the coordinator.
 
 ## Open questions
 

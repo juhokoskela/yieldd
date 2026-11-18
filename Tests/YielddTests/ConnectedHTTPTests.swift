@@ -318,7 +318,7 @@ func connectedHTTPReportsLastContactAndFailureWithoutResponseBodies(status: Int)
 @Test(arguments: [0, 1])
 func startupRecoveryReportsCompletedWorkersAndTheRemainingRetry(failedSlot: Int) throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("recovery-status-\(UUID().uuidString)")
-    _ = try AgentConfigurationStore(directory: directory)
+    _ = try RunnerLeaseStore(directory: directory)
     defer { try? FileManager.default.removeItem(at: directory) }
     let control = ConnectedAgentControl(directory: directory)
     let stop = RunnerPoolStop()

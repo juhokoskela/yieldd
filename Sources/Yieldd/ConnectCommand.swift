@@ -65,9 +65,6 @@ func runConnectedService(
         if let installed = try ConnectedAgentStore(directory: leaseStore.directory).load() {
             try installed.requireIdentity(server: serverURL, deviceID: deviceID)
         }
-        guard try leaseStore.load().isEmpty else {
-            throw ValidationError("Run recover to clean up standalone runner leases before connecting.")
-        }
         if let template {
             try RunnerStorage.required(in: leaseStore.directory).validateTemplateLocation(template)
         }
@@ -102,7 +99,7 @@ func runConnectedService(
                 try storage.validateContainer(containerExecutable: container)
                 return .linux(containerURL: container)
             case .macOS:
-                guard let template else { throw RunnerServiceConfigurationError.templatePairRequired }
+                guard let template else { throw ValidationError("A macOS worker requires a template.") }
                 return .macOS(templateURL: template)
             }
         }
@@ -138,7 +135,7 @@ func runConnectedService(
                 authorization: authorization, wait: stop.wait,
                 stateChanged: {
                     control?.session(worker: workerID, state: $0)
-                    reportRunnerServiceState($0, platform: platform, output: output)
+                    reportRunnerServiceState($0, output: output)
                 })
             try runConnectedClient(checkCancellation: stop.check, recover: {
                 control?.update(worker: workerID, phase: .recovering)

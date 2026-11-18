@@ -6,7 +6,6 @@ import Synchronization
 struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let version: Int
     let instanceID: UUID
-    var buildID: String?
     let resumeGeneration: UInt64
     let paused: Bool
     let ready: Bool
@@ -28,7 +27,6 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private let pauseFile: URL
     private var paused: Bool
     private let instanceID = UUID()
-    private let buildID = Bundle.main.object(forInfoDictionaryKey: "YielddBuildID") as? String
     private var resumeGeneration: UInt64 = 0
     private var assignments: Set<String> = []
     private var phase: AgentServicePhase = .starting
@@ -109,12 +107,10 @@ final class ConnectedAgentControl: @unchecked Sendable {
 
     func session(worker: String, state: RunnerSessionState) {
         switch state {
-        case .listenerStarted, .waitingForJob: update(worker: worker, phase: .waitingForJob)
+        case .listenerStarted: update(worker: worker, phase: .waitingForJob)
         case .jobStarted: update(worker: worker, phase: .running)
-        case .listenerExited, .capacityReleased, .cleaningUp, .waitingForGitHubCleanup: update(worker: worker, phase: .cleaningUp)
-        case .preparing: update(worker: worker, phase: .provisioning)
-        case .waitingForMemory: update(worker: worker, phase: .waitingForMemory)
-        case let .executionStopped(_, reason), let .leaseCleanupFailed(_, reason):
+        case .listenerExited, .capacityReleased: update(worker: worker, phase: .cleaningUp)
+        case let .executionStopped(_, reason):
             lock.withLock { lastError = AgentReportedError(message: reason); workers[worker]?.phase = .cleaningUp }
         case .cleanupCompleted: break
         }
@@ -171,7 +167,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     private func snapshotUnlocked() -> AgentControlSnapshot {
-        AgentControlSnapshot(version: 1, instanceID: instanceID, buildID: buildID, resumeGeneration: resumeGeneration, paused: paused, ready: phase == .ready, activeAssignments: assignments.count,
+        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: phase == .ready, activeAssignments: assignments.count,
             recordedAt: Date(), phase: phase, server: server, deviceID: deviceID, memory: memory?.status,
             workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError)
     }

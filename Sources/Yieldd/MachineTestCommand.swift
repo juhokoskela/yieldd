@@ -20,15 +20,10 @@ struct MachineTestCommand: ParsableCommand {
             )
             if backend.platform == .macOS {
                 let locator = ExecutableLocator()
-                try recoverAbandonedRunners(
-                    leaseStore: leaseStore,
-                    makeGitHub: { GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor) },
-                    makeLinuxBackend: {
-                        try AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
-                    },
-                    checkCancellation: signalMonitor.check,
-                    wait: signalMonitor.wait
-                )
+                try leaseStore.recoverMachineTest {
+                    try AppleContainerBackend(containerURL: locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
+                }
+                try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: [], checkCancellation: signalMonitor.check)
             } else {
                 try leaseStore.recoverMachineTest { backend }
             }

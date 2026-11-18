@@ -9,61 +9,6 @@ struct LocalAgentService {
     let unregister: () async throws -> Void
 }
 
-func reportAgentStatus(
-    store: AgentConfigurationStore,
-    service: LocalAgentService,
-    output: (String) -> Void
-) throws {
-    output(registrationStatusDescription(service.status()))
-
-    var configurationError: (any Error)?
-    do {
-        let configuration = try store.load()
-        output("Runner slots:")
-        for slot in configuration.runners.slots {
-            output("- \(slot.repository.fullName) (\(slot.platform.rawValue))")
-        }
-        if let templateURL = configuration.runners.macOSTemplateURL {
-            output("macOS template: \(templateURL.path)")
-        }
-        if let containerURL = configuration.containerURL {
-            output("container: \(containerURL.path)")
-        }
-        output("gh: \(configuration.ghURL.path)")
-    } catch AgentConfigurationError.missing {
-        output("Configuration: not installed")
-    } catch {
-        configurationError = error
-        output("Configuration: \(describeError(error))")
-    }
-
-    let leases = try RunnerLeaseStore(directory: store.directory).load()
-    output("Lease records are persisted cleanup obligations, not live runner health or job status.")
-    if leases.isEmpty {
-        output("Active runner leases: none")
-    } else {
-        output("Active runner leases:")
-        for lease in leases {
-            output("- \(lease.runnerID.value) (\(lease.repository.fullName))")
-        }
-    }
-
-    if let configurationError {
-        throw configurationError
-    }
-}
-
-func uninstallAgent(
-    store: AgentConfigurationStore,
-    service: LocalAgentService,
-    recover: () throws -> Void
-) async throws {
-    try await disableAgent(service: service)
-
-    try recover()
-    try store.remove()
-}
-
 func enableAgent(service: LocalAgentService) throws {
     switch service.status() {
     case .enabled, .requiresApproval: break
@@ -152,7 +97,7 @@ enum AgentError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .connectedConfigurationRequired:
-            "Install a coordinator-connected agent. For an older standalone installation, finish recovery and run agent uninstall first."
+            "Run the installer to enroll this Mac."
         case .notPackaged:
             "Local agent commands must run from the packaged yieldd application."
         case .configurationChanged:

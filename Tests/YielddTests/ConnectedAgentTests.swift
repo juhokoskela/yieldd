@@ -120,14 +120,12 @@ func connectedAgentUninstallRetainsCredentialsAndSettingsUntilRecoverySucceeds()
 func connectedUninstallDoesNotSweepOutstandingStandaloneGuests() throws {
     let fixture = try ConnectedAgentFixture()
     defer { fixture.remove() }
-    let lease = RunnerLease(runnerID: RunnerID(value: "yieldd-macos-test-pending"),
-        repository: try GitHubRepository("owner/repo"), platform: .macOS)
-    let leases = try RunnerLeaseStore(directory: fixture.store.directory)
-    try leases.save(lease)
-    #expect(throws: ConnectedAgentError.self) {
+    let file = fixture.store.directory.appendingPathComponent("active-runner.json")
+    try Data("previous lease".utf8).write(to: file)
+    #expect(throws: RunnerOwnershipError.previousLease) {
         try recoverConnectedAgent(configuration: agentConfiguration, token: "", directory: fixture.store.directory, stop: RunnerPoolStop())
     }
-    #expect(try leases.load() == [lease])
+    #expect(try String(contentsOf: file, encoding: .utf8) == "previous lease")
 }
 
 @Test
@@ -174,7 +172,7 @@ private struct ConnectedAgentFixture {
     let store: ConnectedAgentStore
     init() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("connected-agent-\(UUID().uuidString)")
-        _ = try AgentConfigurationStore(directory: directory)
+        _ = try RunnerLeaseStore(directory: directory)
         store = ConnectedAgentStore(directory: directory)
     }
     func remove() { try? FileManager.default.removeItem(at: store.directory) }

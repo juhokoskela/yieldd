@@ -9,4 +9,4 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app
 .build/yieldd.app/Contents/MacOS/yieldd machine-test --template /absolute/path/VM.bundle
 ```
 
-This checks GUI readiness, simulator boot, and screenshot capture over pinned SSH through the relay. To verify GitHub job pickup on this Mac, run the [reserved single-job test](../../README.md#reserved-single-job-tests) with a fresh routing label. Confirm the workflow conclusion in GitHub and check the host cleanup result. An interrupted run can be recovered with `yieldd recover`, including old probe clones on the configured volume.
+This checks GUI readiness, simulator boot, and screenshot capture over pinned SSH through the relay. After enrollment, verify pickup and cleanup with the [coordinator-routed workflow](../../README.md#verify-an-enrolled-mac). Use `yieldd recover` to clean up an interrupted machine test.

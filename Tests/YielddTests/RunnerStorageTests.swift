@@ -47,7 +47,7 @@ func storageConfigurationRefusesUnresolvedLeases(connected: Bool) throws {
             runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: "owner/repo", platform: "linux", architecture: "arm64")
         try ConnectedRunnerStore(directory: fixture.directory).save(ConnectedLease(server: "https://example.com", deviceID: "device", offer: offer))
     } else {
-        try leases.save(RunnerLease(runnerID: RunnerID(value: "yieldd-pending"), repository: GitHubRepository("owner/repo")))
+        try leases.recordMachineTest(RunnerPlatform.linux.makeTestRunnerID())
     }
     let executor = RecordingProcessExecutor(outcomes: [])
     #expect(throws: RunnerStorageError.outstandingRecovery) {

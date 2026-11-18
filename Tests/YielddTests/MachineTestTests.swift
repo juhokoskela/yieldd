@@ -208,7 +208,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
         on id: RunnerID
     ) throws -> ProcessResult {
         calls.append(.exec(id, arguments))
-        if arguments.last == "--protocol-version" { return processResult(stdout: "1\n") }
+        if arguments.last == "--protocol-version" { return processResult(stdout: "2\n") }
         if platform == .macOS {
             #expect(standardInput == Data(MacOSTemplateValidation.script.utf8))
             #expect(outputCapture == .tail(maxBytes: MacOSGuestSSH.outputTailBytes))

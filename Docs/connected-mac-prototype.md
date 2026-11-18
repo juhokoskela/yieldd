@@ -43,7 +43,7 @@ container builder stop
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app.sh
 ```
 
-Stop any standalone runner command or installed local agent first. `connect` uses the same ownership lock. Recover outstanding standalone leases with `yieldd recover` before connecting. For a same-host test:
+Stop the installed agent before running foreground `connect`. Both require the same ownership lock. For a same-host test:
 
 ```sh
 .build/yieldd.app/Contents/MacOS/yieldd connect \
@@ -67,7 +67,7 @@ Expect `Local offer created`, `Local credentials issued`, and `Local runner clea
 
 Add `--macos-fallback-runner '"macos-26"'` on the coordinator, or set `YIELDD_MACOS_FALLBACK_RUNNER='"macos-26"'` in its Compose environment file. This is an example target, not a built-in default.
 
-Update both template guest scripts using the [macOS template setup](macos-template.md) before cloning it, then shut down the template VM. Both helpers must answer `--protocol-version` with `1`. `machine-test` checks this after boot; `connect` checks before sending credentials into the guest. Rebuild the Linux image too. These checks detect stale tooling, not a malicious guest.
+Update both template guest scripts using the [macOS template setup](macos-template.md) before cloning it, then shut down the template VM. Both helpers must answer `--protocol-version` with `2`. `machine-test` checks this after boot; `connect` checks before sending credentials into the guest. Rebuild the Linux image too. These checks detect stale tooling, not a malicious guest.
 
 On the Mac, offer both platforms through one process:
 
@@ -95,9 +95,9 @@ Scripts/install-local-agent.sh \
 
 Supply `YIELDD_CLIENT_TOKEN` in the installer's environment for first enrollment. Installation saves it as a non-synchronizing generic password in the login Keychain, separate from the private `connected-agent.json` configuration. The agent reads the token without prompting; a locked or inaccessible keychain stops startup and retains recovery records. macOS may require Keychain access approval during setup. No GitHub CLI or GitHub token is needed on the Mac. Device enrollment and token rotation remain manual on the coordinator.
 
-For a routine upgrade, rerun the installer with the saved configuration. It validates the staged build and checks access to the existing Keychain credential, then builds the Linux image when needed. If macOS prompts for the new ad-hoc signature, grant that build ongoing access to the existing entry. Preflight repeats the read with prompts disabled before draining the old agent. It drains the running agent, replaces the app at the registered path, and waits for a new, paused, ready instance reporting the staged build ID. Keep admission controls with the operator running the update until it finishes. An accepting agent resumes. An already-paused agent stays paused. Keep the previous executable available when migrating a legacy installation that lacks drain support.
+To upgrade, run `agent drain` and then `agent uninstall` from the installed app. Keep the coordinator and original credentials available until both commands succeed. Move the unregistered bundle out of `~/Applications/yieldd.app`, then run the installer with the enrollment token. If either command fails, keep the bundle, credentials, and journals, and finish recovery before replacing anything. Use the previous release to finish any standalone cleanup.
 
-If replacement fails before the new instance is ready, the installer restores the previous bundle and Linux image tag. If rollback fails or power is lost, keep `~/Applications/.yieldd-installer`, the `local/yieldd-guest:previous-*` tag and the recovery journals. Inspect the installed bundle and saved backup before resuming admissions. If initial enrollment failed after writing configuration, keep the installed app and rerun its `agent install-connected` command with the original arguments. Verify registration, credentials and readiness before clearing the installer directory. To change identity or credentials, drain and explicitly uninstall under the original identity first. If no agent is reachable, resolve its login-item registration or existing foreground owner before retrying.
+If initial enrollment stops after the installer copies the signed app, inspect its `agent status` and retry its `agent install` with the same arguments and token. A saved pause survives reinstall. Check readiness and resume when ready to accept jobs.
 
 Use `yieldd agent status` from the installed app to inspect registration and configuration, and `yieldd agent uninstall` to disable it and recover outstanding assignments. Configuration and the Keychain token remain if recovery fails. The agent uses unified logging under subsystem `dev.yieldd`, category `agent`, and has a 50-second shutdown budget. Foreground `connect` remains available for diagnostics.
 
@@ -123,18 +123,18 @@ Pause persists across process restarts and app replacement. Resume explicitly wh
 
 Live status includes service readiness, pause/drain state, active assignment and cleanup counts, worker phases, runner/repository identities, memory reservations and pressure, the latest coordinator request result and successful contact time, and the last error with its timestamp. Reservations are the runner budget, not measured guest RSS or host free memory. A successful coordinator request is a recent observation, not a guarantee of current reachability; paused and memory-blocked workers may make no requests. Listener exit does not establish the GitHub job conclusion.
 
-When XPC is unavailable, the report has no live snapshot. It shows the connection error and any last recorded fatal startup/runtime failure, clearly labeled as history. This small private diagnostic record is separate from recovery journals; damage or failure to save it never changes cleanup or execution authority. Standalone `agent status` retains its existing configuration/lease report.
+When XPC is unavailable, the report has no live snapshot. It shows the connection error and any last recorded fatal startup/runtime failure, clearly labeled as history. This small private diagnostic record is separate from recovery journals; damage or failure to save it never changes cleanup or execution authority. An unenrolled Mac reports `notRegistered` without contacting XPC.
 
 ### End-to-end acceptance
 
 Use the installer from this checkout and a trusted repository to validate the installed service:
 
-1. Install connected mode with the existing coordinator identity and token. Approve the login item and any setup-time Keychain access, then verify startup after login. Check a locked/missing Keychain token and a rebuilt app against an existing Keychain item; background startup should fail visibly rather than prompt.
+1. Install connected mode with the existing coordinator identity and token. Approve the login item and any setup-time Keychain access, then verify startup after login. Check a locked/missing Keychain token; background startup should fail visibly rather than prompt.
 2. Observe `agent status --json` while real Linux and macOS jobs move through provisioning, pickup, execution, capacity release, and cleanup. Exercise concurrent same-platform guests and memory contention. Confirm the reported runner identities against coordinator and GitHub records.
 3. Pause during a long poll and while jobs are active. Confirm existing jobs finish, new offers are declined, idle capacity stops being advertised, and configured hosted fallback runs new demand. Restart while paused and verify pause persists.
 4. Drain during execution and cleanup retries. Confirm it waits until cleanup is complete, and that Ctrl+C only stops the wait. Resume/re-pause from another terminal and restart the service during separate drain attempts; each wait must fail rather than silently attach to a new admission period.
 5. Interrupt networking and restart the coordinator/client with their original state. Confirm status reports retry/recovery accurately, no duplicate execution starts, and unresolved cleanup remains recorded. Check the unavailable-service report after a startup failure.
-6. Drain before replacing or uninstalling the installed app. Verify recovery, retained pause, explicit resume, and normal subsequent local execution and fallback.
+6. Drain and uninstall with the current binary, move the bundle aside, and reinstall. Verify readiness, explicit resume, local execution, and cleanup.
 
 The installed service, real guests, network-isolation checks, and fallback placement are live acceptance boundaries. Unit tests and the anonymous XPC fixture do not establish them.
 
@@ -150,7 +150,7 @@ The listener has a five-minute pickup timeout. Healthy jobs have no fixed total 
 
 Ctrl+C also stops local execution and attempts guest destruction and server acknowledgement. Destruction must succeed before the client acknowledges completion. The coordinator then reconciles the registration, refusing to remove a busy runner. A failed job is not a failed listener: GitHub retains the workload's own conclusion.
 
-Transport failures and retryable HTTP responses trigger a five-second retry delay. During execution, renewal failures use the remaining offline grace. Before accepting more work after an interrupted assignment, the client destroys any recorded guest and retries acknowledgement. It never retries acceptance or resumes the recorded listener. Restarting `connect` uses the same recovery path. Failed destruction, permanent coordinator HTTP errors, and invalid coordinator responses stop the client with unresolved recovery state retained. Standalone runner commands refuse to bypass that journal. Empty polls have a one-second client-side delay, and memory admission reports when it cannot advertise capacity.
+Transport failures and retryable HTTP responses trigger a five-second retry delay. During execution, renewal failures use the remaining offline grace. Before accepting more work after an interrupted assignment, the client destroys any recorded guest and retries acknowledgement. It never retries acceptance or resumes the recorded listener. Restarting `connect` uses the same recovery path. Failed destruction, permanent coordinator HTTP errors, and invalid coordinator responses stop the client with unresolved recovery state retained. Machine tests and offline recovery refuse to bypass that journal. Empty polls have a one-second client-side delay, and memory admission reports when it cannot advertise capacity.
 
 After yieldd observes job start, a command timeout, nonzero exit, signal termination, invalid listener status, or loss of the VM or network relay stops that assignment without cancelling healthy sibling workers. A CLI or SSH failure does not establish whether the guest or host transport failed; containment applies to either after job start. The worker polls again only after guest destruction, coordinator acknowledgement, and journal removal all succeed. This does not retry the failed job.
 

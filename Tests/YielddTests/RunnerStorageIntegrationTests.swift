@@ -49,22 +49,6 @@ func storageQuotaStopsWritesButNotRecoveryJournal() throws {
     defer { templateFixture.remove() }
     try FileManager.default.copyItem(at: templateFixture.templateURL, to: template)
     try storage.validateMacOS(template: template, clones: storage.clonesURL)
-    let home = fixture.directory.appendingPathComponent("preflight-home")
-    let preflightState = try RunnerLeaseStore(directory: home.appendingPathComponent("Library/Application Support/yieldd"))
-    try storage.save(in: preflightState.directory)
-    let tools = fixture.directory.appendingPathComponent("bin")
-    try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: false)
-    for name in ["container", "gh"] {
-        try FileManager.default.createSymbolicLink(at: tools.appendingPathComponent(name), withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
-    }
-    let binary = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-        .deletingLastPathComponent().appendingPathComponent(".build/debug/yieldd")
-    for linux in [false, true] {
-        let arguments = linux ? ["owner/repo"] : ["--macos", "owner/repo", "--macos-template", template.path]
-        let result = try run("/usr/bin/env", ["CFFIXED_USER_HOME=\(home.path)", "PATH=\(tools.path)",
-            binary.path, "agent", "install", "--preflight-only"] + arguments)
-        #expect(result.stdoutText == (linux ? "linux\n" : "macos\n"))
-    }
     #expect(throws: RunnerStorageError.outsideVolume(path: fixture.directory.path)) {
         try storage.validateMacOS(template: fixture.directory, clones: storage.clonesURL)
     }
@@ -100,7 +84,9 @@ func storageQuotaStopsWritesButNotRecoveryJournal() throws {
     #expect(container.deleteCount == 2)
     #expect(!FileManager.default.fileExists(atPath: linuxBundle.path))
 
-    let id = RunnerID(value: "yieldd-disk-full")
+    let offer = try ConnectedOffer(owner: UUID().uuidString.lowercased(), runner: "yieldd-bootstrap-" + UUID().uuidString.lowercased(),
+        repository: "owner/repo", platform: "macos", architecture: "arm64")
+    let id = RunnerID(value: offer.runner)
     let clones = try MacOSRunnerCloneStore(stateDirectory: leases.directory)
     let clone = try clones.bundleURL(for: id)
     try FileManager.default.createDirectory(at: clone, withIntermediateDirectories: false)
@@ -121,13 +107,14 @@ func storageQuotaStopsWritesButNotRecoveryJournal() throws {
     #expect(writeError == ENOSPC || writeError == EDQUOT)
     #expect(written < 64 * 1_024 * 1_024)
 
-    let lease = try RunnerLease(runnerID: id, repository: GitHubRepository("owner/repo"), platform: .macOS)
-    try leases.save(lease)
-    #expect(try leases.load() == [lease])
+    let journal = ConnectedRunnerStore(directory: leases.directory, platform: .macOS)
+    let lease = ConnectedLease(server: "https://example.test", deviceID: UUID().uuidString.lowercased(), offer: offer)
+    try journal.save(lease)
+    #expect(try journal.load() == lease)
     try clones.remove(id)
     #expect(!FileManager.default.fileExists(atPath: clone.path))
-    try leases.clear(id)
-    #expect(try leases.load().isEmpty)
+    try journal.clear()
+    #expect(try journal.load() == nil)
 
     _ = try run("/usr/bin/hdiutil", ["detach", base.path])
     mounted = false

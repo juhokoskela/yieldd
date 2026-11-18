@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
-    printf '1\n'
+    printf '2\n'
     exit 0
 fi
 
@@ -13,10 +13,10 @@ worker() {
     local -a statuses
     cd /opt/actions-runner
     export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/.yieldd-job-started.sh
-    if [[ -f "$state_directory/jit-config" ]]; then
-        export ACTIONS_RUNNER_INPUT_JITCONFIG="$(< "$state_directory/jit-config")"
-        rm "$state_directory/jit-config"
-    fi
+    IFS= read -r ACTIONS_RUNNER_INPUT_JITCONFIG < "$state_directory/jit-config"
+    [[ -n "$ACTIONS_RUNNER_INPUT_JITCONFIG" ]] || return 1
+    export ACTIONS_RUNNER_INPUT_JITCONFIG
+    rm "$state_directory/jit-config"
     set +e
     ./run.sh 2>&1 | tail -c 1048576 > "$state_directory/output.pending"
     statuses=("${PIPESTATUS[@]}")
@@ -63,7 +63,7 @@ status() {
 
 usage() {
     echo "usage: yieldd-runner-control memory constrained|full" >&2
-    echo "       yieldd-runner-control run|start|status|stop" >&2
+    echo "       yieldd-runner-control start|status|output|stop" >&2
     exit 2
 }
 
@@ -82,22 +82,10 @@ if [[ "$#" -eq 1 ]]; then
         _worker)
             worker
             ;;
-        run)
-            if [[ -f "$state_directory/exit-status" ]]; then
-                cat "$state_directory/output.log"
-                exit "$(< "$state_directory/exit-status")"
-            fi
-            exec systemd-run \
-                --quiet \
-                --wait \
-                --pipe \
-                --collect \
-                --service-type=exec \
-                --unit=yieldd-runner \
-                --slice=yieldd.slice \
-                --uid=runner \
-                --working-directory=/opt/actions-runner \
-                /opt/actions-runner/run.sh
+        output)
+            IFS= read -r exit_status < "$state_directory/exit-status"
+            cat "$state_directory/output.log"
+            exit "$exit_status"
             ;;
         stop)
             if [[ "$(systemctl show yieldd-runner.service --property=LoadState --value)" == "not-found" ]]; then

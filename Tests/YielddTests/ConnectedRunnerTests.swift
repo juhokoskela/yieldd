@@ -1324,7 +1324,7 @@ private final class ConnectedBackend: RunnerBackend {
     func exec(_ arguments: [String], standardInput: Data?, timeout: TimeInterval?, outputCapture: ProcessOutputCapture,
               as user: RunnerGuestUser, on id: RunnerID) throws -> ProcessResult {
         try onOperation()
-        if arguments.last == "--protocol-version" { return processResult(stdout: "1\n") }
+        if arguments.last == "--protocol-version" { return processResult(stdout: "2\n") }
         if arguments.first == "yieldd-configure-runner" {
             configuration = arguments
             payload = standardInput
@@ -1333,7 +1333,7 @@ private final class ConnectedBackend: RunnerBackend {
         }
         if failure == .run, arguments.last == "start" { throw TestFailure.runnerJob }
         if arguments.last == "start", let startFailure { throw startFailure }
-        if arguments.last == "run" { return processResult(status: replayExitStatus) }
+        if arguments.last == "output" { return processResult(status: replayExitStatus) }
         if arguments.last == "status" {
             statusPolls += 1
             try onStatus()

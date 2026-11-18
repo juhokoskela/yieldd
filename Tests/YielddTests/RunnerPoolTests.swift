@@ -11,12 +11,8 @@ private let secondPoolRepository = try! GitHubRepository("owner/second")
 func poolRunsConcurrentMixedPlatformSlots() throws {
     let gate = ConcurrentSlotGate(expected: 2)
 
-    try RunnerPool(stop: RunnerPoolStop()).run(slots: [
-        RunnerSlot(repository: firstPoolRepository, platform: .linux),
-        RunnerSlot(repository: secondPoolRepository, platform: .macOS),
-    ]) { slot, _ in
-        #expect(slot.platform == (slot.repository == firstPoolRepository ? .linux : .macOS))
-        try gate.enter(slot.repository)
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: [RunnerPlatform.linux, .macOS]) { platform, _ in
+        try gate.enter(platform == .linux ? firstPoolRepository : secondPoolRepository)
     }
 
     #expect(Set(gate.repositories.map(\.fullName)) == [

@@ -79,13 +79,13 @@ final class ConnectedRunner {
             try authorization.check()
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
-                             timeout: EphemeralRunnerSession.configurationTimeout, on: id)
+                             timeout: 5 * 60, on: id)
             try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
                                   stateChanged: { state in
                                       if case .jobStarted = state { jobStarted = true }
                                       self.stateChanged(state)
                                   }, currentTime: currentTime)
-                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
+                .run(id: id, pickupTimeout: 5 * 60)
         } catch {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation
