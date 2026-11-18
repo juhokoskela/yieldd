@@ -239,7 +239,7 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     }
 }
 
-@Test func nativeDiscardReleasesDiskEvenWhenCatalogReplacementFails() throws {
+@Test func nativeDiscardCompletesEvenWhenCatalogIsUnreadable() throws {
     let root = try workspace()
     defer { try? FileManager.default.removeItem(at: root) }
     let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
@@ -247,13 +247,12 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     let disk = try store.open(job, readable: [], writable: mainScope)
     try mark(disk, "dirty")
     let index = root.appendingPathComponent("linux/index.json")
-    try #require(chflags(index.path, UInt32(UF_IMMUTABLE)) == 0)
-    defer { _ = chflags(index.path, 0) }
-
-    #expect(throws: (any Error).self) { try store.discard(job) }
-    #expect(!FileManager.default.fileExists(atPath: disk.url.deletingLastPathComponent().path))
-    try #require(chflags(index.path, 0) == 0)
+    let catalog = try Data(contentsOf: index)
+    try writePrivateRunnerFile(Data("invalid".utf8), to: index)
     try store.discard(job)
+    #expect(!FileManager.default.fileExists(atPath: disk.url.deletingLastPathComponent().path))
+    #expect(try Data(contentsOf: index) == Data("invalid".utf8))
+    try writePrivateRunnerFile(catalog, to: index)
     try store.publish(disk)
     #expect(try store.open(runner(), readable: [mainScope], writable: nil).isCold)
 }

@@ -113,17 +113,8 @@ struct NativeCacheStore {
     func discard(_ id: RunnerID) throws {
         try validate()
         let job = try jobPath(id)
-        // Release disk space before replacing the catalog, including when a full volume caused cleanup.
+        // Guest cleanup must also succeed when the cache catalog is unreadable or the volume is full.
         do { try manager.removeItem(at: job) } catch CocoaError.fileNoSuchFile {}
-        var info = stat()
-        if lstat(index.path, &info) == 0 {
-            try withLock {
-                var catalog = try readIndex()
-                if catalog.emptyScopeWriters.removeValue(forKey: id.value) != nil {
-                    try save(catalog)
-                }
-            }
-        } else if errno != ENOENT { throw lastError() }
     }
 
     // Recovery only discards. Publishing requires the original live checkout and an unchanged base.
@@ -219,7 +210,16 @@ struct NativeCacheStore {
 
     private func readIndex() throws -> Index {
         guard let data = try readPrivateRunnerFile(index, maximumBytes: 64 * 1024) else { return Index() }
-        return try JSONDecoder().decode(Index.self, from: data)
+        var catalog = try JSONDecoder().decode(Index.self, from: data)
+        // A discarded checkout can never publish. Its claim expires with its job directory.
+        catalog.emptyScopeWriters = try catalog.emptyScopeWriters.filter { entry in
+            let job = try jobPath(RunnerID(value: entry.key))
+            var info = stat()
+            if lstat(job.path, &info) == 0 { return true }
+            if errno == ENOENT { return false }
+            throw lastError()
+        }
+        return catalog
     }
 
     private func save(_ catalog: Index) throws {
