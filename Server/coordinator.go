@@ -487,16 +487,24 @@ func (c *coordinator) lookupBootstrapRuns(ctx context.Context) map[string]*boots
 	return runs
 }
 
-func (a *assignment) register(ctx context.Context) error {
+func (a *assignment) generateRegistration(ctx context.Context) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
 	l := a.lease
 	generated, err := a.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, a.state.ScaleSetID)
 	if err != nil {
-		return fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
+		return nil, fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
 	}
 	if generated == nil || generated.Runner == nil || generated.Runner.ID <= 0 || generated.Runner.Name != l.Name || generated.Runner.RunnerScaleSetID != a.state.ScaleSetID || generated.EncodedJITConfig == "" {
-		return errors.New("invalid JIT response; provisioning intent retained for recovery")
+		return nil, errors.New("invalid JIT response; provisioning intent retained for recovery")
 	}
-	next := *l
+	return generated, nil
+}
+
+func (a *assignment) register(ctx context.Context) error {
+	generated, err := a.generateRegistration(ctx)
+	if err != nil {
+		return err
+	}
+	next := *a.lease
 	next.RunnerID, next.JIT = generated.Runner.ID, generated.EncodedJITConfig
 	return a.replace(&next)
 }
@@ -718,7 +726,7 @@ func (a *assignment) cleanup(ctx context.Context) error {
 		return err
 	}
 	delete(a.reportedLocalHold, l.Name)
-	if l.RunnerID != 0 || l.DispatchIntent || (l.Local != nil && l.Local.Phase == localIssued) {
+	if runner != nil || l.RunnerID != 0 || l.DispatchIntent || (l.Local != nil && l.Local.Phase == localIssued) {
 		a.refreshDemand = true
 	}
 	return nil

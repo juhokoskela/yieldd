@@ -128,21 +128,22 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := a.register(ctx); err != nil {
+	generated, err := a.generateRegistration(ctx)
+	if err != nil {
 		return nil, err
 	}
-	l = a.lease
-	credential := &deviceCredential{JIT: l.JIT}
-	issued := *l.Local
+	issued := *a.lease.Local
 	issued.Phase = localIssued
 	issued.Expires = time.Now().UTC().Add(localStartupLifetime)
 	// Persist possible delivery before returning credentials. Never issue them a second time.
-	if err := a.saveLocal(&issued, ""); err != nil {
+	issuedLease := *a.lease
+	issuedLease.Local, issuedLease.RunnerID, issuedLease.JIT = &issued, generated.Runner.ID, ""
+	if err := a.replace(&issuedLease); err != nil {
 		return nil, err
 	}
 	a.logger.Info("Local credentials issued", "runner", l.Name, "device", l.Local.DeviceID)
 	a.device.redrive(a.state.Owner)
-	return credential, nil
+	return &deviceCredential{JIT: generated.EncodedJITConfig}, nil
 }
 
 type deviceAuthorization struct {

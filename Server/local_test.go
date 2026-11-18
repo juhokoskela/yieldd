@@ -30,6 +30,13 @@ func TestLocalOfferDoesNotRegisterUntilAccepted(t *testing.T) {
 	if len(w.events) != 0 || singleLease(c.state).Local.Phase != localOffered {
 		t.Fatal("offer caused external provisioning")
 	}
+	save := c.save
+	c.save = func(s *state) error {
+		if s.Leases[request.Runner].JIT != "" {
+			t.Fatal("local assignment persisted JIT")
+		}
+		return save(s)
+	}
 	w.beforeGenerate = func() {
 		saved, err := store.load(c.state.Config)
 		if err != nil || singleLease(saved).Local.Phase != localAccepted {
@@ -384,5 +391,33 @@ func TestLocalStateRejectsMixedHostedAndLocalIdentities(t *testing.T) {
 				t.Fatal("invalid local state accepted")
 			}
 		})
+	}
+}
+
+func TestRecoverPreviousAcceptedJITWithoutIssuingAgain(t *testing.T) {
+	c, w, store, req := localFixture(t)
+	a := c.assigned(req.Runner)
+	accepted := *a.lease.Local
+	accepted.Phase = localAccepted
+	if err := a.saveLocal(&accepted, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Previous releases checkpointed both the JIT and ID while still accepted.
+	if err := a.register(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.load(c.state.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.state = saved
+	if jit, err := c.acceptDevice(t.Context(), req); err == nil || jit != nil {
+		t.Fatal("reissued previous JIT")
+	}
+	if err := c.completeDevice(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if w.runner != nil || len(c.state.Leases) != 0 || w.dispatched != 0 {
+		t.Fatal("old registration not reconciled")
 	}
 }
