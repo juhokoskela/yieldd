@@ -1,0 +1,134 @@
+name: Measure one guest build
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        required: true
+      label:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ${{ inputs.label }}
+    timeout-minutes: 15
+    env:
+      BENCH_STAGE: ${{ inputs.stage }}
+      WORKLOAD_SHA: 5d2ef98d365cf397d7eef130b6063e190ac6220e
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      GOENV: 'off'
+      GOROOT: /Users/runner/yieldd-go
+      GOCACHE: /Users/runner/yieldd-bench-cache/build
+      GOMODCACHE: /Users/runner/yieldd-bench-cache/modules
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: 5d2ef98d365cf397d7eef130b6063e190ac6220e
+          persist-credentials: false
+      - name: Check build environment
+        shell: bash
+        run: |
+          export PATH="$GOROOT/bin:$PATH"
+          echo "$GOROOT/bin" >> "$GITHUB_PATH"
+          cat > "$RUNNER_TEMP/bench.py" <<'PYTHON'
+          import json, os, platform, shutil, subprocess, sys, time
+          from pathlib import Path
+          phase=sys.argv[1];env=os.environ
+          name=env['BENCH_STAGE'];route=name.split('-')[0]
+          seed=name.endswith('-seed'); cold=name=='cold'; warm=not seed and not cold
+          base=Path('/Users/runner/yieldd-bench-cache');root=Path(env['GITHUB_WORKSPACE']);out=Path(env['RUNNER_TEMP'])/'evidence.json'
+          def call(*args):
+           return subprocess.check_output(args,cwd=root/'Server',text=True).strip()
+          def usage():
+           return {p.name:int(call('du','-sk',str(p)).split()[0])*1024 for p in [base/'build',base/'modules'] if p.exists()}
+          def save():out.write_text(json.dumps(data,indent=2)+'\n')
+          def marker():return env['GITHUB_RUN_ID']+'-'+route
+          if phase=='start':
+           assert not base.exists() and not base.is_symlink()
+           data={'stage':name,'runner':env['RUNNER_NAME'],'run':env['GITHUB_RUN_ID'],'times':{},'utc':{},'workload':{}}
+           assert call('git','rev-parse','HEAD')==env['WORKLOAD_SHA']
+           info={'commit':env['WORKLOAD_SHA'],'source':str(root/'Server'),'go':call('go','version'),'go_env':json.loads(call('go','env','-json','GOTOOLCHAIN','GOCACHE','GOMODCACHE','GOWORK','GOROOT','GOHOSTARCH','CGO_ENABLED')),'cpu':int(call('sysctl','-n','hw.ncpu')),'ram_bytes':int(call('sysctl','-n','hw.memsize')),'macos':call('sw_vers','-productVersion'),'macos_build':call('sw_vers','-buildVersion'),'arch':platform.machine(),'tar':call('tar','--version').splitlines()[0],'zstd':shutil.which('zstd')}
+           assert info['go']=='go version go1.27.4 darwin/arm64' and info['cpu']==4 and info['arch']=='arm64',info
+           assert info['go_env']['GOTOOLCHAIN']=='local' and info['go_env']['GOWORK']=='off'
+           assert info['go_env']['GOCACHE']==str(base/'build') and info['go_env']['GOMODCACHE']==str(base/'modules')
+           assert info['source']=='/Users/runner/actions-runner/_work/yieldd/yieldd/Server',info['source']
+           data['workload']=info
+           if route!='native':base.mkdir()
+           save()
+          else:
+           data=json.loads(out.read_text())
+          if phase=='work':
+           if route=='native':
+            target=Path(env['YIELDD_CACHE_PATH'])
+            assert target==Path('/Volumes/YielddCache') and target.stat().st_dev!=Path('/Volumes').stat().st_dev
+            base.symlink_to(target,target_is_directory=True)
+            data['native_mount']=str(target)
+           if warm:
+            assert (base/'build'/'yieldd-bench-marker').read_text()==marker()
+            if route!='native':assert env['ARCHIVE_HIT']=='true',env['ARCHIVE_HIT']
+           else:
+            assert not (base/'build').exists() and not (base/'modules').exists()
+           data['verified_seed_marker']=warm
+           data['before_bytes']=usage();save()
+           for label,cmd in [('test',['go','test','-race','-count=1','./...']),('vet',['go','vet','./...'])]:
+            start=time.perf_counter_ns();data['utc'][label+'_start']=time.time()
+            subprocess.run(cmd,cwd=root/'Server',check=True)
+            data['times'][label]=(time.perf_counter_ns()-start)/1e9;data['utc'][label+'_end']=time.time();save()
+           if seed:
+            (base/'build'/'yieldd-bench-marker').write_text(marker())
+           data['after_bytes']=usage();save()
+          elif phase=='final':
+           assert data['times']['test']>0 and data['times']['vet']>0
+          elif phase!='start':raise ValueError(phase)
+          PYTHON
+          python3 "$RUNNER_TEMP/bench.py" start
+      - name: Acquisition begins
+        run: python3 -c 'import pathlib,os,time; pathlib.Path(os.environ["RUNNER_TEMP"],"acquire-start").write_text(str(time.monotonic_ns()))'
+      - uses: ./actions/native-cache
+        if: startsWith(inputs.stage, 'native-')
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        id: archive
+        if: "(startsWith(inputs.stage, 'local-') || startsWith(inputs.stage, 'remote-')) && !endsWith(inputs.stage, '-seed')"
+        with:
+          path: |
+            /Users/runner/yieldd-bench-cache/build
+            /Users/runner/yieldd-bench-cache/modules
+          key: yieldd-fourway-go-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Test and vet
+        shell: bash
+        env:
+          ARCHIVE_HIT: ${{ steps.archive.outputs.cache-hit }}
+        run: |
+          python3 -c 'import pathlib,os,time; pathlib.Path(os.environ["RUNNER_TEMP"],"acquire-end").write_text(str(time.monotonic_ns()))'
+          python3 "$RUNNER_TEMP/bench.py" work
+          python3 -c 'import pathlib,os,time; pathlib.Path(os.environ["RUNNER_TEMP"],"save-start").write_text(str(time.monotonic_ns()))'
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        if: inputs.stage == 'remote-seed' || inputs.stage == 'local-seed'
+        with:
+          path: |
+            /Users/runner/yieldd-bench-cache/build
+            /Users/runner/yieldd-bench-cache/modules
+          key: yieldd-fourway-go-${{ github.run_id }}
+      - name: Record results
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import json, os, time
+          r=Path(os.environ['RUNNER_TEMP'])
+          stage=os.environ['BENCH_STAGE']
+          p=r/'evidence.json';data=json.loads(p.read_text());ns=lambda n:int((r/n).read_text())
+          data['times']['acquire_step_bracket']=(ns('acquire-end')-ns('acquire-start'))/1e9
+          data['times']['archive_save_step_bracket']=(time.monotonic_ns()-ns('save-start'))/1e9 if stage in ('local-seed','remote-seed') else 0
+          p.write_text(json.dumps(data,indent=2)+'\n')
+          PYTHON
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: fourway-${{ inputs.stage }}
+          path: ${{ runner.temp }}/evidence.json
+          if-no-files-found: error
+          retention-days: 7

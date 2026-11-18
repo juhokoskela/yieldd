@@ -1,0 +1,75 @@
+name: Compare real macOS guest cache modes
+on:
+  push:
+    branches: [bench/fourway-cache-20261118]
+permissions:
+  contents: read
+jobs:
+  cold:
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: cold
+      label: yieldd-fourway-d9faef157675-macos-cold
+  remote_seed:
+    needs: cold
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: remote-seed
+      label: yieldd-fourway-d9faef157675-macos-remote-seed
+  local_seed:
+    needs: remote_seed
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: local-seed
+      label: yieldd-fourway-d9faef157675-macos-local-seed
+  native_seed:
+    needs: local_seed
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: native-seed
+      label: yieldd-fourway-d9faef157675-macos-native-seed
+  remote_r1:
+    needs: native_seed
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: remote-r1
+      label: yieldd-fourway-d9faef157675-macos-remote-r1
+  local_r1:
+    needs: remote_r1
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: local-r1
+      label: yieldd-fourway-d9faef157675-macos-local-r1
+  native_r1:
+    needs: local_r1
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: native-r1
+      label: yieldd-fourway-d9faef157675-macos-native-r1
+  native_r2:
+    needs: native_r1
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: native-r2
+      label: yieldd-fourway-d9faef157675-macos-native-r2
+  local_r2:
+    needs: native_r2
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: local-r2
+      label: yieldd-fourway-d9faef157675-macos-local-r2
+  remote_r2:
+    needs: local_r2
+    if: always() && !cancelled()
+    uses: ./.github/workflows/fourway-guest.yml
+    with:
+      stage: remote-r2
+      label: yieldd-fourway-d9faef157675-macos-remote-r2
