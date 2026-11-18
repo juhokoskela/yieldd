@@ -34,7 +34,7 @@ final class NativeCacheSession {
 
     private enum State {
         case fresh
-        case opening
+        case discardOnly
         case attached(Grants, NativeCacheDisk)
         case saveRequested(Grants, NativeCacheDisk)
         case sealed(NativeCacheDisk)
@@ -79,7 +79,7 @@ final class NativeCacheSession {
                     break
                 case .fresh:
                     // Either operation can allocate resources before throwing.
-                    state = .opening
+                    state = .discardOnly
                     let disk = try store.open(id, readable: request.grants.readScopes, writable: request.grants.writeScope)
                     try backend.attachNativeCache(image: disk.url, cold: disk.isCold, on: id)
                     state = .attached(request.grants, disk)
@@ -123,15 +123,18 @@ final class NativeCacheSession {
         }
     }
 
-    func finishAfterDestruction(publish: Bool) throws {
-        if case .fresh = state { return }
-        if publish, case let .sealed(disk) = state {
-            do {
-                try store.publish(disk)
-            } catch {
-                writeToStandardError("Discarding native cache for \(id.value): \(describeError(error))\n")
-            }
+    func publishAfterDestruction() {
+        guard case let .sealed(disk) = state else { return }
+        state = .discardOnly
+        do {
+            try store.publish(disk)
+        } catch {
+            writeToStandardError("Discarding native cache for \(id.value): \(describeError(error))\n")
         }
+    }
+
+    func discard() throws {
+        if case .fresh = state { return }
         try store.discard(id)
     }
 }

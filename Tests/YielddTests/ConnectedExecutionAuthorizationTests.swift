@@ -146,11 +146,13 @@ func nativeCacheWaitsForGitHubSuccessBeforeOrAfterListenerExit(successBeforeExit
         now = 30
         try authorization.check()
     }
+    try authorization.beginNativeCacheDetach()
+    authorization.endGuestExecution()
     #expect(try authorization.confirmNativeSave { now += $0 })
-    #expect(renewals == (successBeforeExit ? 2 : 0))
+    #expect(renewals == (successBeforeExit ? 2 : 1))
     #expect(resultQueries == (successBeforeExit ? 0 : 2))
     now = ConnectedExecutionAuthorization.offlineGrace
-    #expect(throws: ConnectedExecutionError.expired) { try authorization.check() }
+    #expect(throws: ConnectedExecutionError.expired) { try authorization.confirmNativeSave { _ in } }
 }
 
 @Test
@@ -159,6 +161,7 @@ func nativeCacheRejectsRevocationAndBoundsMissingCompletion() throws {
     let revoked = ConnectedExecutionAuthorization(renew: { _, _ in throw TestFailure.unexpectedBackendCall },
         jobResult: { _, _ in .unavailable }, checkCancellation: {})
     revoked.start(authorizationOffer, pendingNativeSave: { true })
+    revoked.endGuestExecution()
     #expect(try !revoked.confirmNativeSave { _ in Issue.record("unexpected retry") })
 
     var attempts: [TimeInterval] = []
@@ -168,6 +171,7 @@ func nativeCacheRejectsRevocationAndBoundsMissingCompletion() throws {
     },
         checkCancellation: {}, currentTime: { now })
     offline.start(authorizationOffer, pendingNativeSave: { true })
+    offline.endGuestExecution()
     #expect(try !offline.confirmNativeSave { now += $0 })
     #expect(now == 30)
     #expect(attempts == [0, 2, 6, 14, 22])
@@ -194,7 +198,7 @@ func terminalSuccessBoundsOnlyTheWaitForListenerExit(cleanExitInTime: Bool) thro
     now = 59
     try authorization.check()
     if cleanExitInTime {
-        #expect(try authorization.confirmNativeSave { _ in Issue.record("unexpected result poll") })
+        try authorization.beginNativeCacheDetach()
         now = 299
         try authorization.check()
         now = 300
@@ -202,6 +206,6 @@ func terminalSuccessBoundsOnlyTheWaitForListenerExit(cleanExitInTime: Bool) thro
     } else {
         now = 60
         #expect(throws: ConnectedExecutionError.listenerExitTimedOut) { try authorization.check() }
-        #expect(throws: ConnectedExecutionError.listenerExitTimedOut) { try authorization.confirmNativeSave { _ in } }
+        #expect(throws: ConnectedExecutionError.listenerExitTimedOut) { try authorization.beginNativeCacheDetach() }
     }
 }

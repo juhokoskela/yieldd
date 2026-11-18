@@ -12,6 +12,8 @@ final class ConnectedExecutionAuthorization {
     private let jobResult: (ConnectedOffer, () throws -> Void) throws -> FinalJobResult
     private let checkCancellation: () throws -> Void
     private let currentTime: () -> TimeInterval
+    private enum GuestPhase { case executing, detaching, finished }
+    private var guestPhase = GuestPhase.finished
     private var offer: ConnectedOffer?
     private var deadline: TimeInterval = 0
     private var listenerExitDeadline = TimeInterval.infinity
@@ -31,6 +33,7 @@ final class ConnectedExecutionAuthorization {
     }
 
     func start(_ offer: ConnectedOffer, pendingNativeSave: @escaping () -> Bool = { false }) {
+        guestPhase = .executing
         self.pendingNativeSave = pendingNativeSave
         jobSucceeded = false
         listenerExitDeadline = .infinity
@@ -40,14 +43,19 @@ final class ConnectedExecutionAuthorization {
         deadline = nextRenewal + Self.offlineGrace
     }
 
-    // A ready-to-save disk still needs the final job result after all post steps.
-    // Waiting for it must not renew execution or consume the disk unmount timeout.
-    func confirmNativeSave(wait: (TimeInterval) throws -> Void) throws -> Bool {
-        guard let offer, pendingNativeSave() else { return false }
-        // The caller observed a clean listener exit. Detach can use the remaining lease.
+    func beginNativeCacheDetach() throws {
+        // A late listener exit cannot reopen an expired or revoked assignment.
         try checkDeadline()
+        guestPhase = .detaching
         listenerExitDeadline = .infinity
-        nextRenewal = .infinity
+        try check()
+    }
+
+    // Destruction must proceed even when permission to execute guest commands has ended.
+    func endGuestExecution() { guestPhase = .finished }
+
+    func confirmNativeSave(wait: (TimeInterval) throws -> Void) throws -> Bool {
+        guard let offer, guestPhase == .finished else { return false }
         let until = currentTime() + Self.completionWait
         var retryDelay: TimeInterval = 2
         func checkResultDeadline() throws {
@@ -82,18 +90,19 @@ final class ConnectedExecutionAuthorization {
         return true
     }
 
-    func stop() { offer = nil; failure = nil; pendingNativeSave = { false } }
+    func stop() { endGuestExecution(); offer = nil; failure = nil; pendingNativeSave = { false } }
 
     func check() throws {
+        guard guestPhase != .finished else { try checkCancellation(); return }
         try checkDeadline()
         guard let offer, currentTime() >= nextRenewal else { return }
         let requestedAt = currentTime()
         do {
             switch try renew(offer, checkDeadline) {
-            case .jobSucceeded where pendingNativeSave():
+            case .jobSucceeded where guestPhase == .detaching || pendingNativeSave():
                 try checkDeadline()
                 jobSucceeded = true
-                listenerExitDeadline = currentTime() + Self.completionWait
+                if guestPhase == .executing { listenerExitDeadline = currentTime() + Self.completionWait }
                 nextRenewal = .infinity
                 return
             case .revoked, .jobSucceeded:

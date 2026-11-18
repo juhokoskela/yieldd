@@ -14,7 +14,10 @@ final class ConnectedRunner {
     var currentTime: () -> TimeInterval
 
     // Valid only for this worker process. A restart must prove absence again.
-    private var absent: RunnerID?
+    private enum LocalCleanup: Equatable {
+        case guestAbsent(RunnerID), checkoutRemoved(RunnerID)
+    }
+    private var localCleanup: LocalCleanup?
 
     init(backend: any RunnerBackend, store: ConnectedRunnerStore, server: String, deviceID: String,
          accept: @escaping (ConnectedOffer) throws -> String, complete: @escaping (ConnectedOffer) throws -> Void,
@@ -41,14 +44,19 @@ final class ConnectedRunner {
         try lease.requireRecoveryIdentity(server: server, deviceID: deviceID)
         try withConnectedRunnerActivity(lease.offer.runner) {
             let id = RunnerID(value: lease.offer.runner)
-            if absent != id {
-                try backend.destroy(id)
-                try NativeCacheStore.recover(in: store.directory, platform: backend.platform, id: id)
-                absent = id
+            if localCleanup != .checkoutRemoved(id) {
+                if localCleanup != .guestAbsent(id) {
+                    try backend.destroy(id)
+                    localCleanup = .guestAbsent(id)
+                }
+                try removeCheckout(id) {
+                    try nativeCache?.discard(id)
+                }
+                localCleanup = .checkoutRemoved(id)
             }
             try acknowledgeConnectedRunner(lease.offer, complete: complete)
             try store.clear()
-            absent = nil
+            localCleanup = nil
         }
     }
 
@@ -57,7 +65,7 @@ final class ConnectedRunner {
         defer { if releaseOnExit { releaseCapacity() } }
         guard offer.runnerPlatform == backend.platform, offer.slot == store.slot else { throw ConnectedRunnerError.invalidOffer }
         guard try store.load() == nil else { throw ConnectedRunnerError.recoveryRequired }
-        absent = nil
+        localCleanup = nil
         try backend.prepare()
         let id = RunnerID(value: offer.runner)
         let cache = try nativeCache.map { try NativeCacheSession(store: $0, backend: backend, offer: offer, stateDirectory: store.directory) }
@@ -67,6 +75,7 @@ final class ConnectedRunner {
         var failure: (any Error)?
         var machineMayExist = false
         var jobStarted = false
+        var sealed = false
         do {
             try authorization.check()
             let jit = try accept(offer)
@@ -89,34 +98,61 @@ final class ConnectedRunner {
                                       self.stateChanged(state)
                                   }, currentTime: currentTime)
                 .run(id: id, pickupTimeout: 5 * 60, handleNativeCache: cache.map { $0.handleRequest })
-            if let cache, cache.saveRequested, try authorization.confirmNativeSave(wait: wait) {
-                cache.detachForPublication()
+            if let cache, cache.saveRequested {
+                try authorization.beginNativeCacheDetach()
+                sealed = cache.detachForPublication()
                 try authorization.check()
             }
         } catch {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation
         }
-        if cache?.saveRequested == true && !authorization.jobSucceeded {
-            writeToStandardError("Discarding native cache for \(id.value) because GitHub job success was not confirmed.\n")
-        }
-        authorization.stop()
+        authorization.endGuestExecution()
+        defer { authorization.stop() }
         if let failure, !isCancellation(failure), (failure as? ConnectedRunnerError)?.httpStatus != 410 {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         if machineMayExist {
             try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
         }
-        try cleanUp(step: .nativeCache, after: failure) { try cache?.finishAfterDestruction(publish: failure == nil) }
-        absent = id
+        localCleanup = .guestAbsent(id)
         releaseOnExit = false
         releaseCapacity()
         stateChanged(.capacityReleased(id))
+
+        var publish = false
+        if sealed && failure == nil {
+            do { publish = try authorization.confirmNativeSave(wait: wait) }
+            catch { failure = error }
+        }
+        if (sealed || cache?.saveRequested == true) && !authorization.jobSucceeded {
+            writeToStandardError("Discarding native cache for \(id.value) because GitHub job success was not confirmed.\n")
+        }
+        if let cache {
+            if publish { cache.publishAfterDestruction() }
+            try cleanUp(step: .nativeCache, after: failure) {
+                try removeCheckout(id, operation: cache.discard)
+            }
+        }
+        localCleanup = .checkoutRemoved(id)
         try cleanUp(step: .githubRunner, after: failure) { try acknowledgeConnectedRunner(offer, complete: complete) }
         try cleanUp(step: .leaseRecord, after: failure) { try store.clear() }
-        absent = nil
+        localCleanup = nil
         stateChanged(.cleanupCompleted(id))
         if let failure, !isContainedConnectedFailure(failure) { throw failure }
+    }
+
+    private func removeCheckout(_ id: RunnerID, operation: () throws -> Void) throws {
+        var reported = false
+        while true {
+            do { try operation(); return } catch {
+                if !reported {
+                    writeToStandardError("Retrying native cache cleanup for \(id.value): \(describeError(error))\n")
+                    reported = true
+                }
+                try wait(5)
+            }
+        }
     }
 
     private func cleanUp(step: RunnerSessionCleanupStep, after failure: (any Error)?, operation: () throws -> Void) throws {

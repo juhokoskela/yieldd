@@ -4,7 +4,8 @@ import Testing
 
 struct NativeCacheSessionTests {
     @Test func saveRecordsIntentAndPublicationWaitsForGuestAbsence() throws {
-        let fixture = try NativeSessionFixture()
+        var validations = 0
+        let fixture = try NativeSessionFixture { validations += 1 }
         defer { fixture.remove() }
         let opened = try fixture.request("open")
         #expect(opened.writable == true)
@@ -18,7 +19,11 @@ struct NativeCacheSessionTests {
         #expect(fixture.session.detachForPublication())
         #expect(fixture.backend.detachments == 1)
         #expect(try fixture.checkCold("yieldd-before-destroy"))
-        try fixture.session.finishAfterDestruction(publish: true)
+        fixture.session.publishAfterDestruction()
+        let afterPublication = validations
+        fixture.session.publishAfterDestruction()
+        #expect(validations == afterPublication)
+        try fixture.session.discard()
         #expect(try !fixture.checkCold("yieldd-after-destroy"))
     }
 
@@ -33,7 +38,8 @@ struct NativeCacheSessionTests {
             fixture.backend.failDetach = mode == "unmount-error"
             let detached = fixture.session.detachForPublication()
             #expect(detached == (mode == "canceled"))
-            try fixture.session.finishAfterDestruction(publish: detached && mode != "canceled")
+            if detached && mode != "canceled" { fixture.session.publishAfterDestruction() }
+            try fixture.session.discard()
             #expect(try fixture.checkCold("yieldd-next"))
         }
     }
@@ -41,8 +47,9 @@ struct NativeCacheSessionTests {
     @Test func jobThatNeverOpensNativeDiskDoesNotTouchStorage() throws {
         let fixture = try NativeSessionFixture(validate: { throw TestFailure.unexpectedBackendCall })
         defer { fixture.remove() }
-        try fixture.session.finishAfterDestruction(publish: false)
-        try fixture.session.finishAfterDestruction(publish: true)
+        try fixture.session.discard()
+        fixture.session.publishAfterDestruction()
+        try fixture.session.discard()
     }
 
     @Test func partialAttachmentCannotReopenOrPublishTheDisk() throws {
@@ -54,7 +61,8 @@ struct NativeCacheSessionTests {
         #expect(try fixture.request("open").error != nil)
         #expect(fixture.backend.attachments == 1)
         #expect(try fixture.request("save").error != nil)
-        try fixture.session.finishAfterDestruction(publish: true)
+        fixture.session.publishAfterDestruction()
+        try fixture.session.discard()
         #expect(try fixture.checkCold("yieldd-next"))
     }
 
@@ -66,7 +74,7 @@ struct NativeCacheSessionTests {
         _ = try fixture.request("open")
         #expect(try fixture.request("save", write: String(repeating: "b", count: 64)).error != nil)
         #expect(!fixture.session.detachForPublication())
-        try fixture.session.finishAfterDestruction(publish: false)
+        try fixture.session.discard()
     }
 }
 

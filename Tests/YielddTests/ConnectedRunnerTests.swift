@@ -1285,7 +1285,7 @@ private struct ConnectedFixture {
     }
 }
 
-@Test(arguments: [ExecutionRenewal.jobSucceeded, .revoked], [true, false])
+@Test(arguments: [ExecutionRenewal.jobSucceeded, .revoked, .active], [true, false])
 func connectedNativeCachePublicationUsesFinalJobResult(_ result: ExecutionRenewal, resultBeforeExit: Bool) throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
@@ -1308,30 +1308,140 @@ func connectedNativeCachePublicationUsesFinalJobResult(_ result: ExecutionRenewa
     backend.onStatus = { if backend.statusPolls == 1 { try request("open") } }
     var now: TimeInterval = 0
     var saveSent = false
+    var events: [String] = []
+    var resultQueries = 0
+    backend.onDetach = { events.append("detach") }
     let authorization = ConnectedExecutionAuthorization(renew: { _, _ in saveSent ? result : .active },
-        jobResult: { _, _ in result == .jobSucceeded ? .succeeded : .unavailable },
-        checkCancellation: {}, currentTime: { now })
+        jobResult: { _, check in
+            try check()
+            #expect(backend.destroyed)
+            #expect(try fixture.store.load()?.offer == connectedOffer)
+            #expect(events.prefix(2) == ["detach", "release"])
+            #expect(!events.contains("acknowledge"))
+            events.append("result")
+            resultQueries += 1
+            if resultQueries == 1 || result == .active { return .pending }
+            return result == .jobSucceeded ? .succeeded : .unavailable
+        }, checkCancellation: {
+            if result == .active && !resultBeforeExit && resultQueries > 0 { throw CancellationError() }
+        }, currentTime: { now })
     let runner = ConnectedRunner(backend: backend, store: fixture.store, server: "https://example.com/",
         deviceID: connectedOffer.owner, accept: { _ in try connectedJIT() },
-        complete: { _ in #expect(backend.destroyed) }, authorization: authorization, wait: { _ in
-            if !saveSent {
+        complete: { _ in
+            #expect(backend.destroyed)
+            events.append("acknowledge")
+        }, authorization: authorization, wait: { delay in
+            if backend.destroyed {
+                #expect(events.last == "result")
+                now += delay
+            } else if !saveSent {
                 try request("save")
                 saveSent = true
             } else if resultBeforeExit {
                 now = 31
             }
         }, nativeCache: cache, currentTime: { now })
-    try runner.run(connectedOffer, memory: .full)
-    #expect(backend.destroyed)
+    func run() throws {
+        try runner.run(connectedOffer, memory: .full) {
+            #expect(backend.destroyed)
+            events.append("release")
+        }
+    }
+    if result == .active && !resultBeforeExit {
+        #expect(throws: CancellationError.self) { try run() }
+    } else {
+        try run()
+    }
+    if result == .active {
+        #expect(resultQueries == (resultBeforeExit ? 5 : 1))
+        #expect(events.last == "acknowledge")
+    } else if !resultBeforeExit {
+        #expect(events == ["detach", "release", "result", "result", "acknowledge"])
+    } else if result == .revoked {
+        #expect(events == ["release", "acknowledge"])
+    } else {
+        #expect(events == ["detach", "release", "acknowledge"])
+    }
     #expect(try fixture.store.load() == nil)
     let next = RunnerID(value: "yieldd-next-job")
-    #expect(try cache.open(next, readable: [scope], writable: nil).isCold == (result == .revoked))
+    #expect(try cache.open(next, readable: [scope], writable: nil).isCold == (result != .jobSucceeded))
     try cache.discard(next)
+}
+
+@Test(arguments: [false, true])
+func failedNativeDiscardKeepsOnlyItsOwnSlotWhileSiblingCompletes(stopDuringRetry: Bool) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let directory = fixture.directory
+    let retryStarted = DispatchSemaphore(value: 0)
+    let siblingFinished = DispatchSemaphore(value: 0)
+    let offers = try (0..<2).map { slot in
+        try ConnectedOffer(owner: connectedOffer.owner, runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
+            repository: connectedOffer.repository, platform: "linux", architecture: "arm64", slot: slot)
+    }
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: offers) { offer, stop in
+        let store = ConnectedRunnerStore(directory: directory, slot: offer.slot)
+        let backend = ConnectedBackend()
+        let authorization = ConnectedExecutionAuthorization(renew: { _, _ in .active }, checkCancellation: stop.check)
+        let accept: (ConnectedOffer) throws -> String = { offer in
+            try connectedJIT(settings: ["AgentName": offer.runner, "WorkFolder": "_work", "Ephemeral": true])
+        }
+        if offer.slot == 1 {
+            defer { siblingFinished.signal() }
+            try #require(retryStarted.wait(timeout: .now() + 5) == .success)
+            try stop.check()
+            let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/", deviceID: offer.owner,
+                accept: accept, complete: { _ in }, authorization: authorization, wait: stop.wait)
+            try runner.run(offer, memory: .full)
+            #expect(backend.destroyed)
+            return
+        }
+
+        let id = RunnerID(value: offer.runner)
+        let directories = try RunnerNetworkDirectories(stateDirectory: directory)
+        let control = try directories.create(for: id)
+        defer { try? FileManager.default.removeItem(at: directories.rootURL) }
+        let scope = String(repeating: "a", count: 64)
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "id": "open", "operation": "open", "grants": ["repository_id": "1", "repository": offer.repository, "read_scopes": [scope]]
+        ])
+        backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
+        backend.onStatus = { if backend.statusPolls == 1 { try writePrivateRunnerFile(payload, to: control.appendingPathComponent("native-request")) } }
+        var released = false
+        var retries = 0
+        let cache = NativeCacheStore(root: directory.appendingPathComponent("caches"), platform: .linux, diskBytes: 4096) {
+            if released && retries == 0 { throw TestFailure.machineCleanup }
+        }
+        let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/", deviceID: offer.owner,
+            accept: accept, complete: { _ in #expect(retries == 1) }, authorization: authorization, wait: { delay in
+                guard backend.destroyed else { return }
+                #expect(delay == 5 && released)
+                #expect(try store.load()?.offer == offer)
+                retryStarted.signal()
+                try #require(siblingFinished.wait(timeout: .now() + 5) == .success)
+                try stop.check()
+                retries += 1
+                if stopDuringRetry { throw CancellationError() }
+            }, nativeCache: cache)
+        func run() throws {
+            try runner.run(offer, memory: .full) { #expect(backend.destroyed); released = true }
+        }
+        if stopDuringRetry {
+            #expect(throws: CancellationError.self) { try run() }
+            #expect(try store.load()?.offer == offer)
+            try runner.recover()
+        } else {
+            try run()
+        }
+        #expect(backend.destroys == 1 && retries == 1)
+        #expect(try store.load() == nil)
+    }
 }
 
 private final class ConnectedBackend: NativeCacheBackend {
     func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws {}
-    func detachNativeCache(on id: RunnerID) throws {}
+    var onDetach: () throws -> Void = {}
+    func detachNativeCache(on id: RunnerID) throws { try onDetach() }
 
     enum Failure { case configure, run, destroy }
     var platform = RunnerPlatform.linux
