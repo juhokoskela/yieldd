@@ -5,6 +5,7 @@ func runConnectedClient(
     recover: () throws -> Void,
     acquire: () throws -> RunnerMemoryReservation?,
     release: @escaping (RunnerMemoryReservation) -> Void,
+    prepareToPoll: () throws -> Void = {},
     poll: () throws -> ConnectedOffer?,
     decline: (ConnectedOffer) throws -> Void,
     run: (ConnectedOffer, RunnerMemoryAllocation, () -> Void) throws -> Void,
@@ -48,6 +49,13 @@ func runConnectedClient(
                 continue
             }
             reportedBlocked = false
+            do {
+                try prepareToPoll()
+            } catch where !isCancellation(error) {
+                retrying(error)
+                try wait(5)
+                continue
+            }
             guard let offer = try poll() else { try wait(1); continue }
             // Polling advertises a snapshot, not a reservation. Another slot can win
             // capacity before an offer arrives; decline without accepting credentials.

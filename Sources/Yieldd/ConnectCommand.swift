@@ -155,11 +155,12 @@ func runConnectedService(
                 output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
             }, acquire: {
                 try memory.tryAcquire(reserving: platform.memoryReservationBytes)
-            }, release: memory.release, poll: {
+            }, release: memory.release, prepareToPoll: {
+                try archiveService?.ensureRunning(checkCancellation: stop.check)
+            }, poll: {
                 control?.update(worker: workerID, phase: .idle)
                 return try client.poll()
             }, decline: client.decline, run: { offer, allocation, release in
-                try archiveService?.ensureRunning(checkCancellation: stop.check)
                 control?.assign(worker: workerID, offer: offer)
                 output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                 try runner.run(offer, memory: allocation, releaseCapacity: release)
