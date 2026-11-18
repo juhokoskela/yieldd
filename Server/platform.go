@@ -92,15 +92,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 				return nil, err
 			}
 			if savedID == 0 {
-				if err := p.loop.invoke(ctx, func(context.Context) error {
-					next := *worker.state
-					next.ScaleSetID = id
-					if err := worker.save(&next); err != nil {
-						return &journalWriteError{err}
-					}
-					*worker.state = next
-					return nil
-				}); err != nil {
+				if err := p.recordScaleSetID(ctx, id); err != nil {
 					return nil, err
 				}
 			}
@@ -109,6 +101,19 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 		return sessionClient.MessageSessionClient(ctx, p.scaleSetID, owner)
 	}
 	return p, nil
+}
+
+func (p *platformCoordinator) recordScaleSetID(ctx context.Context, id int) error {
+	return p.loop.invoke(ctx, func(context.Context) error {
+		worker := p.loop.worker
+		next := *worker.state
+		next.ScaleSetID = id
+		if err := worker.save(&next); err != nil {
+			return &journalWriteError{err}
+		}
+		*worker.state = next
+		return nil
+	})
 }
 
 func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRunners int) (*coordinator, error) {
