@@ -259,7 +259,7 @@ index facb97e..ff4d834 100644
          metrics.contains("process_start_time_seconds"),
          "process metrics are wired up"
 diff --git a/src/storage.rs b/src/storage.rs
-index 13862d9..090a1c0 100644
+index 13862d9..8047c6d 100644
 --- a/src/storage.rs
 +++ b/src/storage.rs
 @@ -6,10 +6,10 @@ mod leases;
@@ -271,27 +271,38 @@ index 13862d9..090a1c0 100644
  use std::fmt::Display;
  use std::io;
 -use std::sync::Arc;
-+use std::sync::{Arc, Mutex, PoisonError};
++use std::sync::{Arc, Mutex, PoisonError, Weak};
 
  use axum::body::Bytes;
  use base64::Engine as _;
-@@ -128,6 +128,7 @@ pub(crate) struct Storage {
+@@ -25,7 +25,7 @@ use sea_orm::{
+ use serde::Serialize;
+ use sha2::{Digest as _, Sha256};
+ use subtle::ConstantTimeEq as _;
+-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
++use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc};
+ use tokio_stream::wrappers::ReceiverStream;
+ use tokio_util::task::{AbortOnDropHandle, TaskTracker};
+ use utoipa::ToSchema;
+@@ -128,6 +128,8 @@ pub(crate) struct Storage {
      pub(crate) adapter: Arc<Adapter>,
      config: Arc<Config>,
      merges: TaskTracker,
++    upload_locks: Mutex<HashMap<i64, Weak<RwLock<()>>>>,
 +    part_indexes: Mutex<VecDeque<(String, Arc<[u64]>)>>,
      /// One permit per Merge this process may run at once. Each Merge holds storage connections
      /// and buffers for its whole duration; unbounded, a burst of first restores exhausts them.
      merge_slots: Arc<Semaphore>,
-@@ -333,6 +334,7 @@ impl Storage {
+@@ -333,6 +335,8 @@ impl Storage {
              merge_slots: Arc::new(Semaphore::new(config.max_concurrent_merges)),
              config,
              merges: TaskTracker::new(),
++            upload_locks: Mutex::default(),
 +            part_indexes: Mutex::default(),
          };
          storage.reconcile_storage_location_sizes().await?;
          Ok(storage)
-@@ -402,6 +404,40 @@ impl Storage {
+@@ -402,6 +406,40 @@ impl Storage {
              .collect()
      }
 
@@ -332,7 +343,7 @@ index 13862d9..090a1c0 100644
      async fn download_location(
          &self,
          location: &StorageLocation,
-@@ -410,34 +446,32 @@ impl Storage {
+@@ -410,34 +448,32 @@ impl Storage {
          if let Some((object, _)) = whole_object(location) {
              return self.adapter.download_stream(&object, range).await;
          }
@@ -384,7 +395,48 @@ index 13862d9..090a1c0 100644
              extent: Extent::Partial {
                  range: served,
                  size,
-@@ -659,6 +693,10 @@ impl Storage {
+@@ -617,6 +653,20 @@ impl Storage {
+         })
+     }
+
++    pub(crate) fn upload_lock(&self, id: i64) -> Arc<RwLock<()>> {
++        let mut locks = self
++            .upload_locks
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner);
++        if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
++            return lock;
++        }
++        locks.retain(|_, weak| weak.strong_count() != 0);
++        let lock = Arc::new(RwLock::new(()));
++        locks.insert(id, Arc::downgrade(&lock));
++        lock
++    }
++
+     /// Stores one Part of an upload. False when the upload was deleted in the meantime (the
+     /// written Part is then Orphaned Storage).
+     pub(crate) async fn upload_part(
+@@ -626,7 +676,8 @@ impl Storage {
+         stream: ByteStream,
+         length: Option<u64>,
+     ) -> Result<bool> {
+-        uploads::Entity::update_many()
++        let _active = self.upload_lock(upload.id).read_owned().await;
++        let started = uploads::Entity::update_many()
+             .col_expr(
+                 uploads::Column::StartedPartUploadCount,
+                 uploads::Column::StartedPartUploadCount.into_expr().add(1),
+@@ -634,6 +685,9 @@ impl Storage {
+             .filter(uploads::COLUMN.id.eq(upload.id))
+             .exec(&self.db.pool)
+             .await?;
++        if started.rows_affected == 0 {
++            return Ok(false);
++        }
+         self.adapter
+             .upload_stream(
+                 &part_object(&upload.folder_name, part_index),
+@@ -659,6 +713,10 @@ impl Storage {
      /// Reserves `identity` for a new upload; a concurrent reservation of the same identity loses
      /// on the unique reservation hash.
      pub(crate) async fn create_upload(&self, identity: &EntryIdentity) -> Result<CreatedUpload> {
@@ -395,7 +447,23 @@ index 13862d9..090a1c0 100644
          let id = random_upload_id();
          let capability = random_capability()?;
          let inserted = uploads::Entity::insert(uploads::ActiveModel {
-@@ -929,8 +967,12 @@ impl Storage {
+@@ -799,7 +857,14 @@ impl Storage {
+             .exec_without_returning(&tx)
+             .await?;
+         }
+-        uploads::Entity::delete_by_id(upload.id).exec(&tx).await?;
++        if uploads::Entity::delete_by_id(upload.id)
++            .exec(&tx)
++            .await?
++            .rows_affected
++            == 0
++        {
++            return Err(Failure::msg("upload expired before finalization"));
++        }
+         tx.commit().await?;
+         Ok(())
+     }
+@@ -929,8 +994,12 @@ impl Storage {
          location: &StorageLocation,
          range: Option<RangeRequest>,
      ) -> Result<DownloadStream, ReadError> {
@@ -411,18 +479,20 @@ index 13862d9..090a1c0 100644
          }
          self.part_sizes(location).await?;
 diff --git a/src/storage/filesystem.rs b/src/storage/filesystem.rs
-index f7fb624..5933975 100644
+index f7fb624..b62815e 100644
 --- a/src/storage/filesystem.rs
 +++ b/src/storage/filesystem.rs
-@@ -3,6 +3,7 @@
+@@ -3,7 +3,8 @@
  use std::collections::HashMap;
  use std::io::{self, SeekFrom};
  use std::path::{Component, Path, PathBuf};
+-use std::time::UNIX_EPOCH;
 +use std::sync::{Arc, Mutex};
- use std::time::UNIX_EPOCH;
++use std::time::{Duration, UNIX_EPOCH};
 
  use futures_util::{StreamExt as _, TryStreamExt as _};
-@@ -22,6 +23,42 @@ const READ_CHUNK_BYTES: usize = 256 * 1024;
+ use tokio::fs;
+@@ -22,6 +23,51 @@ const READ_CHUNK_BYTES: usize = 256 * 1024;
  #[derive(Debug)]
  pub(crate) struct FilesystemAdapter {
      root: PathBuf,
@@ -462,10 +532,19 @@ index f7fb624..5933975 100644
 +        writing: Arc::clone(writing),
 +        bytes,
 +    })
++}
++
++async fn next_upload_chunk(
++    stream: &mut ByteStream,
++    timeout: Duration,
++) -> io::Result<Option<axum::body::Bytes>> {
++    tokio::time::timeout(timeout, stream.try_next())
++        .await
++        .map_err(|_| io::ErrorKind::TimedOut)?
  }
 
  fn is_not_found(error: &io::Error) -> bool {
-@@ -50,7 +87,14 @@ impl FilesystemAdapter {
+@@ -50,7 +96,14 @@ impl FilesystemAdapter {
      pub(crate) async fn new(root: &Path) -> Result<Self> {
          let root = std::path::absolute(root)?;
          fs::create_dir_all(&root).await?;
@@ -481,7 +560,7 @@ index f7fb624..5933975 100644
      }
 
      /// Resolves an object name below the root, rejecting names that escape it.
-@@ -147,9 +191,22 @@ impl FilesystemAdapter {
+@@ -147,9 +200,22 @@ impl FilesystemAdapter {
          // stay perpetually fresh and never age out.
          let temp = self.safe_path(&format!("tmp-{}", uuid::Uuid::new_v4()))?;
          let written: Result<()> = async {
@@ -491,7 +570,8 @@ index f7fb624..5933975 100644
 +            let mut claim = Some(reserve(&self.root, &self.writing, WINDOW)?);
 +            let mut remaining = WINDOW;
              let mut file = fs::File::create(&temp).await?;
-             while let Some(chunk) = stream.try_next().await? {
+-            while let Some(chunk) = stream.try_next().await? {
++            while let Some(chunk) = next_upload_chunk(&mut stream, Duration::from_secs(60)).await? {
 +                let length = chunk.len() as u64;
 +                if length > remaining {
 +                    file.flush().await?;
@@ -504,7 +584,7 @@ index f7fb624..5933975 100644
              }
              file.flush().await?;
              if let Some(parent) = path.parent() {
-@@ -180,10 +237,14 @@ impl FilesystemAdapter {
+@@ -180,10 +246,14 @@ impl FilesystemAdapter {
              .collect::<Result<Vec<_>>>()?;
          let written = {
              let temp = temp.clone();
@@ -521,7 +601,7 @@ index f7fb624..5933975 100644
                  if let Some(parent) = path.parent() {
                      std::fs::create_dir_all(parent)?;
 diff --git a/src/storage/filesystem/tests.rs b/src/storage/filesystem/tests.rs
-index f2265a4..695825c 100644
+index f2265a4..ddf434a 100644
 --- a/src/storage/filesystem/tests.rs
 +++ b/src/storage/filesystem/tests.rs
 @@ -25,6 +25,19 @@ async fn read_all(stream: ByteStream) -> Vec<u8> {
@@ -544,6 +624,17 @@ index f2265a4..695825c 100644
  #[tokio::test]
  async fn rejects_names_escaping_the_root() {
      let (_dir, adapter) = adapter().await;
+@@ -127,3 +140,10 @@ async fn deletes_folders_and_top_level_files() {
+         "missing folder"
+     );
+ }
++
++#[tokio::test]
++async fn stalled_upload_releases_its_request() {
++    let mut stalled = stream::pending().boxed();
++    let result = next_upload_chunk(&mut stalled, Duration::from_millis(20)).await;
++    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
++}
 diff --git a/src/config.rs b/src/config.rs
 index d0e3bcf..bbebee2 100644
 --- a/src/config.rs
@@ -639,3 +730,152 @@ index 53b068c..e4e79af 100644
      );
      let disabled = config(&[("DOWNLOAD_IDLE_TIMEOUT_MS", "0")]).unwrap();
      assert_eq!(disabled.download_idle_timeout, None, "0 disables it");
+diff --git a/src/cleanup.rs b/src/cleanup.rs
+index 3839641..8fed83c 100644
+--- a/src/cleanup.rs
++++ b/src/cleanup.rs
+@@ -8,8 +8,8 @@ use futures_util::{StreamExt as _, stream};
+ use sea_orm::ActiveValue::Set;
+ use sea_orm::sea_query::{Expr, ExprTrait as _};
+ use sea_orm::{
+-    ColumnTrait as _, Condition, EntityTrait as _, QueryFilter as _, QuerySelect as _,
+-    QueryTrait as _, Select, TransactionTrait as _,
++    ColumnTrait as _, Condition, EntityTrait as _, QueryFilter as _, QueryOrder as _,
++    QuerySelect as _, QueryTrait as _, Select, TransactionTrait as _,
+ };
+ use tokio::time::MissedTickBehavior;
+
+@@ -236,22 +236,40 @@ impl Cleanup {
+     ) -> Result<()> {
+         let db = &self.storage.db;
+         let cutoff = now_ms().saturating_sub(MINUTE_MS);
+-        loop {
+-            let stalled: Vec<(i64, String)> = uploads::Entity::find()
+-                .select_only()
+-                .columns([uploads::Column::Id, uploads::Column::FolderName])
+-                .filter(
++        let expired = || {
++            Condition::all()
++                .add(uploads::COLUMN.created_at.lt(cutoff))
++                .add(
+                     Condition::any()
+                         .add(uploads::COLUMN.last_part_uploaded_at.is_null())
+                         .add(uploads::COLUMN.last_part_uploaded_at.lt(cutoff)),
+                 )
+-                .filter(uploads::COLUMN.created_at.lt(cutoff))
++        };
++        let mut after = i64::MIN;
++        loop {
++            let stalled: Vec<(i64, String)> = uploads::Entity::find()
++                .select_only()
++                .columns([uploads::Column::Id, uploads::Column::FolderName])
++                .filter(expired())
++                .filter(uploads::COLUMN.id.gt(after))
++                .order_by_asc(uploads::COLUMN.id)
+                 .limit(u64::from(PAGE_SIZE))
+                 .into_tuple()
+                 .all(&db.pool)
+                 .await?;
+             for (id, folder_name) in &stalled {
+-                uploads::Entity::delete_by_id(*id).exec(&db.pool).await?;
++                after = *id;
++                let Ok(_idle) = self.storage.upload_lock(*id).try_write_owned() else {
++                    continue;
++                };
++                // Another part can finish or finalize between selection and deletion.
++                let deleted = uploads::Entity::delete_by_id(*id)
++                    .filter(expired())
++                    .exec(&db.pool)
++                    .await?;
++                if deleted.rows_affected == 0 {
++                    continue;
++                }
+                 summary.deleted_uploads = summary.deleted_uploads.saturating_add(1);
+                 match self.storage.adapter.delete_folder(folder_name).await {
+                     Ok(deleted) => summary.reclaimed(deleted.objects, deleted.bytes),
+diff --git a/src/tests/cleanup.rs b/src/tests/cleanup.rs
+index 14106b5..c38208c 100644
+--- a/src/tests/cleanup.rs
++++ b/src/tests/cleanup.rs
+@@ -415,3 +415,81 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
+         "nothing was deleted"
+     );
+ }
++
++#[tokio::test]
++async fn expired_upload_cleanup_skips_progressing_parts_and_reclaims_abandoned_ones() {
++    use crate::db::uploads;
++    use axum::body::Bytes;
++    use futures_util::{StreamExt as _, stream};
++    use sea_orm::{ActiveValue::Set, QueryFilter as _};
++    let server = TestServer::start().await;
++    let storage = std::sync::Arc::clone(&server.state.storage);
++    let mut ids = Vec::new();
++    let mut transfers = Vec::new();
++    for key in ["slow", "abandoned"] {
++        let CreatedUpload::Created { upload, .. } =
++            storage.create_upload(&identity(key)).await.unwrap()
++        else {
++            panic!("fixture upload")
++        };
++        ids.push(upload.id);
++        transfers.push(upload);
++    }
++    uploads::Entity::update_many()
++        .set(uploads::ActiveModel {
++            created_at: Set(now_ms() - 120_000),
++            ..Default::default()
++        })
++        .filter(uploads::COLUMN.id.is_in(ids.clone()))
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    let active = transfers.remove(0);
++    let (entered, reading) = tokio::sync::oneshot::channel();
++    let (release, gate) = tokio::sync::oneshot::channel();
++    let writer = tokio::spawn(async move {
++        let stream = stream::once(async move {
++            entered.send(()).unwrap();
++            gate.await.unwrap();
++            Ok(Bytes::from_static(b"part"))
++        })
++        .boxed();
++        storage
++            .upload_part(&active, 0, stream, Some(4))
++            .await
++            .unwrap()
++    });
++    reading.await.unwrap();
++    let summary = server
++        .state
++        .cleanup
++        .run(Task::Uploads)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(summary.deleted_uploads, 1);
++    assert!(
++        uploads::Entity::find_by_id(ids[0])
++            .one(&server.db().pool)
++            .await
++            .unwrap()
++            .is_some()
++    );
++    assert!(
++        uploads::Entity::find_by_id(ids[1])
++            .one(&server.db().pool)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    release.send(()).unwrap();
++    assert!(writer.await.unwrap());
++    assert!(
++        server
++            .storage()
++            .complete_upload(&identity("slow"))
++            .await
++            .unwrap()
++            .is_some()
++    );
++}
