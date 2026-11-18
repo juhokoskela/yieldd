@@ -49,7 +49,11 @@ func (s *coordinatorLoop) run() error {
 		if s.worker.identityPaused() {
 			deadline = s.worker.identityRetryAt
 		}
+		protectDevices := s.protectColdDevices()
 		for _, l := range s.worker.state.Leases {
+			if protectDevices && l.Local == nil {
+				continue
+			}
 			if l.CleanupIntent {
 				retryPending = true
 				continue
@@ -118,12 +122,32 @@ func (s *coordinatorLoop) run() error {
 	}
 }
 
+func (s *coordinatorLoop) protectColdDevices() bool {
+	return !s.demandObserved && s.worker.demandUnavailable && s.worker.hasIssuedLocal()
+}
+
 func (s *coordinatorLoop) redrive() error {
 	if s.ctx.Err() != nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
 	defer cancel()
+	if s.protectColdDevices() {
+		for _, name := range s.worker.names() {
+			a := s.worker.assigned(name)
+			l := a.lease
+			if l.Local == nil || !(l.CleanupIntent || ((l.Local.Phase == localAccepted || l.Local.Phase == localDeclined) && l.Local.expired())) {
+				continue
+			}
+			if _, err := a.reconcile(ctx, true); err != nil {
+				if isJournalWrite(err) || onlyCancellation(err) {
+					return err
+				}
+				s.worker.logger.Warn("Local cleanup retained during session setup", "runner", name, "error", err)
+			}
+		}
+		return nil
+	}
 	_, err := s.worker.HandleDesiredRunnerCount(ctx, s.desiredCount)
 	return err
 }

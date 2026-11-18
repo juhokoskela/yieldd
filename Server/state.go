@@ -116,11 +116,27 @@ func openStore(path string) (*stateStore, error) {
 func (s *stateStore) Close() error { return errors.Join(s.lock.Close(), s.root.Close()) }
 
 func (s *stateStore) load(c config) (*state, error) {
-	file, err := s.root.Open("state.json")
+	value, err := s.read()
 	if errors.Is(err, os.ErrNotExist) {
 		value := &state{Config: c, Owner: uuid.NewString()}
 		return value, s.save(value)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if value.Config != c {
+		old := value.Config
+		if len(value.Leases) > 0 || old.Repository != c.Repository || old.Platform != c.Platform || old.DeviceID != c.DeviceID || old.validate() != nil || c.validate() != nil {
+			return nil, errors.New("state belongs to a different configuration; recover with its original configuration")
+		}
+		value.Config = c
+		return value, s.save(value)
+	}
+	return value, nil
+}
+
+func (s *stateStore) read() (*state, error) {
+	file, err := s.root.Open("state.json")
 	if err != nil {
 		return nil, err
 	}
@@ -181,14 +197,6 @@ func (s *stateStore) load(c config) (*state, error) {
 			}
 			slots[l.Local.Slot] = true
 		}
-	}
-	if value.Config != c {
-		old := value.Config
-		if len(value.Leases) > 0 || old.Repository != c.Repository || old.Platform != c.Platform || old.DeviceID != c.DeviceID || old.validate() != nil || c.validate() != nil {
-			return nil, errors.New("state belongs to a different configuration; recover with its original configuration")
-		}
-		value.Config = c
-		return &value, s.save(&value)
 	}
 	return &value, nil
 }

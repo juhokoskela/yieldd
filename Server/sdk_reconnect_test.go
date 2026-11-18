@@ -104,7 +104,7 @@ func TestSDKListenerReopensSessionAfterHTTPFailureWithoutLosingIssuedLease(t *te
 	if runErr != nil {
 		t.Fatal(runErr)
 	}
-	if created.Load() != 2 || closed.Load() != 1 || strings.Contains(logs.String(), "private-sdk-body") || !strings.Contains(logs.String(), "Demand listener reconnected") {
+	if created.Load() != 2 || closed.Load() != 1 || strings.Contains(logs.String(), "private-sdk-body") || !strings.Contains(logs.String(), "Serving scale set") {
 		t.Fatal("session replacement or safe diagnostics failed", created.Load(), closed.Load(), logs.String())
 	}
 }

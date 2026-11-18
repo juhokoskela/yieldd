@@ -209,6 +209,35 @@ func TestListenerReconnectBackoffCapsAndResetsAfterAHealthySession(t *testing.T)
 	})
 }
 
+func TestFailedQueueReleasesSessionBeforeDeploymentShutdown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _, _, req := localFixture(t)
+		closed := make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		p := testPlatform(t, ctx, c, &controlledMessages{initial: 1, close: func(context.Context) error { close(closed); return nil }})
+		done := make(chan error, 1)
+		go func() { done <- p.run(ctx, false) }()
+		synctest.Wait()
+		failure := errors.New("journal unavailable")
+		if err := p.loop.invoke(ctx, func(ctx context.Context) error {
+			c.save = func(*state) error { return failure }
+			_, err := c.acceptDevice(ctx, req)
+			return err
+		}); !errors.Is(err, failure) {
+			t.Fatal(err)
+		}
+		if err := <-done; !errors.Is(err, failure) {
+			t.Fatal(err)
+		}
+		select {
+		case <-closed:
+		default:
+			t.Fatal("failed queue retained its session")
+		}
+	})
+}
+
 func TestListenerCallbackFailureWinsOverConcurrentShutdown(t *testing.T) {
 	c, _, _, request := localFixture(t)
 	if _, err := c.acceptDevice(t.Context(), request); err != nil {

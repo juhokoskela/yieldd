@@ -129,6 +129,45 @@ func TestListenerRejectsOperationsAfterShutdown(t *testing.T) {
 	}
 }
 
+func TestColdStartDefersHostedCleanupWhileAMacCanRenew(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 1)
+		c.device.pollNow(0)
+		req := issueLocal(t, c, 0, 1)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+			t.Fatal(err)
+		}
+		for name, l := range c.state.Leases {
+			if l.Local == nil {
+				if err := c.assigned(name).beginCleanup("success"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		c.demandUnavailable = true
+		ctx, cancel := context.WithCancel(t.Context())
+		loop := newCoordinatorLoop(ctx, c)
+		startLoops(t, cancel, []*coordinatorLoop{loop})
+		time.Sleep(2 * cleanupRetryDelay)
+		synctest.Wait()
+		if err := loop.invoke(t.Context(), func(ctx context.Context) error {
+			if c.fallbackCount() != 1 || c.paused != nil {
+				return errors.New("hosted cleanup ran before demand")
+			}
+			auth, err := c.renewDevice(ctx, req)
+			if err == nil && !auth.Continue {
+				return errors.New("issued guest lost authorization")
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || w.dispatched != 1 {
+			t.Fatal("first demand did not resume cleanup", n, err)
+		}
+	})
+}
+
 func TestColdSessionSetupDoesNotBlockIssuedDevice(t *testing.T) {
 	c, world, store, req := localFixture(t)
 	if _, err := c.acceptDevice(t.Context(), req); err != nil {

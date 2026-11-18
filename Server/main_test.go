@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -170,16 +172,50 @@ func TestTargetedRecoveryLeavesOtherQueueAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	sibling.state.Config.Repository = "example/yieldd-bootstrap-sibling"
-	workers := []*platformCoordinator{{loop: newCoordinatorLoop(t.Context(), first)}, {loop: newCoordinatorLoop(t.Context(), sibling)}}
-	for _, target := range []string{"", "wrong/queue/linux/" + req.Runner, sibling.state.Config.Repository + "/linux/" + req.Runner} {
-		if err := recoverAssignment(t.Context(), workers, target); err == nil {
-			t.Fatalf("accepted %q", target)
-		}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := sibling.assigned(other.Runner).recover(ctx); !errors.Is(err, context.Canceled) || sibling.assigned(other.Runner).lease.CleanupIntent {
+		t.Fatal("canceled recovery changed the target", err)
 	}
-	if err := recoverAssignment(t.Context(), workers, sibling.state.Config.Repository+"/linux/"+other.Runner); err != nil {
+	if err := sibling.assigned(other.Runner).recover(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if sibling.assigned(other.Runner).lease != nil || first.assigned(req.Runner).lease == nil || sibling.assigned(name).lease == nil || world.getCalls != 0 {
 		t.Fatal("wrong recovery scope")
+	}
+}
+
+func TestTargetedRecoveryCannotInitializeOrRewriteQueues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig
+	path := filepath.Join(dir, queueDirectory(cfg))
+	store, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.load(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(path, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Fallback = "\"changed\""
+	other := cfg
+	other.Repository = "example/missing"
+	for _, queue := range []string{cfg.Repository, other.Repository, "wrong/queue"} {
+		if err := recoverAssignment(t.Context(), dir, []config{cfg, other}, queue+"/linux/"+fixtureRunner, "unused"); err == nil {
+			t.Fatal("accepted nonexistent target", queue)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(path, "state.json"))
+	if err != nil || string(after) != string(data) {
+		t.Fatal("recovery changed route", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, queueDirectory(other))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("recovery created queue", err)
 	}
 }
