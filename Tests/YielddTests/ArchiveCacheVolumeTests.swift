@@ -21,7 +21,12 @@ import Testing
     }
     let published = store.directory.appendingPathComponent("published")
     try Data("keep".utf8).write(to: published)
-    #expect(store.evictionBytes > 0 && store.evictionBytes <= 64 << 20)
+    var stats = statfs()
+    #expect(statfs(store.directory.path, &stats) == 0)
+    let capacity = UInt64(stats.f_bsize) * stats.f_blocks
+    let available = UInt64(stats.f_bsize) * stats.f_bavail
+    #expect(store.evictionBytes > 0)
+    #expect(2 * store.evictionBytes + min(capacity / 8, 64 << 20) < available)
 
     let paths = ["upload.pending", "merge.pending"].map { store.directory.appendingPathComponent($0) }
     let bytes = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
@@ -35,10 +40,12 @@ import Testing
     // A new owner adopts an interrupted mount with its unfinished bytes still charged.
     let recovered = try ArchiveCacheVolume(directory: root, mount: ArchiveCacheVolume.mountPoint(in: root), maximumMiB: 128, ownershipDescriptor: nil).open()
     #expect(recovered.directory == store.directory)
+    #expect(recovered.evictionBytes == store.evictionBytes)
     #expect(try String(contentsOf: published, encoding: .utf8) == "keep")
     try volume.detach()
     #expect(!FileManager.default.fileExists(atPath: store.directory.path))
     let reopened = try volume.open()
+    #expect(reopened.evictionBytes == store.evictionBytes)
     #expect(try paths.allSatisfy { try $0.resourceValues(forKeys: [.fileSizeKey]).fileSize != nil })
     for path in paths { try FileManager.default.removeItem(at: path) }
     #expect(try fillArchiveVolume(reopened.directory.appendingPathComponent("next"), bytes: 1 << 20) == 1 << 20)

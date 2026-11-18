@@ -52,7 +52,11 @@ struct ArchiveCacheVolume {
         // requested working directory disappear, so the helper cannot write to its parent.
         let store = mount.appendingPathComponent("store", isDirectory: true)
         try RunnerNetworkDirectories.createPrivateDirectory(store)
-        return Store(directory: store, evictionBytes: size / 2)
+        // A new archive is fully staged before the previous one can be evicted.
+        // Match the helper's write floor and leave room for APFS and SQLite overhead.
+        let writeFloor = min(size / 8, 64 << 20)
+        let filesystemAllowance = min(size / 16, 64 << 20)
+        return Store(directory: store, evictionBytes: (size - writeFloor - filesystemAllowance) / 2)
     }
 
     // User-owned agent state supports unprivileged mounts even when ownership

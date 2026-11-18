@@ -310,7 +310,7 @@ index facb97e..ff4d834 100644
          metrics.contains("process_start_time_seconds"),
          "process metrics are wired up"
 diff --git a/src/storage.rs b/src/storage.rs
-index 13862d9..5abc6d5 100644
+index 13862d9..dc9567a 100644
 --- a/src/storage.rs
 +++ b/src/storage.rs
 @@ -6,10 +6,10 @@ mod leases;
@@ -335,25 +335,27 @@ index 13862d9..5abc6d5 100644
  use tokio_stream::wrappers::ReceiverStream;
  use tokio_util::task::{AbortOnDropHandle, TaskTracker};
  use utoipa::ToSchema;
-@@ -128,6 +128,8 @@ pub(crate) struct Storage {
+@@ -128,6 +128,9 @@ pub(crate) struct Storage {
      pub(crate) adapter: Arc<Adapter>,
      config: Arc<Config>,
      merges: TaskTracker,
 +    upload_locks: Mutex<HashMap<i64, Weak<RwLock<()>>>>,
 +    part_indexes: Mutex<VecDeque<(String, Arc<[u64]>)>>,
++    eviction: tokio::sync::Mutex<()>,
      /// One permit per Merge this process may run at once. Each Merge holds storage connections
      /// and buffers for its whole duration; unbounded, a burst of first restores exhausts them.
      merge_slots: Arc<Semaphore>,
-@@ -333,6 +335,8 @@ impl Storage {
+@@ -333,6 +336,9 @@ impl Storage {
              merge_slots: Arc::new(Semaphore::new(config.max_concurrent_merges)),
              config,
              merges: TaskTracker::new(),
 +            upload_locks: Mutex::default(),
 +            part_indexes: Mutex::default(),
++            eviction: tokio::sync::Mutex::default(),
          };
          storage.reconcile_storage_location_sizes().await?;
          Ok(storage)
-@@ -402,6 +406,40 @@ impl Storage {
+@@ -402,6 +408,40 @@ impl Storage {
              .collect()
      }
 
@@ -394,7 +396,7 @@ index 13862d9..5abc6d5 100644
      async fn download_location(
          &self,
          location: &StorageLocation,
-@@ -410,34 +448,32 @@ impl Storage {
+@@ -410,34 +450,32 @@ impl Storage {
          if let Some((object, _)) = whole_object(location) {
              return self.adapter.download_stream(&object, range).await;
          }
@@ -446,7 +448,7 @@ index 13862d9..5abc6d5 100644
              extent: Extent::Partial {
                  range: served,
                  size,
-@@ -617,6 +653,20 @@ impl Storage {
+@@ -617,6 +655,20 @@ impl Storage {
          })
      }
 
@@ -467,7 +469,7 @@ index 13862d9..5abc6d5 100644
      /// Stores one Part of an upload. False when the upload was deleted in the meantime (the
      /// written Part is then Orphaned Storage).
      pub(crate) async fn upload_part(
-@@ -626,7 +676,8 @@ impl Storage {
+@@ -626,7 +678,8 @@ impl Storage {
          stream: ByteStream,
          length: Option<u64>,
      ) -> Result<bool> {
@@ -477,7 +479,7 @@ index 13862d9..5abc6d5 100644
              .col_expr(
                  uploads::Column::StartedPartUploadCount,
                  uploads::Column::StartedPartUploadCount.into_expr().add(1),
-@@ -634,6 +685,9 @@ impl Storage {
+@@ -634,6 +687,9 @@ impl Storage {
              .filter(uploads::COLUMN.id.eq(upload.id))
              .exec(&self.db.pool)
              .await?;
@@ -487,7 +489,7 @@ index 13862d9..5abc6d5 100644
          self.adapter
              .upload_stream(
                  &part_object(&upload.folder_name, part_index),
-@@ -659,11 +713,19 @@ impl Storage {
+@@ -659,11 +715,19 @@ impl Storage {
      /// Reserves `identity` for a new upload; a concurrent reservation of the same identity loses
      /// on the unique reservation hash.
      pub(crate) async fn create_upload(&self, identity: &EntryIdentity) -> Result<CreatedUpload> {
@@ -508,7 +510,7 @@ index 13862d9..5abc6d5 100644
              created_at: Set(now_ms()),
              key: Set(identity.key.clone()),
              version: Set(identity.version.clone()),
-@@ -673,39 +735,71 @@ impl Storage {
+@@ -673,39 +737,71 @@ impl Storage {
              capability_hash: Set(Some(capability_hash(&capability))),
              ..Default::default()
          })
@@ -595,7 +597,7 @@ index 13862d9..5abc6d5 100644
              let reason = format!(
                  "Not all parts have been uploaded (only {} of {} parts uploaded)",
                  upload.finished_part_upload_count, upload.started_part_upload_count
-@@ -717,17 +811,34 @@ impl Storage {
+@@ -717,17 +813,34 @@ impl Storage {
              .list_folder(&parts_folder(&upload.folder_name))
              .await?;
          let part_count = i32::try_from(parts.len()).unwrap_or(i32::MAX);
@@ -637,7 +639,7 @@ index 13862d9..5abc6d5 100644
          let location = StorageLocation {
              id: uuid::Uuid::new_v4().to_string(),
              folder_name: upload.folder_name.clone(),
-@@ -741,7 +852,7 @@ impl Storage {
+@@ -741,7 +854,7 @@ impl Storage {
 
          self.promote_upload(identity, &upload, &location).await?;
 
@@ -646,7 +648,7 @@ index 13862d9..5abc6d5 100644
              tracing::warn!(%error, "Capacity-based Eviction failed after upload completion");
          }
          if self.config.eager_merge && whole_object(&location).is_none() {
-@@ -768,45 +879,32 @@ impl Storage {
+@@ -768,45 +881,33 @@ impl Storage {
          storage_locations::Entity::insert(location.clone().into_active_model())
              .exec_without_returning(&tx)
              .await?;
@@ -706,10 +708,11 @@ index 13862d9..5abc6d5 100644
      /// Recency until usage is back at 90% of the budget.
 -    pub(crate) async fn enforce_storage_budget(&self) -> Result<()> {
 +    pub(crate) async fn enforce_storage_budget(&self, just_published: Option<&str>) -> Result<()> {
++        let _pass = self.eviction.lock().await;
          let filesystem_usage = match self.config.cache_max_size_bytes {
              Some(_) => None,
              None => self.adapter.filesystem_usage().transpose()?,
-@@ -851,6 +949,9 @@ impl Storage {
+@@ -851,13 +952,19 @@ impl Storage {
              if usage <= target {
                  break;
              }
@@ -719,7 +722,20 @@ index 13862d9..5abc6d5 100644
              let tx = self.db.pool.begin().await?;
              let deletion = delete_storage_location_if_unread(&tx, &id).await?;
              tx.commit().await?;
-@@ -929,8 +1030,12 @@ impl Storage {
+-            if deletion != LocationDeletion::Deleted {
+-                continue;
++            match deletion {
++                LocationDeletion::Deleted => {
++                    self.adapter.delete_folder(&folder_name).await?;
++                }
++                LocationDeletion::InUse => continue,
++                LocationDeletion::Missing => {}
+             }
+-            self.adapter.delete_folder(&folder_name).await?;
+             usage = match filesystem_usage.and_then(|_| self.adapter.filesystem_usage()) {
+                 Some(current) => current?.used_bytes,
+                 None => usage.saturating_sub(
+@@ -929,8 +1036,12 @@ impl Storage {
          location: &StorageLocation,
          range: Option<RangeRequest>,
      ) -> Result<DownloadStream, ReadError> {
@@ -734,7 +750,7 @@ index 13862d9..5abc6d5 100644
              return self.download_location(location, range).await;
          }
          self.part_sizes(location).await?;
-@@ -1105,6 +1210,25 @@ impl Storage {
+@@ -1105,6 +1216,25 @@ impl Storage {
                  whole_object(&location),
                  self.adapter.as_ref(),
              ) else {
@@ -1023,7 +1039,7 @@ index 53b068c..e4e79af 100644
      let disabled = config(&[("DOWNLOAD_IDLE_TIMEOUT_MS", "0")]).unwrap();
      assert_eq!(disabled.download_idle_timeout, None, "0 disables it");
 diff --git a/src/cleanup.rs b/src/cleanup.rs
-index 3839641..8fed83c 100644
+index 3839641..1f5f18c 100644
 --- a/src/cleanup.rs
 +++ b/src/cleanup.rs
 @@ -8,8 +8,8 @@ use futures_util::{StreamExt as _, stream};
@@ -1085,8 +1101,19 @@ index 3839641..8fed83c 100644
                  summary.deleted_uploads = summary.deleted_uploads.saturating_add(1);
                  match self.storage.adapter.delete_folder(folder_name).await {
                      Ok(deleted) => summary.reclaimed(deleted.objects, deleted.bytes),
+@@ -325,7 +343,9 @@ impl Cleanup {
+         let query = storage_locations::Entity::find()
+             .left_join(cache_entries::Entity)
+             .filter(cache_entries::COLUMN.id.is_null());
+-        self.delete_locations(query, summary, failures).await
++        self.delete_locations(query, summary, failures).await?;
++        // Retry eviction on startup and after any download leases expire.
++        self.storage.enforce_storage_budget(None).await
+     }
+
+     async fn parts(&self, summary: &mut CleanupSummary, failures: &mut Vec<Failure>) -> Result<()> {
 diff --git a/src/tests/cleanup.rs b/src/tests/cleanup.rs
-index 14106b5..e3b5703 100644
+index 14106b5..4a2dfa1 100644
 --- a/src/tests/cleanup.rs
 +++ b/src/tests/cleanup.rs
 @@ -77,14 +77,14 @@ async fn evicts_least_recently_used_entries_only_after_exceeding_the_budget() {
@@ -1184,7 +1211,7 @@ index 14106b5..e3b5703 100644
          1,
          "authorized by its upload"
      );
-@@ -415,3 +426,178 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
+@@ -415,3 +426,243 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
          "nothing was deleted"
      );
  }
@@ -1362,6 +1389,71 @@ index 14106b5..e3b5703 100644
 +        storage.delete_storage_location(&location.id).await.unwrap() == LocationDeletion::Deleted
 +    })
 +    .await;
++}
++
++#[tokio::test]
++async fn concurrent_budget_sweeps_keep_entries_that_fit() {
++    let server = TestServer::with(&[("CACHE_MAX_SIZE_BYTES", "30")]).await;
++    for index in 0..5 {
++        let key = format!("entry-{index}");
++        let mut location = unmerged_location(&key);
++        location.size_bytes = Some(10);
++        insert_location(server.db(), &location).await;
++        insert_entry(server.db(), &entry(&key, &location.id, index)).await;
++    }
++    let passes = (0..8).map(|_| server.storage().enforce_storage_budget(None));
++    for result in futures_util::future::join_all(passes).await {
++        result.unwrap();
++    }
++    assert_eq!(server.db().stored_bytes().await.unwrap(), 20);
++}
++
++#[tokio::test]
++async fn scheduled_cleanup_retries_eviction_after_the_download_lease_expires() {
++    use crate::db::storage_reader_leases;
++    let server = TestServer::with(&[
++        ("CACHE_MAX_SIZE_BYTES", "10"),
++        ("MAX_CONCURRENT_MERGES", "0"),
++    ])
++    .await;
++    let storage = server.storage();
++    let first = save_parts(storage, "one", &[b"12345678".to_vec()]).await;
++    assert!(
++        storage
++            .cache_entry_with_download_url(&super::harness::query(&["one"]))
++            .await
++            .unwrap()
++            .is_some()
++    );
++    let second = save_parts(storage, "two", &[b"abcdefgh".to_vec()]).await;
++    assert!(
++        storage
++            .cache_entry_with_download_url(&super::harness::query(&["two"]))
++            .await
++            .unwrap()
++            .is_some()
++    );
++    server
++        .state
++        .cleanup
++        .run(Task::StorageLocations)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(server.db().stored_bytes().await.unwrap(), 16);
++    storage_reader_leases::Entity::delete_by_id(first.id)
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    server
++        .state
++        .cleanup
++        .run(Task::StorageLocations)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(server.db().stored_bytes().await.unwrap(), 8);
++    assert!(find_location(server.db(), &second.id).await.is_some());
 +}
 diff --git a/src/db.rs b/src/db.rs
 index 76dab62..6530f47 100644
