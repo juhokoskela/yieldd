@@ -34,6 +34,7 @@ final class ArchiveCacheService: @unchecked Sendable {
     func ensureRunning(checkCancellation: () throws -> Void) throws {
         try lock.withLock {
             if child?.isRunning == true { return }
+            stopLocked()
             try checkCancellation()
             // Recheck the volume on every launch, including after a helper crash.
             try storage.validate(stateDirectory: stateDirectory)
@@ -83,10 +84,11 @@ final class ArchiveCacheService: @unchecked Sendable {
     private func stopLocked() {
         guard let child else { return }
         if child.isRunning { child.terminate() }
-        // Closing stdin also handles an abrupt agent exit and an unresponsive transfer.
-        try? lifetime?.fileHandleForWriting.close()
+        // Let ordinary shutdown finish database work. Owner EOF also stops the helper
+        // after an uncatchable exit, or if an HTTP transfer is still outstanding.
         let deadline = DispatchTime.now() + 2
         while child.isRunning && DispatchTime.now() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        try? lifetime?.fileHandleForWriting.close()
         if child.isRunning { _ = kill(child.processIdentifier, SIGKILL) }
         child.waitUntilExit()
         self.child = nil

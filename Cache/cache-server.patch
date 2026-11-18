@@ -231,3 +231,15 @@ index e2e2fcf..7149ab3 100644
      };
      assert_eq!(
          scope.read_scopes(),
+diff --git a/src/tests/cache_protocol.rs b/src/tests/cache_protocol.rs
+index facb97e..ff4d834 100644
+--- a/src/tests/cache_protocol.rs
++++ b/src/tests/cache_protocol.rs
+@@ -302,6 +302,7 @@ async fn counts_uploads_hits_misses_and_stored_bytes() {
+         "prometheus text format"
+     );
+     let metrics = response.text().await.unwrap();
++    #[cfg(target_os = "linux")]
+     assert!(
+         metrics.contains("process_start_time_seconds"),
+         "process metrics are wired up"

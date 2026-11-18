@@ -155,15 +155,19 @@ func (c *relayCache) bind(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job authorization required", http.StatusUnauthorized)
 		return
 	}
-	if _, err := c.verify(r.Context(), token); err != nil {
-		http.Error(w, "job authorization rejected", http.StatusUnauthorized)
-		return
-	}
 	digest := sha256.Sum256([]byte(token))
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.bound && subtle.ConstantTimeCompare(c.digest[:], digest[:]) != 1 {
-		http.Error(w, "runner already bound", http.StatusConflict)
+	if c.bound {
+		if subtle.ConstantTimeCompare(c.digest[:], digest[:]) != 1 {
+			http.Error(w, "runner already bound", http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if _, err := c.verify(r.Context(), token); err != nil {
+		http.Error(w, "job authorization rejected", http.StatusUnauthorized)
 		return
 	}
 	c.bound, c.digest = true, digest
