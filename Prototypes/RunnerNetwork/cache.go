@@ -27,6 +27,7 @@ const (
 type relayCache struct {
 	client    *http.Client
 	proxy     *httputil.ReverseProxy
+	artifacts *httputil.ReverseProxy
 	native    http.Handler
 	mu        sync.Mutex
 	bound     bool
@@ -34,7 +35,7 @@ type relayCache struct {
 	transfers map[string]struct{}
 }
 
-func newRelayCache(socket, directory string) *relayCache {
+func newRelayCache(socket, directory string, results *http.Transport) *relayCache {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -54,6 +55,29 @@ func newRelayCache(socket, directory string) *relayCache {
 		ModifyResponse: c.rememberTransfer,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 			http.Error(w, "cache service unavailable", http.StatusBadGateway)
+		},
+	}
+	c.artifacts = &httputil.ReverseProxy{
+		Transport: results,
+		ErrorLog:  log.New(io.Discard, "", 0),
+		Rewrite: func(p *httputil.ProxyRequest) {
+			p.Out.URL.Scheme, p.Out.URL.Host, p.Out.Host = "https", resultsHost, resultsHost
+			p.Out.Header = make(http.Header)
+			for _, key := range []string{"Authorization", "Content-Type", "Accept", "User-Agent"} {
+				if value := p.In.Header.Get(key); value != "" {
+					p.Out.Header.Set(key, value)
+				}
+			}
+		},
+		ModifyResponse: func(r *http.Response) error {
+			if r.StatusCode >= 300 && r.StatusCode < 400 {
+				return errors.New("unexpected redirect from artifact metadata service")
+			}
+			r.Header.Del("X-Yieldd-Transfer")
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			http.Error(w, "GitHub artifact service unavailable", http.StatusBadGateway)
 		},
 	}
 	return c
@@ -86,10 +110,17 @@ func (c *relayCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.proxy.ServeHTTP(w, r)
 		return
 	}
-	cacheMethod := rpcMethod(p, cacheRPC)
-	artifactMethod := rpcMethod(p, artifactRPC)
-	native := p == "/yieldd/native/open" || p == "/yieldd/native/save"
-	if r.Method != http.MethodPost || (!cacheMethod && !artifactMethod && !native) {
+	var upstream http.Handler
+	switch p {
+	case cacheRPC + "GetCacheEntryDownloadURL", cacheRPC + "CreateCacheEntry", cacheRPC + "FinalizeCacheEntryUpload":
+		upstream = c.proxy
+	case artifactRPC + "CreateArtifact", artifactRPC + "FinalizeArtifact", artifactRPC + "ListArtifacts",
+		artifactRPC + "GetSignedArtifactURL", artifactRPC + "DeleteArtifact":
+		upstream = c.artifacts
+	case "/yieldd/native/open", "/yieldd/native/save":
+		upstream = c.native
+	}
+	if upstream == nil || r.Method != http.MethodPost || r.URL.RawQuery != "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -97,18 +128,8 @@ func (c *relayCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job authorization required", http.StatusUnauthorized)
 		return
 	}
-	// Twirp requests contain metadata. Archive bytes only use the signed transfer routes.
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-	if native {
-		c.native.ServeHTTP(w, r)
-		return
-	}
-	c.proxy.ServeHTTP(w, r)
-}
-
-func rpcMethod(p, service string) bool {
-	method, ok := strings.CutPrefix(p, service)
-	return ok && method != "" && !strings.Contains(method, "/")
+	upstream.ServeHTTP(w, r)
 }
 
 func transferPath(p string) bool {

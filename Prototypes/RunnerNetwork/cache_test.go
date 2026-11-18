@@ -9,7 +9,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -39,13 +42,14 @@ func TestArchiveRouting(t *testing.T) {
 		}}})
 	}))
 	defer issuer.Close()
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != artifactRPC+"CreateArtifact" {
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != resultsHost || r.URL.Path != artifactRPC+"CreateArtifact" {
 			t.Errorf("unexpected GitHub forwarding: %s", r.URL.Path)
 		}
 		io.WriteString(w, "fixture artifact")
 	}))
 	defer origin.Close()
+	results := fixtureResultsTransport(t, origin)
 	token := func(repo, ref string, permission int) string {
 		grants, err := json.Marshal([]map[string]any{{"Scope": ref, "Permission": permission}})
 		if err != nil {
@@ -73,7 +77,6 @@ func TestArchiveRouting(t *testing.T) {
 	p.Dir = dir
 	p.Env = []string{"API_BASE_URL=http://" + cacheAddress, "YIELDD_CACHE_SOCKET=" + socket,
 		"ACTIONS_TOKEN_ISSUER=" + issuer.URL, "ACTIONS_TOKEN_JWKS_URL=" + issuer.URL + "/jwks",
-		"DEFAULT_ACTIONS_RESULTS_URL=" + origin.URL,
 		`YIELDD_CACHE_POLICY={"trustedGroups":[[{"repositoryID":"123","ref":"refs/heads/main"},{"repositoryID":"456","ref":"refs/heads/master"}]]}`}
 	owner, err := p.StdinPipe()
 	if err != nil {
@@ -122,7 +125,7 @@ func TestArchiveRouting(t *testing.T) {
 		return rec.Body.Bytes()
 	}
 	newGuest := func(bearer string) *relayCache {
-		c := newRelayCache(socket, dir)
+		c := newRelayCache(socket, dir, results)
 		t.Cleanup(c.client.CloseIdleConnections)
 		request(c, "POST", "/yieldd/bind", bearer, "", 204)
 		return c
@@ -147,7 +150,7 @@ func TestArchiveRouting(t *testing.T) {
 	reader := token("456", "refs/heads/master", 1)
 	writer := newGuest(primary)
 	request(writer, "POST", "/yieldd/bind", reader, "", 409)
-	unbound := newRelayCache(socket, dir)
+	unbound := newRelayCache(socket, dir, results)
 	t.Cleanup(unbound.client.CloseIdleConnections)
 	request(unbound, "POST", "/yieldd/bind", "", "", 401)
 	noAccess := newGuest("invalid")
@@ -156,7 +159,11 @@ func TestArchiveRouting(t *testing.T) {
 	request(noAccess, "POST", "/yieldd/native/open", "invalid", "", 403)
 	artifactOnly := token("123", "refs/heads/main", 0)
 	artifactGuest := newGuest(artifactOnly)
-	if got := request(artifactGuest, "POST", artifactRPC+"CreateArtifact", artifactOnly, "{}", 200); string(got) != "fixture artifact" {
+	offline := newRelayCache(filepath.Join(dir, "missing-archive.sock"), dir, results)
+	t.Cleanup(offline.client.CloseIdleConnections)
+	request(offline, "POST", "/yieldd/bind", artifactOnly, "", 204)
+	request(offline, "POST", cacheRPC+"CreateCacheEntry", artifactOnly, "{}", 502)
+	if got := request(offline, "POST", artifactRPC+"CreateArtifact", artifactOnly, "{}", 200); string(got) != "fixture artifact" {
 		t.Fatal("artifact-only job could not use GitHub")
 	}
 	rpc(artifactGuest, "CreateCacheEntry", artifactOnly, 401)
@@ -184,5 +191,80 @@ func TestArchiveRouting(t *testing.T) {
 	}
 	if got := request(writer, "POST", artifactRPC+"CreateArtifact", primary, "{}", 200); string(got) != "fixture artifact" {
 		t.Fatal("artifact forwarding failed")
+	}
+}
+
+func fixtureResultsTransport(t *testing.T, origin *httptest.Server) *http.Transport {
+	t.Helper()
+	results := origin.Client().Transport.(*http.Transport).Clone()
+	results.TLSClientConfig.ServerName = "example.com" // SAN of the httptest certificate.
+	results.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr != resultsHost+":443" {
+			t.Errorf("unexpected artifact destination %q", addr)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, origin.Listener.Addr().String())
+	}
+	t.Cleanup(results.CloseIdleConnections)
+	return results
+}
+
+func TestArtifactMetadataRequiresBoundTokenAndPinnedOrigin(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int32
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Host != resultsHost || r.Header.Get("Authorization") != "Bearer bound-job" || r.Header.Get("X-Yieldd-Transfer") != "" {
+			t.Error("unexpected origin or forwarded credential headers")
+		}
+		if r.URL.Path == artifactRPC+"ListArtifacts" {
+			http.Redirect(w, r, "http://127.0.0.1/private", http.StatusTemporaryRedirect)
+			return
+		}
+		io.WriteString(w, "artifact metadata")
+	}))
+	defer origin.Close()
+	c := newRelayCache(filepath.Join(dir, "absent.sock"), dir, fixtureResultsTransport(t, origin))
+	t.Cleanup(c.client.CloseIdleConnections)
+	request := func(route, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", route, strings.NewReader("{}"))
+		r.Host = "guest.invalid"
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("X-Yieldd-Transfer", "private")
+		w := httptest.NewRecorder()
+		c.ServeHTTP(w, r)
+		return w
+	}
+	for _, test := range []struct {
+		route, token string
+		want         int
+	}{
+		{artifactRPC + "CreateArtifact", "bound-job", 401},
+		{"/yieldd/bind", "bound-job", 204},
+		{artifactRPC + "CreateArtifact", "other", 401},
+		{artifactRPC + "UnknownMethod", "bound-job", 404},
+		{artifactRPC + "ListArtifacts?destination=local", "bound-job", 404},
+		{cacheRPC + "UnknownMethod", "bound-job", 404},
+		{artifactRPC + "ListArtifacts", "bound-job", 502},
+		{artifactRPC + "FinalizeArtifact", "bound-job", 200},
+	} {
+		w := request(test.route, test.token)
+		if w.Code != test.want || w.Header().Get("Location") != "" {
+			t.Fatalf("%s: %d (want %d)", test.route, w.Code, test.want)
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("origin received %d requests, want 2", got)
+	}
+}
+
+func TestResultsTransportRejectsOtherDestinations(t *testing.T) {
+	transport := githubResultsTransport(new(denialCounters))
+	if transport.Proxy != nil || transport.TLSClientConfig != nil && transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("results transport must verify TLS and avoid host proxies")
+	}
+	for _, target := range []string{"127.0.0.1:443", resultsHost + ":80", "github.com:443"} {
+		if _, err := transport.DialContext(t.Context(), "tcp", target); !errors.Is(err, errDenied) {
+			t.Errorf("expected destination rejection for %s: %v", target, err)
+		}
 	}
 }

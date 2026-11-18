@@ -136,7 +136,9 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 		return err
 	}
 	if cacheSocket != "" {
-		cache := newRelayCache(cacheSocket, filepath.Dir(path))
+		results := githubResultsTransport(counts)
+		defer results.CloseIdleConnections()
+		cache := newRelayCache(cacheSocket, filepath.Dir(path), results)
 		listener, err := network.Listen("tcp", cacheAddress)
 		if err != nil {
 			return err
