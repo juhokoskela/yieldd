@@ -93,6 +93,27 @@ func TestExpiredOfferRechecksDemandBeforePaidFallback(t *testing.T) {
 	}
 }
 
+func TestInterruptedIssuedCleanupCannotFundAnExpiredOffer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := concurrentFixture(t, 2)
+		issued := issueLocal(t, c, 0, 2)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+			t.Fatal(err)
+		}
+		offer := c.device.pollNow(1)
+		w.lookupErr = &apiError{502}
+		if err := c.completeDevice(t.Context(), issued); err == nil || !c.state.Leases[issued.Runner].CleanupIntent {
+			t.Fatal("missing issued cleanup", err)
+		}
+		w.assignedJobs = 0
+		time.Sleep(offerLifetime)
+		_, err := c.HandleDesiredRunnerCount(t.Context(), 2)
+		if err != nil || w.dispatched != 0 || w.demandCalls == 0 || c.state.Leases[issued.Runner] == nil || offer == nil {
+			t.Fatal("paid fallback bypassed pending cleanup", err, w.events)
+		}
+	})
+}
+
 func TestIdentityPauseSurvivesTransientVerificationFailures(t *testing.T) {
 	for _, failure := range []error{&apiError{status: 502}, &apiError{status: 429}, context.DeadlineExceeded} {
 		for _, slots := range []int{0, 1} {

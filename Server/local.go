@@ -233,7 +233,7 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 	}
 	expired := l.Local.expired()
 	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull()))
-	if expired && !retire && a.refreshDemand {
+	if expired && !retire && a.needsDemandRefresh() {
 		// Cleanup may have invalidated the demand that justified this offer.
 		count, err := a.currentDemand(ctx)
 		if err != nil {

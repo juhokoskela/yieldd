@@ -100,6 +100,53 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 	}
 }
 
+func TestPermanentHostedReadFailureBlocksExpiredOffer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 3)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		c.device.pollNow(0)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+			t.Fatal(err)
+		}
+		c.bootstrap = bootstrapLookup{w, func(context.Context, int64) (*workflowRun, error) { return nil, fmt.Errorf("invalid status document") }}
+		time.Sleep(offerLifetime)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err == nil || w.dispatched != 1 || c.verificationPaused() {
+			t.Fatal("permanent read failed to stop provisioning", w.dispatched, err)
+		}
+	})
+}
+
+func TestMissingRunAndTimedOutSiblingGetFreshVerification(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 2)
+		for range 2 {
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+				t.Fatal(err)
+			}
+		}
+		missing := c.state.Leases[c.names()[0]].RunID
+		c.bootstrap = bootstrapLookup{w, func(ctx context.Context, id int64) (*workflowRun, error) {
+			if id == missing {
+				return nil, &missingWorkflowRun{id}
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if _, err := c.HandleDesiredRunnerCount(ctx, 2); err != nil || !c.verificationPaused() {
+			t.Fatal("missing run suppressed timeout retry", err, c.paused)
+		}
+		c.bootstrap = w
+		time.Sleep(cleanupRetryDelay)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused != nil || w.dispatched != 2 {
+			t.Fatal("fresh read did not resume verification", err, c.paused)
+		}
+	})
+}
+
 func TestInitialMixedIdentityAndTransientFailuresRetry(t *testing.T) {
 	for _, failure := range []error{&apiError{429}, &apiError{502}, context.DeadlineExceeded} {
 		for _, local := range []bool{false, true} {

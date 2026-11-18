@@ -112,6 +112,18 @@ func (c *coordinator) hasIssuedLocal() bool {
 	return false
 }
 
+func (c *coordinator) needsDemandRefresh() bool {
+	if c.refreshDemand {
+		return true
+	}
+	for _, l := range c.state.Leases {
+		if l.CleanupIntent && l.Local != nil && l.Local.Phase == localIssued {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *coordinator) assigned(name string) *assignment {
 	return &assignment{coordinator: c, lease: c.state.Leases[name]}
 }
@@ -284,7 +296,13 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			for _, name := range c.names() {
 				if result := runs[name]; result != nil && result.err != nil {
 					unverifiedRunners = append(unverifiedRunners, name)
-					failures = append(failures, statusReadError(result.err))
+					var missing *missingWorkflowRun
+					if errors.As(result.err, &missing) {
+						// Absence needs a runner lookup on a fresh context.
+						failures = append(failures, statusReadError(ctx.Err()))
+					} else {
+						failures = append(failures, statusReadError(result.err))
+					}
 				}
 			}
 			if len(failures) > 0 {
@@ -334,7 +352,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			hostedCleanupAttempted, hostedCleanupCompleted = true, done
 			c.lastHostedCleanup = name
 		}
-		provisioningPaused = provisioningPaused || retryableBootstrapVerification(err)
+		provisioningPaused = provisioningPaused || (local == nil && err != nil)
 		hostedProvisioned = hostedProvisioned || (!l.DispatchIntent && a.lease != nil && a.lease.DispatchIntent)
 		if retryableBootstrapVerification(err) {
 			unverifiedRunners = append(unverifiedRunners, name)
@@ -396,7 +414,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		return nil
 	}
 	listenerCount := count
-	if count > 0 && c.refreshDemand {
+	if count > 0 && c.needsDemandRefresh() {
 		var err error
 		count, err = c.currentDemand(ctx)
 		if err != nil {
