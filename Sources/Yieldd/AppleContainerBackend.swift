@@ -17,6 +17,7 @@ final class AppleContainerBackend: RunnerBackend {
     let executor: any ProcessExecuting
     let dockerReadiness: DockerReadiness
     private let loadStorage: () throws -> RunnerStorage?
+    private let ownershipDescriptor: Int32?
     private let stateDirectory: URL
     private let network: any RunnerNetworking
     private let checkCancellation: () throws -> Void
@@ -32,6 +33,7 @@ final class AppleContainerBackend: RunnerBackend {
         containerURL: URL,
         executor: any ProcessExecuting,
         stateDirectory: URL,
+        ownershipDescriptor: Int32? = nil,
         loadStorage: (() throws -> RunnerStorage?)? = nil,
         network: (any RunnerNetworking)? = nil,
         checkCancellation: @escaping () throws -> Void = {},
@@ -41,6 +43,7 @@ final class AppleContainerBackend: RunnerBackend {
         self.containerURL = containerURL
         self.executor = executor
         self.dockerReadiness = dockerReadiness
+        self.ownershipDescriptor = ownershipDescriptor
         self.stateDirectory = stateDirectory
         self.network = try network ?? RunnerNetwork(stateDirectory: stateDirectory, platform: .linux)
         self.checkCancellation = checkCancellation
@@ -77,7 +80,7 @@ final class AppleContainerBackend: RunnerBackend {
                 "--cpus", String(Self.virtualCPUs),
                 "--memory", Self.memoryArgument,
                 Self.image,
-            ], timeout: Self.creationTimeout, checking: relay.check)
+            ], timeout: Self.creationTimeout, ownershipDescriptor: ownershipDescriptor, checking: relay.check)
             let result = try run(["machine", "inspect", id.value], timeout: Self.inspectionTimeout,
                                  outputCapture: .tail(maxBytes: 64 * 1_024), checking: relay.check)
             try Self.requireRelayConfiguration(result.stdout, id: id, socket: relay.socketURL)
@@ -203,6 +206,7 @@ final class AppleContainerBackend: RunnerBackend {
         timeout: TimeInterval? = nil,
         outputCapture: ProcessOutputCapture = .all,
         cancellable: Bool = true,
+        ownershipDescriptor: Int32? = nil,
         checking: @escaping () throws -> Void = {}
     ) throws -> ProcessResult {
         let request = ProcessRequest(
@@ -211,7 +215,8 @@ final class AppleContainerBackend: RunnerBackend {
             standardInput: standardInput,
             timeout: timeout,
             outputCapture: outputCapture,
-            cancellable: cancellable
+            cancellable: cancellable,
+            ownershipDescriptor: ownershipDescriptor
         )
         let result = try executor.execute(request, checking: checking)
         return try result.requireSuccess(for: request)

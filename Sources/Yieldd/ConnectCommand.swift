@@ -69,6 +69,7 @@ func runConnectedService(
             try RunnerStorage.required(in: leaseStore.directory).validateTemplateLocation(template)
         }
         let directory = leaseStore.directory
+        let ownershipDescriptor = leaseStore.ownershipDescriptor
         // Recover every persisted platform, even if it is no longer enabled.
         // macOS recovery removes abandoned clones without requiring the template.
         try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
@@ -79,7 +80,7 @@ func runConnectedService(
             output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
             return
         }
-        try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
+        try removeUnleasedRunnerFiles(in: directory, checkCancellation: stop.check)
         let storage = try RunnerStorage.required(in: directory)
         try storage.validate(stateDirectory: directory)
         try RunnerNetwork.requireRelay()
@@ -121,7 +122,7 @@ func runConnectedService(
             switch worker.backend {
             case let .linux(containerURL):
                 backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
-                    stateDirectory: directory,
+                    stateDirectory: directory, ownershipDescriptor: ownershipDescriptor,
                     checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                     dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
             case let .macOS(templateURL):

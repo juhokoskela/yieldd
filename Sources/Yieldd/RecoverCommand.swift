@@ -15,7 +15,7 @@ struct RecoverCommand: ParsableCommand {
             try store.recoverMachineTest {
                 try AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: store.directory)
             }
-            try removeUnleasedRunnerFiles(in: store.directory, keeping: [], checkCancellation: stop.check)
+            try removeUnleasedRunnerFiles(in: store.directory, checkCancellation: stop.check)
         }
         print("Recovery complete. No new machines were started.")
     }

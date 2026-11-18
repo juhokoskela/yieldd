@@ -282,7 +282,16 @@ func machineTestJournalAndOwnershipSurviveKilledCreator() async throws {
             let backend = RecordingRunnerBackend()
             backend.onCreate = {
                 try FileHandle.standardOutput.write(contentsOf: Data(uuid.uuidString.utf8))
-                raise(SIGKILL)
+                let script = """
+                    kill -KILL "$PPID"
+                    for i in {1..200}; do
+                        if [[ -e "$1/release" ]]; then touch "$1/published"; exit 0; fi
+                        sleep 0.05
+                    done
+                    exit 1
+                    """
+                _ = try ProcessExecutor().execute(ProcessRequest(executableURL: URL(fileURLWithPath: "/bin/bash"),
+                    arguments: ["-c", script, "create", directory.path], ownershipDescriptor: store.ownershipDescriptor))
             }
             try machineTestRunner(backend: backend).run(
                 id: RunnerID(value: "yieldd-test-\(uuid.uuidString.lowercased())"), journal: store)
@@ -291,6 +300,20 @@ func machineTestJournalAndOwnershipSurviveKilledCreator() async throws {
     let uuid = try #require(UUID(uuidString: String(decoding: result.standardOutputContent, as: UTF8.self)))
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("machine-crash-\(uuid)")
     defer { try? FileManager.default.removeItem(at: directory) }
+    #expect(throws: RunnerOwnershipError.alreadyRunning) {
+        try withRunnerOwnership(in: directory, recoveringMachineTest: true) { _ in }
+    }
+    try Data().write(to: directory.appendingPathComponent("release"))
+    let deadline = ContinuousClock.now + .seconds(5)
+    while true {
+        do {
+            try withRunnerOwnership(in: directory, recoveringMachineTest: true) { _ in }
+            break
+        } catch RunnerOwnershipError.alreadyRunning where ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+    }
+    #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("published").path))
     let recovered = RecordingRunnerBackend()
     try withRunnerOwnership(in: directory, recoveringMachineTest: true) { store in
         try store.recoverMachineTest { recovered }
