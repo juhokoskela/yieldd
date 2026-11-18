@@ -54,7 +54,7 @@ func TestNativeCacheExchangeUsesVerifiedScopesAndMatchingResponse(t *testing.T) 
 	if busy.Code != http.StatusConflict {
 		t.Fatalf("concurrent request: %d", busy.Code)
 	}
-	response, err := json.Marshal(nativeCacheResponse{ID: msg.ID, Path: "/mnt/yieldd-cache"})
+	response, err := json.Marshal(nativeCacheResponse{ID: msg.ID, Writable: new(true)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestNativeCacheExchangeUsesVerifiedScopesAndMatchingResponse(t *testing.T) 
 		t.Fatal(reply.Body.String())
 	}
 	var actual nativeCacheResponse
-	if err := json.Unmarshal(reply.Body.Bytes(), &actual); err != nil || actual.Path != "/mnt/yieldd-cache" {
+	if err := json.Unmarshal(reply.Body.Bytes(), &actual); err != nil || actual.Writable == nil || !*actual.Writable {
 		t.Fatalf("bad response: %q", reply.Body)
 	}
 	if _, err := os.Stat(requestFile); !errors.Is(err, os.ErrNotExist) {

@@ -21,15 +21,16 @@ final class NativeCacheSession {
     }
     private struct Response: Encodable {
         let id: String
-        var path: String?
+        var writable: Bool?
         var error: String?
     }
 
     private enum State {
         case fresh
-        case attached(Grants)
-        case saveRequested(Grants)
-        case sealed
+        case opening
+        case attached(Grants, NativeCacheDisk)
+        case saveRequested(Grants, NativeCacheDisk)
+        case sealed(NativeCacheDisk)
     }
 
     private let id: RunnerID
@@ -67,23 +68,23 @@ final class NativeCacheSession {
             switch request.operation {
             case .open:
                 switch state {
-                case .attached(let grants) where grants == request.grants:
+                case .attached(let grants, _) where grants == request.grants:
                     break
                 case .fresh:
-                    // The store refuses a second image once it has recorded this checkout,
-                    // including when attachment allocated a device and subsequently failed.
+                    // Either operation can allocate resources before throwing.
+                    state = .opening
                     let disk = try store.open(id, readable: request.grants.read_scopes, writable: request.grants.write_scope)
                     try backend.attachNativeCache(image: disk.url, cold: disk.isCold, on: id)
-                    state = .attached(request.grants)
+                    state = .attached(request.grants, disk)
                 default:
                     throw NativeCacheSessionError.inconsistentGrant
                 }
-                response.path = backend.platform == .macOS ? "/Volumes/YielddCache" : "/mnt/yieldd-cache"
+                response.writable = request.grants.write_scope != nil
             case .save:
                 switch state {
-                case let .attached(grants), let .saveRequested(grants):
+                case let .attached(grants, disk), let .saveRequested(grants, disk):
                     guard grants == request.grants else { throw NativeCacheSessionError.inconsistentGrant }
-                    if grants.write_scope != nil { state = .saveRequested(grants) }
+                    if grants.write_scope != nil { state = .saveRequested(grants, disk) }
                 default:
                     throw NativeCacheSessionError.inconsistentGrant
                 }
@@ -104,10 +105,10 @@ final class NativeCacheSession {
     // The post action only records intent. Disk flush runs after the GitHub listener exits.
     @discardableResult
     func detachForPublication() -> Bool {
-        guard case .saveRequested = state else { return false }
+        guard case let .saveRequested(_, disk) = state else { return false }
         do {
             try backend.detachNativeCache(on: id)
-            state = .sealed
+            state = .sealed(disk)
             return true
         } catch {
             writeToStandardError("Discarding native cache for \(id.value): \(describeError(error))\n")
@@ -116,18 +117,15 @@ final class NativeCacheSession {
     }
 
     func finishAfterDestruction(publish: Bool) throws {
-        guard publish, case .sealed = state else {
-            try store.finish(id, publish: false)
-            return
+        if case .fresh = state { return }
+        if publish, case let .sealed(disk) = state {
+            do {
+                try store.publish(disk)
+            } catch {
+                writeToStandardError("Discarding native cache for \(id.value): \(describeError(error))\n")
+            }
         }
-        do {
-            try store.finish(id, publish: true)
-        } catch {
-            // A guest may invalidate its own pending disk. Confirm cleanup before
-            // freeing the slot even when this generation cannot be published.
-            writeToStandardError("Discarding native cache for \(id.value): \(describeError(error))\n")
-            try store.finish(id, publish: false)
-        }
+        try store.discard(id)
     }
 }
 

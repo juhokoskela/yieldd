@@ -1325,7 +1325,7 @@ func connectedNativeCachePublicationUsesFinalJobResult(_ result: ExecutionRenewa
     #expect(try fixture.store.load() == nil)
     let next = RunnerID(value: "yieldd-next-job")
     #expect(try cache.open(next, readable: [scope], writable: nil).isCold == (result == .revoked))
-    try cache.finish(next, publish: false)
+    try cache.discard(next)
 }
 
 private final class ConnectedBackend: NativeCacheBackend {

@@ -55,15 +55,21 @@ test('opt-in opens the disk and requests a save at the same endpoint', t => {
       assert.equal(options.method, 'POST')
       assert.equal(options.redirect, 'error')
       assert.equal(options.headers.Authorization, 'Bearer fixture-token')
-      return Response.json({path: ${JSON.stringify(mounted)}})
+      return Response.json({writable: process.env.WRITABLE === 'true'})
     }
   `)
   const run = script => execFileSync(process.execPath, ['--require', preload, path.join(__dirname, script)], {env})
   env.EXPECTED = 'open'
   run('index.cjs')
-  assert.equal(fs.readFileSync(env.GITHUB_OUTPUT, 'utf8'), 'path=' + mounted + '\n')
-  assert.equal(fs.readFileSync(env.GITHUB_STATE, 'utf8'), 'opened=true\n')
+  assert.ok(!fs.existsSync(env.GITHUB_STATE))
+  delete env.ACTIONS_RUNTIME_TOKEN
+  run('post.cjs')
+  env.ACTIONS_RUNTIME_TOKEN = 'fixture-token'
+  env.WRITABLE = 'true'
+  run('index.cjs')
+  assert.equal(fs.readFileSync(env.GITHUB_OUTPUT, 'utf8'), ('path=' + mounted + '\n').repeat(2))
+  assert.equal(fs.readFileSync(env.GITHUB_STATE, 'utf8'), 'writable=true\n')
   env.EXPECTED = 'save'
-  env.STATE_opened = 'true'
+  env.STATE_writable = 'true'
   run('post.cjs')
 })

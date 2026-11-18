@@ -28,9 +28,9 @@ type nativeCacheRequest struct {
 }
 
 type nativeCacheResponse struct {
-	ID    string `json:"id"`
-	Path  string `json:"path,omitempty"`
-	Error string `json:"error,omitempty"`
+	ID       string `json:"id"`
+	Writable *bool  `json:"writable,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 // The relay and VM owner share a private local directory. Only the owner has a reference

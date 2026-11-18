@@ -4,6 +4,11 @@ import Foundation
 struct NativeCacheDisk {
     let url: URL
     let isCold: Bool
+    fileprivate let writable: String?
+    fileprivate let previous: UUID?
+    fileprivate let inode: ino_t
+    fileprivate let device: dev_t
+    fileprivate let size: off_t
 }
 
 struct NativeCacheStore {
@@ -11,15 +16,6 @@ struct NativeCacheStore {
         let generation: UUID
         var lastUsed: Date
         let bytes: Int64
-    }
-
-    // Only the original image can replace the generation the job saw when it started.
-    private struct Checkout: Codable {
-        let writable: String?
-        let previous: UUID?
-        let inode: ino_t
-        let device: dev_t
-        let size: off_t
     }
 
     private let directory: URL
@@ -56,7 +52,7 @@ struct NativeCacheStore {
         // Validate the mounted volume before treating absence as a successful cleanup.
         _ = try storage.validate(stateDirectory: directory)
         try storage.validatePath(path)
-        try Self(root: path, platform: platform).finish(id, publish: false)
+        try Self(root: path, platform: platform).discard(id)
     }
 
     private func jobPath(_ id: RunnerID) throws -> URL {
@@ -67,8 +63,11 @@ struct NativeCacheStore {
     private func jobDirectory(_ id: RunnerID) throws -> URL {
         try validate()
         let job = try jobPath(id)
-        for url in [directory, jobs, job] {
-            try privateDirectory(url)
+        try privateDirectory(directory)
+        try privateDirectory(jobs)
+        guard mkdir(job.path, 0o700) == 0 else {
+            if errno == EEXIST { throw JobCacheError.alreadyOpened }
+            throw lastError()
         }
         return job
     }
@@ -79,66 +78,55 @@ struct NativeCacheStore {
             throw JobCacheError.invalidScope
         }
         let job = try jobDirectory(id)
-        let record = job.appendingPathComponent("checkout.json")
-        guard try readPrivateRunnerFile(record, maximumBytes: 2048) == nil else { throw JobCacheError.alreadyOpened }
-        let staging = job.appendingPathComponent(UUID().uuidString + ".raw")
-        defer { try? manager.removeItem(at: staging) }
+        let image = job.appendingPathComponent("cache.img")
         let (cold, previous) = try withLock {
-            var entries = try readIndex()
-            try reapSeeds(keeping: Set(entries.values.map(\.generation)))
+            let entries = try readIndex()
             let sourceScope = readable.first { entries[$0] != nil }
-            if let sourceScope, var seed = entries[sourceScope] {
+            if let sourceScope, let seed = entries[sourceScope] {
                 let source = seedFile(seed.generation)
-                guard clonefile(source.path, staging.path, UInt32(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)) == 0 else {
+                guard clonefile(source.path, image.path, UInt32(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)) == 0 else {
                     throw lastError()
                 }
-                seed.lastUsed = Date()
-                entries[sourceScope] = seed
-                try writePrivateRunnerFile(JSONEncoder().encode(entries), to: index)
+                // Eviction tolerates a lost timestamp; a hit needs no journal write.
+                _ = utimensat(AT_FDCWD, source.path, nil, AT_SYMLINK_NOFOLLOW)
             }
             return (sourceScope == nil, writable.flatMap { entries[$0]?.generation })
         }
-        if cold { try createBlank(at: staging) }
+        if cold { try createBlank(at: image) }
         var info = stat()
-        guard lstat(staging.path, &info) == 0 else { throw lastError() }
+        guard lstat(image.path, &info) == 0 else { throw lastError() }
         guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1, info.st_size == diskBytes else {
             throw JobCacheError.invalidDisk
         }
-        let checkout = Checkout(writable: writable, previous: previous, inode: info.st_ino, device: info.st_dev, size: info.st_size)
-        try writePrivateRunnerFile(JSONEncoder().encode(checkout), to: record)
-        let image = job.appendingPathComponent("cache.img")
-        guard renamex_np(staging.path, image.path, UInt32(RENAME_EXCL)) == 0 else { throw lastError() }
-        return NativeCacheDisk(url: image, isCold: cold)
+        return NativeCacheDisk(url: image, isCold: cold, writable: writable, previous: previous,
+                               inode: info.st_ino, device: info.st_dev, size: info.st_size)
     }
 
-    func finish(_ id: RunnerID, publish: Bool) throws {
+    func discard(_ id: RunnerID) throws {
         try validate()
         let job = try jobPath(id)
-        // Always remove the checkout on discard, stale writers, or failed publication.
-        var publishError: Error?
-        if publish {
-            do { try publishCheckout(in: job) } catch { publishError = error }
-        }
         do { try manager.removeItem(at: job) } catch CocoaError.fileNoSuchFile {}
-        if let publishError { throw publishError }
     }
 
-    private func publishCheckout(in job: URL) throws {
-        guard let data = try readPrivateRunnerFile(job.appendingPathComponent("checkout.json"), maximumBytes: 2048) else { return }
-        let checkout = try JSONDecoder().decode(Checkout.self, from: data)
-        guard let target = checkout.writable else { return }
-        guard Self.validScope(target) else { throw JobCacheError.invalidScope }
+    // Recovery only discards. Publishing requires the original live checkout and an unchanged base.
+    func publish(_ disk: NativeCacheDisk) throws {
+        try validate()
+        guard let target = disk.writable else { return }
+        guard disk.url.deletingLastPathComponent().deletingLastPathComponent().path == jobs.path else {
+            throw JobCacheError.invalidDisk
+        }
         try withLock {
             var entries = try readIndex()
-            guard entries[target]?.generation == checkout.previous else { return }
-            let image = job.appendingPathComponent("cache.img")
-            let fd = Darwin.open(image.path, O_NOFOLLOW | O_NONBLOCK | O_RDONLY | O_CLOEXEC)
+            let previous = Set(entries.values.map(\.generation))
+            try reapSeeds(keeping: previous)
+            guard entries[target]?.generation == disk.previous else { return }
+            let fd = Darwin.open(disk.url.path, O_NOFOLLOW | O_NONBLOCK | O_RDONLY | O_CLOEXEC)
             guard fd >= 0 else { throw lastError() }
             defer { close(fd) }
             var info = stat()
             guard fstat(fd, &info) == 0 else { throw lastError() }
-            guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1, info.st_dev == checkout.device,
-                  info.st_ino == checkout.inode, info.st_size == checkout.size else { throw JobCacheError.invalidDisk }
+            guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1, info.st_dev == disk.device,
+                  info.st_ino == disk.inode, info.st_size == disk.size else { throw JobCacheError.invalidDisk }
             let generation = UUID()
             let file = seedFile(generation)
             guard fclonefileat(fd, AT_FDCWD, file.path, UInt32(CLONE_NOOWNERCOPY)) == 0 else { throw lastError() }
@@ -148,15 +136,26 @@ struct NativeCacheStore {
             try synchronizeRunnerState(seeds)
             // Commit the index last. An interrupted save leaves the previous seed readable.
             entries[target] = Seed(generation: generation, lastUsed: Date(), bytes: info.st_blocks * 512)
-            var retained: [String: Seed] = [:]
-            var bytes: Int64 = 0
-            for (scope, seed) in entries.sorted(by: { $0.value.lastUsed > $1.value.lastUsed }) {
-                guard retained.count < 16, bytes + seed.bytes <= 16 << 30 else { continue }
-                bytes += seed.bytes
-                retained[scope] = seed
+            if entries.count > 16 || entries.values.reduce(Int64(0), { $0 + $1.bytes }) > 16 << 30 {
+                let candidates = entries.mapValues { seed in
+                    var seed = seed
+                    let file = seedFile(seed.generation)
+                    if let touched = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+                        seed.lastUsed = max(touched, seed.lastUsed)
+                    }
+                    return seed
+                }
+                entries.removeAll(keepingCapacity: true)
+                var bytes: Int64 = 0
+                for (scope, seed) in candidates.sorted(by: { $0.value.lastUsed > $1.value.lastUsed }) {
+                    guard entries.count < 16, bytes + seed.bytes <= 16 << 30 else { continue }
+                    bytes += seed.bytes
+                    entries[scope] = seed
+                }
             }
-            try writePrivateRunnerFile(JSONEncoder().encode(retained), to: index)
-            try reapSeeds(keeping: Set(retained.values.map(\.generation)))
+            try writePrivateRunnerFile(JSONEncoder().encode(entries), to: index)
+            let removed = previous.union([generation]).subtracting(entries.values.map(\.generation))
+            for id in removed { try manager.removeItem(at: seedFile(id)) }
         }
     }
 

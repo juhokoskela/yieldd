@@ -34,24 +34,27 @@ private func read(_ disk: NativeCacheDisk) throws -> String {
     let first = try store.open(seed, readable: [mainScope], writable: mainScope)
     #expect(first.isCold)
     try mark(first, "main1")
-    try store.finish(seed, publish: true)
+    try store.publish(first)
+    try store.discard(seed)
 
     let pr = runner()
     let inherited = try store.open(pr, readable: [pullRequestScope, mainScope], writable: pullRequestScope)
     #expect(!inherited.isCold)
     #expect(try read(inherited) == "main1")
     try mark(inherited, "pull1")
-    try store.finish(pr, publish: true)
+    try store.publish(inherited)
+    try store.discard(pr)
 
     for (scope, expected) in [(mainScope, "main1"), (pullRequestScope, "pull1")] {
         let id = runner()
         let reader = try store.open(id, readable: [scope], writable: nil)
         #expect(try read(reader) == expected)
         try mark(reader, "other")
-        try store.finish(id, publish: true)
+        try store.publish(reader)
+        try store.discard(id)
         let later = runner()
         #expect(try read(store.open(later, readable: [scope], writable: nil)) == expected)
-        try store.finish(later, publish: false)
+        try store.discard(later)
     }
 }
 
@@ -60,10 +63,12 @@ private func read(_ disk: NativeCacheDisk) throws -> String {
     defer { try? FileManager.default.removeItem(at: root) }
     let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 1 << 20)
     let one = runner(), two = runner()
-    try mark(store.open(one, readable: [mainScope], writable: mainScope), "first")
-    try mark(store.open(two, readable: [mainScope], writable: mainScope), "later")
-    try store.finish(one, publish: true)
-    try store.finish(two, publish: true)
+    let first = try store.open(one, readable: [mainScope], writable: mainScope)
+    let second = try store.open(two, readable: [mainScope], writable: mainScope)
+    try mark(first, "first")
+    try mark(second, "later")
+    try store.publish(first)
+    try store.publish(second)
     let check = runner()
     #expect(try read(store.open(check, readable: [mainScope], writable: nil)) == "first")
 }
@@ -73,13 +78,15 @@ private func read(_ disk: NativeCacheDisk) throws -> String {
     defer { try? FileManager.default.removeItem(at: root) }
     let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 1 << 20)
     let first = runner()
-    try mark(store.open(first, readable: [], writable: mainScope), "main1")
-    try store.finish(first, publish: true)
+    let disk = try store.open(first, readable: [], writable: mainScope)
+    try mark(disk, "main1")
+    try store.publish(disk)
     for n in 0..<17 {
         let id = runner()
         let pr = String(format: "%064x", n)
-        #expect(try !store.open(id, readable: [pr, mainScope], writable: pr).isCold)
-        try store.finish(id, publish: true)
+        let disk = try store.open(id, readable: [pr, mainScope], writable: pr)
+        #expect(!disk.isCold)
+        try store.publish(disk)
     }
     let reader = runner()
     #expect(try read(store.open(reader, readable: [mainScope], writable: nil)) == "main1")
@@ -103,10 +110,10 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     default:
         #expect(truncate(disk.url.path, 1) == 0)
     }
-    #expect(throws: (any Error).self) { try store.finish(id, publish: true) }
+    #expect(throws: (any Error).self) { try store.publish(disk) }
     let check = runner()
     #expect(try store.open(check, readable: [mainScope], writable: nil).isCold)
-    try store.finish(id, publish: false)
+    try store.discard(id)
 }
 
 @Test func nativeStoreRejectsInvalidScopeAndRunnerBeforeCreatingJob() throws {
@@ -130,8 +137,44 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     let file = try FileHandle(forReadingFrom: first.url)
     #expect(try file.seekToEnd() == UInt64(size))
     try file.close()
-    try store.finish(id, publish: true)
+    try store.publish(first)
     let second = runner()
     #expect(try !store.open(second, readable: [mainScope], writable: nil).isCold)
-    try store.finish(second, publish: false)
+    try store.discard(second)
+}
+
+@Test func abandonedCheckoutCannotReopenUntilRecoveryDiscardsIt() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let id = runner()
+    let first = try store.open(id, readable: [], writable: mainScope)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: first.url.deletingLastPathComponent().path) == ["cache.img"])
+    #expect(throws: JobCacheError.self) { try store.open(id, readable: [], writable: mainScope) }
+    let restarted = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    try restarted.discard(id)
+    #expect(!FileManager.default.fileExists(atPath: first.url.deletingLastPathComponent().path))
+    #expect(try restarted.open(id, readable: [mainScope], writable: nil).isCold)
+}
+
+@Test func warmLookupLeavesTheIndexAloneAndPublicationReapsOrphans() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let first = runner()
+    try store.publish(store.open(first, readable: [], writable: mainScope))
+    try store.discard(first)
+    let area = root.appendingPathComponent(RunnerPlatform.linux.rawValue)
+    let index = area.appendingPathComponent("index.json")
+    let before = try Data(contentsOf: index)
+    let orphan = area.appendingPathComponent("seeds/\(UUID().uuidString).img")
+    try Data().write(to: orphan)
+    let second = runner()
+    let disk = try store.open(second, readable: [mainScope], writable: mainScope)
+    #expect(!disk.isCold)
+    #expect(try Data(contentsOf: index) == before)
+    #expect(FileManager.default.fileExists(atPath: orphan.path))
+    try store.publish(disk)
+    #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    try store.discard(second)
 }

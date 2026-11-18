@@ -24,12 +24,11 @@ async function open() {
   if (process.env.ACTIONS_RESULTS_URL === origin && process.env.ACTIONS_CACHE_MODE !== 'none') {
     const result = await request('open')
     directory = process.platform === 'darwin' ? '/Volumes/YielddCache' : '/mnt/yieldd-cache'
-    if (result.path !== directory) throw new Error('The native cache returned an unexpected mount point.')
     const mount = await fs.stat(directory).catch(() => null)
     if (!mount?.isDirectory() || mount.dev === (await fs.stat(path.dirname(directory))).dev) {
       throw new Error('The native cache disk is unavailable in this job. Run the setup step directly in the yieldd VM.')
     }
-    await fs.appendFile(process.env.GITHUB_STATE, 'opened=true\n')
+    if (result.writable === true) await fs.appendFile(process.env.GITHUB_STATE, 'writable=true\n')
   } else {
     directory = await fs.mkdtemp(path.join(process.env.RUNNER_TEMP, 'yieldd-cache-'))
     console.log('Using a temporary cache directory on this runner.')

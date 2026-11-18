@@ -7,7 +7,7 @@ struct NativeCacheSessionTests {
         let fixture = try NativeSessionFixture()
         defer { fixture.remove() }
         let opened = try fixture.request("open")
-        #expect(opened["path"] == "/mnt/yieldd-cache")
+        #expect(opened.writable == true)
         #expect(fixture.backend.attachments == 1)
         // A retried action receives the existing mount.
         _ = try fixture.request("open")
@@ -27,7 +27,8 @@ struct NativeCacheSessionTests {
             let fixture = try NativeSessionFixture()
             defer { fixture.remove() }
             let writable = mode == "read-only" ? nil : fixture.scope
-            _ = try fixture.request("open", write: writable)
+            let opened = try fixture.request("open", write: writable)
+            #expect(opened.writable == (writable != nil))
             _ = try fixture.request("save", write: writable)
             fixture.backend.failDetach = mode == "unmount-error"
             let detached = fixture.session.detachForPublication()
@@ -37,15 +38,22 @@ struct NativeCacheSessionTests {
         }
     }
 
+    @Test func jobThatNeverOpensNativeDiskDoesNotTouchStorage() throws {
+        let fixture = try NativeSessionFixture(validate: { throw TestFailure.unexpectedBackendCall })
+        defer { fixture.remove() }
+        try fixture.session.finishAfterDestruction(publish: false)
+        try fixture.session.finishAfterDestruction(publish: true)
+    }
+
     @Test func partialAttachmentCannotReopenOrPublishTheDisk() throws {
         let fixture = try NativeSessionFixture()
         defer { fixture.remove() }
         fixture.backend.failAttach = true
-        #expect(try fixture.request("open")["error"] != nil)
+        #expect(try fixture.request("open").error != nil)
         fixture.backend.failAttach = false
-        #expect(try fixture.request("open")["error"] != nil)
+        #expect(try fixture.request("open").error != nil)
         #expect(fixture.backend.attachments == 1)
-        #expect(try fixture.request("save")["error"] != nil)
+        #expect(try fixture.request("save").error != nil)
         try fixture.session.finishAfterDestruction(publish: true)
         #expect(try fixture.checkCold("yieldd-next"))
     }
@@ -53,10 +61,10 @@ struct NativeCacheSessionTests {
     @Test func mismatchedRepositoryOrChangedGrantCannotWrite() throws {
         let fixture = try NativeSessionFixture()
         defer { fixture.remove() }
-        #expect(try fixture.request("open", repo: "other/project")["error"] != nil)
+        #expect(try fixture.request("open", repo: "other/project").error != nil)
         #expect(fixture.backend.attachments == 0)
         _ = try fixture.request("open")
-        #expect(try fixture.request("save", write: String(repeating: "b", count: 64))["error"] != nil)
+        #expect(try fixture.request("save", write: String(repeating: "b", count: 64)).error != nil)
         #expect(!fixture.session.detachForPublication())
         try fixture.session.finishAfterDestruction(publish: false)
     }
@@ -70,19 +78,25 @@ private final class NativeSessionFixture {
     let store: NativeCacheStore
     let session: NativeCacheSession
 
-    init() throws {
+    init(validate: @escaping () throws -> Void = {}) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
-        store = NativeCacheStore(root: root.appendingPathComponent("store"), platform: .linux, diskBytes: 4096)
+        store = NativeCacheStore(root: root.appendingPathComponent("store"), platform: .linux, diskBytes: 4096, validate: validate)
         session = NativeCacheSession(store: store, backend: backend, id: id, repository: "trusted/project", directory: root)
     }
     func remove() { try? FileManager.default.removeItem(at: root) }
 
-    func request(_ op: String, repo: String = "trusted/project") throws -> [String: String] {
+    struct Reply: Decodable {
+        let id: String
+        let writable: Bool?
+        let error: String?
+    }
+
+    func request(_ op: String, repo: String = "trusted/project") throws -> Reply {
         try request(op, repo: repo, write: scope)
     }
 
-    func request(_ op: String, repo: String = "trusted/project", write: String?) throws -> [String: String] {
+    func request(_ op: String, repo: String = "trusted/project", write: String?) throws -> Reply {
         var grants: [String: Any] = ["repository_id": "42", "repository": repo, "read_scopes": [scope]]
         grants["write_scope"] = write
         let requestID = UUID().uuidString
@@ -90,15 +104,15 @@ private final class NativeSessionFixture {
         try writePrivateRunnerFile(JSONSerialization.data(withJSONObject: payload), to: root.appendingPathComponent("native-request"))
         try session.handleRequest()
         let data = try #require(try readPrivateRunnerFile(root.appendingPathComponent("native-response"), maximumBytes: 1024))
-        let result = try JSONDecoder().decode([String: String].self, from: data)
-        #expect(result["id"] == requestID)
+        let result = try JSONDecoder().decode(Reply.self, from: data)
+        #expect(result.id == requestID)
         return result
     }
 
     func checkCold(_ name: String) throws -> Bool {
         let id = RunnerID(value: name)
         let cold = try store.open(id, readable: [scope], writable: nil).isCold
-        try store.finish(id, publish: false)
+        try store.discard(id)
         return cold
     }
 }
