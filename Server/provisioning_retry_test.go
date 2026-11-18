@@ -7,6 +7,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/actions/scaleset"
 )
 
 func TestRefreshedDemandSurvivesProvisioningRedrives(t *testing.T) {
@@ -155,6 +157,26 @@ func TestStaleDemandCannotIssueSurvivingOffer(t *testing.T) {
 			}
 		})
 	}
+}
+
+type slowPlacementRead struct{ runnerAPI }
+
+func (r slowPlacementRead) GetRunnerScaleSetByID(ctx context.Context, id int) (*scaleset.RunnerScaleSet, error) {
+	time.Sleep(offerLifetime)
+	return r.runnerAPI.GetRunnerScaleSetByID(ctx, id)
+}
+
+func TestAcceptanceDoesNotOutliveOfferDuringDemandCheck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _, req := localFixture(t)
+		c.refreshDemand, c.runners = true, slowPlacementRead{w}
+		if credential, err := c.acceptDevice(t.Context(), req); err == nil || credential != nil {
+			t.Fatal("expired offer reached registration")
+		}
+		if singleLease(c.state).Local.Phase != localOffered || w.runner != nil {
+			t.Fatal("registered after offer expiry")
+		}
+	})
 }
 
 func TestTimedOutDemandReadRetriesWithoutListenerPoll(t *testing.T) {

@@ -122,7 +122,7 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 		if err != nil {
 			return nil, err
 		}
-		if !a.demandRetryAt.IsZero() || a.surplusAssignments(count)[l.Name] {
+		if l.Local.expired() || !a.demandRetryAt.IsZero() || a.surplusAssignments(count)[l.Name] {
 			return nil, &deviceError{status: http.StatusGone, message: "offer no longer has confirmed demand"}
 		}
 	}
