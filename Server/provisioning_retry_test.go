@@ -47,7 +47,38 @@ func TestRefreshedDemandSurvivesProvisioningRedrives(t *testing.T) {
 	})
 }
 
-func TestMatchingDemandAboveCapacityEndsRefresh(t *testing.T) {
+func TestRecoveredHostedIntentRedrivesConfirmedDemand(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := newFixture(t)
+		w.secretErr = errors.New("response lost")
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
+			t.Fatal("expected interrupted provisioning")
+		}
+		old := singleLease(c.state).Name
+		w.secretErr = nil
+		ctx, cancel := context.WithCancel(t.Context())
+		loop := newCoordinatorLoop(ctx, c)
+		if _, err := newDeviceRouter(testDevice, []*coordinatorLoop{loop}); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		startLoops(t, cancel, []*coordinatorLoop{loop})
+		if _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if err := loop.invoke(t.Context(), func(context.Context) error {
+			if w.demandCalls == 0 || w.dispatched != 1 || c.state.Leases[old] != nil {
+				return errors.New("cleanup did not schedule fresh demand")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestFullHostedQueueSkipsDemandRefresh(t *testing.T) {
 	c, w, _ := newFixture(t)
 	count := maximumAssignments + 1
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), count); err != nil {
@@ -59,8 +90,8 @@ func TestMatchingDemandAboveCapacityEndsRefresh(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if w.demandCalls != 1 || w.dispatched != 1 {
-		t.Fatal("matching counts kept refreshing at capacity", w.demandCalls, w.dispatched)
+	if w.demandCalls != 0 || w.dispatched != 1 {
+		t.Fatal("full hosted queue fetched demand", w.demandCalls, w.dispatched)
 	}
 }
 
@@ -91,6 +122,76 @@ func TestExpiredOfferRechecksDemandBeforePaidFallback(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestStaleDemandCannotIssueSurvivingOffer(t *testing.T) {
+	for _, acceptBeforeCallback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("acceptFirst=%v", acceptBeforeCallback), func(t *testing.T) {
+			c, w, _ := concurrentFixture(t, 2)
+			issued := issueLocal(t, c, 0, 2)
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+				t.Fatal(err)
+			}
+			offer := c.device.pollNow(1)
+			if offer == nil {
+				t.Fatal("missing offer")
+			}
+			if err := c.completeDevice(t.Context(), issued); err != nil {
+				t.Fatal(err)
+			}
+			w.assignedJobs = 0
+			if !acceptBeforeCallback {
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+					t.Fatal(err)
+				}
+				if c.state.Leases[offer.Runner] != nil {
+					t.Fatal("stale offer survived")
+				}
+			}
+			req := issued
+			req.Slot, req.Runner = 1, offer.Runner
+			if credential, err := c.acceptDevice(t.Context(), req); err == nil || credential != nil {
+				t.Fatal("issued without demand")
+			}
+		})
+	}
+}
+
+func TestTimedOutDemandReadRetriesWithoutListenerPoll(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := newFixture(t)
+		c.refreshDemand, w.demandErr = true, context.DeadlineExceeded
+		ctx, cancel := context.WithCancel(t.Context())
+		loop := newCoordinatorLoop(ctx, c)
+		if _, err := newDeviceRouter(testDevice, []*coordinatorLoop{loop}); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		startLoops(t, cancel, []*coordinatorLoop{loop})
+		if _, err := loop.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(cleanupRetryDelay - time.Millisecond)
+		if err := loop.invoke(t.Context(), func(context.Context) error {
+			if w.demandCalls != 1 || w.dispatched != 0 || c.paused != nil {
+				return errors.New("retry did not respect deadline")
+			}
+			w.demandErr = nil
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		if err := loop.invoke(t.Context(), func(context.Context) error {
+			if w.demandCalls != 2 || w.dispatched != 1 || !c.demandRetryAt.IsZero() {
+				return errors.New("timer failed to resume provisioning")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestInterruptedIssuedCleanupCannotFundAnExpiredOffer(t *testing.T) {

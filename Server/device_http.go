@@ -44,9 +44,9 @@ func (s *coordinatorLoop) run() error {
 	for {
 		var expired <-chan time.Time
 
-		var deadline time.Time
+		deadline := s.worker.demandRetryAt
 		retryPending := false
-		if s.worker.verificationPaused() {
+		if s.worker.verificationPaused() && (deadline.IsZero() || s.worker.verificationRetryAt.Before(deadline)) {
 			deadline = s.worker.verificationRetryAt
 		}
 		protectDevices := s.protectColdDevices()
@@ -65,7 +65,7 @@ func (s *coordinatorLoop) run() error {
 			if l.Local == nil {
 				continue
 			}
-			if l.Local.Phase == localAccepted || l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered) {
+			if l.Local.Phase == localAccepted || (s.worker.demandRetryAt.IsZero() && (l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered))) {
 				when := l.Local.Expires
 				if l.Local.expired() {
 					when = time.Now()

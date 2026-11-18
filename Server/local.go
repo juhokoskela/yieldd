@@ -117,6 +117,15 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 	if a.paused != nil || a.demandUnavailable || l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
 		return nil, &deviceError{status: http.StatusGone, message: "offer is no longer available; clean up without starting a runner"}
 	}
+	if a.needsDemandRefresh() {
+		count, err := a.readPlacementDemand(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !a.demandRetryAt.IsZero() || a.surplusAssignments(count)[l.Name] {
+			return nil, &deviceError{status: http.StatusGone, message: "offer no longer has confirmed demand"}
+		}
+	}
 	next := *l.Local
 	next.Phase = localAccepted
 	next.Expires = time.Now().UTC().Add(registrationLifetime)
@@ -233,14 +242,6 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 	}
 	expired := l.Local.expired()
 	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull()))
-	if expired && !retire && a.needsDemandRefresh() {
-		// Cleanup may have invalidated the demand that justified this offer.
-		count, err := a.currentDemand(ctx)
-		if err != nil {
-			return false, err
-		}
-		retire = a.surplusAssignments(count)[l.Name]
-	}
 	if retire {
 		if err := a.beginCleanup(""); err != nil {
 			return false, err

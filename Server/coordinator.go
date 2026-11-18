@@ -56,7 +56,7 @@ type coordinator struct {
 	verificationRetryAt    time.Time
 	verificationRetryDelay time.Duration
 	maxFallbackRunners     int
-	lastHostedCleanup      string
+	demandRetryAt          time.Time
 	hostedCleanupRetry     map[string]time.Time
 }
 
@@ -269,9 +269,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		c.device.forget(c.state.Owner)
 	}
 	if a := c.nextHostedCleanup(); a != nil {
-		c.lastHostedCleanup = a.lease.Name
-		_, err := a.finishCleanup(ctx, false)
-		if c.nextHostedCleanup() != nil {
+		done, err := a.finishCleanup(ctx, false)
+		if c.nextHostedCleanup() != nil || (done && err == nil && count > 0 && !c.demandUnavailable) {
 			c.device.redrive(c.state.Owner)
 		}
 		return err
@@ -283,8 +282,25 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	retryLater := c.verificationPaused() && time.Now().Before(c.verificationRetryAt)
 	var unverifiedRunners []string
 	var failures []error
+	listenerCount := count
+	if count == 0 || c.demandUnavailable || c.paused != nil {
+		c.demandRetryAt = time.Time{}
+	}
+	// A full hosted-only queue can observe and clean up its existing runs
+	// without a separate demand read. Cleanup wakes it when capacity returns.
+	fullHosted := c.state.Config.DeviceID == "" && c.fallbackFull()
+	if count > 0 && !fullHosted && !c.demandUnavailable && c.paused == nil && c.needsDemandRefresh() {
+		var err error
+		count, err = c.readPlacementDemand(ctx)
+		if err != nil {
+			return err
+		}
+		if ctx.Err() == context.DeadlineExceeded && !c.demandRetryAt.IsZero() {
+			return nil
+		}
+	}
 	var surplus map[string]bool
-	if !c.demandUnavailable {
+	if !c.demandUnavailable && c.demandRetryAt.IsZero() && (c.paused == nil || count == 0) {
 		surplus = c.surplusAssignments(count)
 	}
 	var runs map[string]*bootstrapRunResult
@@ -339,6 +355,10 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			}
 			continue
 		}
+		if local != nil && !l.CleanupIntent && (local.Phase == localOffered || local.Phase == localDeclined) &&
+			(!c.demandRetryAt.IsZero() || completed && !provisioningPaused) {
+			continue
+		}
 		if surplus[name] && local != nil && local.Phase == localIssued {
 			next := *local
 			next.Expires = time.Now().UTC()
@@ -350,7 +370,6 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		done, err := a.reconcileWithRun(ctx, recoverOnly, runs[name])
 		if local == nil && !a.deferHostedCleanup && (done || a.lease != nil && a.lease.CleanupIntent) {
 			hostedCleanupAttempted, hostedCleanupCompleted = true, done
-			c.lastHostedCleanup = name
 		}
 		provisioningPaused = provisioningPaused || (local == nil && err != nil)
 		hostedProvisioned = hostedProvisioned || (!l.DispatchIntent && a.lease != nil && a.lease.DispatchIntent)
@@ -411,15 +430,18 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	// Never replace completed execution from the listener's cached demand.
 	if completed {
+		if listenerCount > 0 && c.needsDemandRefresh() {
+			c.device.redrive(c.state.Owner)
+		}
 		return nil
 	}
-	listenerCount := count
-	if count > 0 && c.needsDemandRefresh() {
-		var err error
-		count, err = c.currentDemand(ctx)
-		if err != nil {
-			return err
-		}
+	if !c.demandRetryAt.IsZero() || fullHosted {
+		return nil
+	}
+	// Verification may just have resumed. Recheck demand before allocating.
+	if provisioningPaused && c.needsDemandRefresh() && count > 0 {
+		c.device.redrive(c.state.Owner)
+		return nil
 	}
 	countsAgree := count == listenerCount
 	count = min(count, maximumAssignments)
@@ -476,14 +498,26 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	return nil
 }
 
-func (c *coordinator) currentDemand(ctx context.Context) (int, error) {
+// A failed read cannot authorize a new runner. Keep the queue available for
+// issued devices and let its timer retry even without another listener callback.
+func (c *coordinator) readPlacementDemand(ctx context.Context) (int, error) {
+	if time.Now().Before(c.demandRetryAt) {
+		return 0, nil
+	}
 	set, err := c.runners.GetRunnerScaleSetByID(ctx, c.state.ScaleSetID)
 	if err != nil {
-		return 0, &sdkError{"refresh demand after cleanup", err}
+		if ctx.Err() == context.Canceled {
+			return 0, ctx.Err()
+		}
+		c.demandRetryAt = time.Now().Add(cleanupRetryDelay)
+		c.device.forget(c.state.Owner)
+		c.logger.Warn("Demand refresh failed; retrying before provisioning", "error", &sdkError{"refresh demand", err}, "retry_delay", cleanupRetryDelay)
+		return 0, nil
 	}
 	if set == nil || set.ID != c.state.ScaleSetID || set.Statistics == nil || set.Statistics.TotalAssignedJobs < 0 {
 		return 0, errors.New("invalid scale set statistics after cleanup")
 	}
+	c.demandRetryAt = time.Time{}
 	return set.Statistics.TotalAssignedJobs, nil
 }
 
@@ -494,11 +528,8 @@ func (c *coordinator) nextHostedCleanup() *assignment {
 		if l.Local != nil || !l.CleanupIntent || time.Now().Before(c.hostedCleanupRetry[name]) {
 			continue
 		}
-		if first == nil {
+		if first == nil || c.hostedCleanupRetry[name].Before(c.hostedCleanupRetry[first.lease.Name]) {
 			first = c.assigned(name)
-		}
-		if name > c.lastHostedCleanup {
-			return c.assigned(name)
 		}
 	}
 	return first
@@ -531,10 +562,10 @@ func (a *assignment) generateRegistration(ctx context.Context) (*scaleset.Runner
 	l := a.lease
 	generated, err := a.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, a.state.ScaleSetID)
 	if err != nil {
-		return nil, fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
+		return nil, fmt.Errorf("registration interrupted for %s; cleanup required: %w", l.Name, &sdkError{"register runner", err})
 	}
 	if generated == nil || generated.Runner == nil || generated.Runner.ID <= 0 || generated.Runner.Name != l.Name || generated.Runner.RunnerScaleSetID != a.state.ScaleSetID || generated.EncodedJITConfig == "" {
-		return nil, errors.New("invalid JIT response; provisioning intent retained for recovery")
+		return nil, errors.New("invalid JIT response; assignment retained for cleanup")
 	}
 	return generated, nil
 }

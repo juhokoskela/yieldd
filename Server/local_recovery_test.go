@@ -59,9 +59,10 @@ func TestCompletedAssignmentRefreshesCachedDemandBeforeClaimingCapacity(t *testi
 		t.Fatal("did not recheck cached demand", w.demandCalls, c.device.slots[0].owner)
 	}
 	w.demandErr = context.DeadlineExceeded
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); !errors.Is(err, context.DeadlineExceeded) || c.device.slots[0].owner != "" {
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || c.demandRetryAt.IsZero() || c.device.slots[0].owner != "" {
 		t.Fatal("failed refresh consumed capacity", err)
 	}
+	c.demandRetryAt = time.Now()
 	w.demandErr, w.assignedJobs = nil, 1
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || singleLease(c.state).Local == nil {
 		t.Fatal("fresh demand did not create an offer", n, err)
