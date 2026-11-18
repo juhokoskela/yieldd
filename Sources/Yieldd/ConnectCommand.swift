@@ -80,9 +80,11 @@ func runConnectedService(
             output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
             return
         }
-        try removeUnleasedRunnerFiles(in: directory, ownershipDescriptor: ownershipDescriptor, checkCancellation: stop.check)
+        let startupExecutor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+        try removeUnleasedRunnerFiles(in: directory, ownershipDescriptor: ownershipDescriptor,
+                                     executor: startupExecutor, checkCancellation: stop.check)
         let storage = try RunnerStorage.required(in: directory)
-        try storage.validate(stateDirectory: directory)
+        try storage.validate(stateDirectory: directory, executor: startupExecutor)
         try RunnerNetwork.requireRelay()
         let memory = RunnerMemoryAdmission()
         for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
@@ -96,10 +98,9 @@ func runConnectedService(
             switch platform {
             case .linux:
                 let container = try resolveContainer()
-                try AppleContainerBackend.requireNetworkSupport(containerURL: container,
-                    executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline))
-                try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline), stateDirectory: directory).start()
-                try storage.validateContainer(containerExecutable: container)
+                try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: startupExecutor)
+                try AppleContainerSystem(containerURL: container, executor: startupExecutor, stateDirectory: directory).start()
+                try storage.validateContainer(containerExecutable: container, executor: startupExecutor)
                 return .linux(containerURL: container)
             case .macOS:
                 guard let template else { throw ValidationError("A macOS worker requires a template.") }
@@ -111,7 +112,7 @@ func runConnectedService(
         }
         let archiveService = try cachePolicy.map { policy in
             try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
-                policy: policy, ownershipDescriptor: ownershipDescriptor, checkCancellation: stop.check)
+                policy: policy, ownershipDescriptor: ownershipDescriptor, stop: stop)
         }
         defer { archiveService?.stop() }
         let cacheSocket = archiveService?.socketURL
@@ -155,7 +156,7 @@ func runConnectedService(
             }, acquire: {
                 try memory.tryAcquire(reserving: platform.memoryReservationBytes)
             }, release: memory.release, prepareToPoll: {
-                try archiveService?.ensureRunning(checkCancellation: stop.check)
+                try archiveService?.ensureRunning()
             }, poll: {
                 control?.update(worker: workerID, phase: .idle)
                 return try client.poll()

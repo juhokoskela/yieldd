@@ -9,6 +9,7 @@ func loadJobCachePolicy(in directory: URL) throws -> Data? {
 // its own authenticated route. No archive endpoint is bound to a host TCP interface.
 final class ArchiveCacheService: @unchecked Sendable {
     let socketURL: URL
+    private let shutdown: RunnerPoolStop
     private let storage: RunnerStorage
     private let stateDirectory: URL
     private let ownershipDescriptor: Int32?
@@ -18,7 +19,8 @@ final class ArchiveCacheService: @unchecked Sendable {
     private var child: Process?
     private var lifetime: Pipe?
 
-    private init(storage: RunnerStorage, stateDirectory: URL, policy: Data, ownershipDescriptor: Int32?) throws {
+    private init(storage: RunnerStorage, stateDirectory: URL, policy: Data, ownershipDescriptor: Int32?, stop: RunnerPoolStop) throws {
+        shutdown = stop
         self.ownershipDescriptor = ownershipDescriptor
         self.storage = storage
         self.stateDirectory = stateDirectory
@@ -32,19 +34,21 @@ final class ArchiveCacheService: @unchecked Sendable {
     }
 
     static func start(storage: RunnerStorage, stateDirectory: URL, policy: Data, ownershipDescriptor: Int32? = nil,
-                      checkCancellation: () throws -> Void) throws -> ArchiveCacheService {
-        let service = try ArchiveCacheService(storage: storage, stateDirectory: stateDirectory, policy: policy, ownershipDescriptor: ownershipDescriptor)
-        try service.ensureRunning(checkCancellation: checkCancellation)
+                      stop: RunnerPoolStop) throws -> ArchiveCacheService {
+        let service = try ArchiveCacheService(storage: storage, stateDirectory: stateDirectory, policy: policy,
+                                              ownershipDescriptor: ownershipDescriptor, stop: stop)
+        try service.ensureRunning()
         return service
     }
 
-    func ensureRunning(checkCancellation: () throws -> Void) throws {
+    func ensureRunning() throws {
         try lock.withLock {
             if child?.isRunning == true { return }
             stopLocked()
-            try checkCancellation()
+            try shutdown.check()
             // Recheck the volume on every launch, including after a helper crash.
-            let storageVolume = try storage.validate(stateDirectory: stateDirectory)
+            let executor = ProcessExecutor(checkCancellation: shutdown.check, maximumExecutionDeadline: shutdown.executionDeadline)
+            let storageVolume = try storage.validate(stateDirectory: stateDirectory, executor: executor)
             let root = storage.volumeURL.appendingPathComponent("job-caches")
             let archives = root.appendingPathComponent("archives")
             try storage.validatePath(archives)
@@ -52,7 +56,7 @@ final class ArchiveCacheService: @unchecked Sendable {
             try RunnerNetworkDirectories.createPrivateDirectory(archives)
             let volume = ArchiveCacheVolume(directory: archives, mount: ArchiveCacheVolume.mountPoint(in: stateDirectory),
                                             maximumMiB: min(16 << 10, (storageVolume.quotaBytes / 8) >> 20),
-                                            ownershipDescriptor: ownershipDescriptor)
+                                            ownershipDescriptor: ownershipDescriptor, executor: executor)
             self.volume = volume
             var ready = false
             defer { if !ready { stopLocked() } }
@@ -79,7 +83,7 @@ final class ArchiveCacheService: @unchecked Sendable {
             try pipe.fileHandleForReading.close()
             let deadline = DispatchTime.now() + 30
             while process.isRunning {
-                try checkCancellation()
+                try shutdown.check()
                 var info = stat()
                 if lstat(socketURL.path, &info) == 0 && info.st_mode & S_IFMT == S_IFSOCK { ready = true; return }
                 guard DispatchTime.now() < deadline else { break }
@@ -103,7 +107,7 @@ final class ArchiveCacheService: @unchecked Sendable {
         if child.isRunning { child.terminate() }
         // Let ordinary shutdown finish database work. Owner EOF also stops the helper
         // after an uncatchable exit, or if an HTTP transfer is still outstanding.
-        let deadline = DispatchTime.now() + 2
+        let deadline = min(DispatchTime.now() + 2, shutdown.executionDeadline() ?? .distantFuture)
         while child.isRunning && DispatchTime.now() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         try? lifetime?.fileHandleForWriting.close()
         if child.isRunning { _ = kill(child.processIdentifier, SIGKILL) }

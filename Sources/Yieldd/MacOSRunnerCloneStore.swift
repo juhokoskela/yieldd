@@ -14,7 +14,8 @@ func removeMacOSRunnerFiles(_ id: RunnerID, in directory: URL,
 }
 
 // Called under exclusive ownership after all outstanding guests have been recovered.
-func removeUnleasedRunnerFiles(in directory: URL, ownershipDescriptor: Int32? = nil, checkCancellation: () throws -> Void = {},
+func removeUnleasedRunnerFiles(in directory: URL, ownershipDescriptor: Int32? = nil, executor: ProcessExecutor = ProcessExecutor(),
+                               checkCancellation: () throws -> Void = {},
                                makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) }
     var failures: [RunnerSessionCleanupFailure] = []
@@ -25,7 +26,7 @@ func removeUnleasedRunnerFiles(in directory: URL, ownershipDescriptor: Int32? = 
         if case let RunnerSessionError.cleanupFailed(entries) = error { failures.append(contentsOf: entries) }
         else { failures.append(.init(step: .network, error: error)) }
     }
-    do { try ArchiveCacheVolume.recover(in: directory, ownershipDescriptor: ownershipDescriptor) }
+    do { try ArchiveCacheVolume.recover(in: directory, ownershipDescriptor: ownershipDescriptor, executor: executor) }
     catch { failures.append(.init(step: .machine, error: error)) }
     for kind in RunnerCloneKind.allCases {
         do {

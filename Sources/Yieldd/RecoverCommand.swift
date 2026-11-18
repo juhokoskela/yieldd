@@ -9,13 +9,14 @@ struct RecoverCommand: ParsableCommand {
 
     mutating func run() throws {
         let stop = try RunnerPoolStop.monitoringSignals()
-        let executor = ProcessExecutor(checkCancellation: stop.check)
+        let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
         let locator = ExecutableLocator()
         try withRunnerOwnership(recoveringMachineTest: true) { store in
             try store.recoverMachineTest {
                 try AppleContainerBackend(containerURL: try locator.locate("container"), executor: executor, stateDirectory: store.directory)
             }
-            try removeUnleasedRunnerFiles(in: store.directory, ownershipDescriptor: store.ownershipDescriptor, checkCancellation: stop.check)
+            try removeUnleasedRunnerFiles(in: store.directory, ownershipDescriptor: store.ownershipDescriptor,
+                                         executor: executor, checkCancellation: stop.check)
         }
         print("Recovery complete. No new machines were started.")
     }

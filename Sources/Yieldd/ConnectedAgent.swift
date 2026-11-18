@@ -172,7 +172,9 @@ func recoverConnectedAgent(configuration: ConnectedAgentConfiguration, token: St
     try withRunnerOwnership(in: directory, connected: true) { store in
         try recoverConnectedPlatforms(directory: directory, server: configuration.server, deviceID: configuration.deviceID,
             token: token, confirmation: nil, stop: stop, resolveContainer: configuration.resolveContainer, output: output)
-        try removeUnleasedRunnerFiles(in: directory, ownershipDescriptor: store.ownershipDescriptor, checkCancellation: stop.check)
+        let recoveryExecutor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+        try removeUnleasedRunnerFiles(in: directory, ownershipDescriptor: store.ownershipDescriptor,
+                                     executor: recoveryExecutor, checkCancellation: stop.check)
     }
 }
 

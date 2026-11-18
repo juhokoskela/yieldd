@@ -56,6 +56,35 @@ import Testing
     _ = try volume.open()
 }
 
+@Test func archiveVolumeCleanupHonorsTheRemainingShutdownDeadline() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try RunnerNetworkDirectories.createPrivateDirectory(root)
+    let volume = ArchiveCacheVolume(directory: root, mount: ArchiveCacheVolume.mountPoint(in: root),
+                                    maximumMiB: 128, ownershipDescriptor: nil)
+    defer {
+        if (try? volume.detach()) != nil { try? FileManager.default.removeItem(at: root) }
+    }
+    let store = try volume.open()
+    let stop = RunnerPoolStop()
+    stop.request()
+    var stopping = volume
+    stopping.executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: { .now() })
+    do {
+        try stopping.detach()
+        Issue.record("An expired shutdown deadline allowed a disk command to start")
+    } catch let ProcessExecutionError.executionDeadlineExceeded(request, nil) {
+        #expect(request.arguments == ["info", "-plist"])
+        #expect(!request.cancellable)
+    }
+    #expect(FileManager.default.fileExists(atPath: store.directory.path))
+    // A new owner can still adopt the mount. While time remains, a stop
+    // request permits cleanup even though it cancels creation and attachment.
+    _ = try volume.open()
+    stopping.executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: { .now() + 5 })
+    try stopping.detach()
+    #expect(!FileManager.default.fileExists(atPath: store.directory.path))
+}
+
 private func fillArchiveVolume(_ file: URL, bytes: Int) throws -> Int {
     let fd = open(file.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
     guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }

@@ -23,7 +23,8 @@ struct MachineTestCommand: ParsableCommand {
                 try leaseStore.recoverMachineTest {
                     try AppleContainerBackend(containerURL: locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
                 }
-                try removeUnleasedRunnerFiles(in: leaseStore.directory, checkCancellation: signalMonitor.check)
+                try removeUnleasedRunnerFiles(in: leaseStore.directory, ownershipDescriptor: leaseStore.ownershipDescriptor,
+                                             executor: executor, checkCancellation: signalMonitor.check)
             } else {
                 try leaseStore.recoverMachineTest { backend }
             }

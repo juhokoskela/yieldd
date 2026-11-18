@@ -8,6 +8,7 @@ struct ArchiveCacheVolume {
     let mount: URL
     let maximumMiB: UInt64
     let ownershipDescriptor: Int32?
+    var executor = ProcessExecutor()
     private var image: URL { directory.appendingPathComponent("archives.sparseimage") }
 
     struct Store {
@@ -63,28 +64,30 @@ struct ArchiveCacheVolume {
         stateDirectory.appendingPathComponent("archive-volume", isDirectory: true)
     }
 
-    static func recover(in stateDirectory: URL, ownershipDescriptor: Int32?) throws {
+    static func recover(in stateDirectory: URL, ownershipDescriptor: Int32?, executor: ProcessExecutor) throws {
         guard let storage = try RunnerStorage.load(in: stateDirectory) else { return }
         let directory = storage.volumeURL.appendingPathComponent("job-caches/archives")
         let volume = ArchiveCacheVolume(directory: directory, mount: mountPoint(in: stateDirectory),
-                                        maximumMiB: 0, ownershipDescriptor: ownershipDescriptor)
+                                        maximumMiB: 0, ownershipDescriptor: ownershipDescriptor, executor: executor)
         var info = stat()
         guard lstat(volume.image.path, &info) == 0 else {
             if errno == ENOENT { return }
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        _ = try storage.validate(stateDirectory: stateDirectory)
+        _ = try storage.validate(stateDirectory: stateDirectory, executor: executor)
         try storage.validatePath(volume.image)
         try volume.detach()
     }
 
     func detach() throws {
-        if try attached() { try run(["detach", "-quiet", mount.path]) }
+        if try attached(cancellable: false) {
+            try run(["detach", "-quiet", mount.path], cancellable: false)
+        }
     }
 
-    private func attached() throws -> Bool {
+    private func attached(cancellable: Bool = true) throws -> Bool {
         // hdiutil reports hyphenated plist keys. Ignore other disk images on the Mac.
-        let plist = try PropertyListSerialization.propertyList(from: run(["info", "-plist"]), format: nil)
+        let plist = try PropertyListSerialization.propertyList(from: run(["info", "-plist"], cancellable: cancellable), format: nil)
         guard let images = (plist as? [String: Any])?["images"] as? [[String: Any]] else { throw VolumeError.wrongImage }
         let expected = image.resolvingSymlinksInPath().path
         let matches = images.filter { item in
@@ -100,10 +103,10 @@ struct ArchiveCacheVolume {
     }
 
     @discardableResult
-    private func run(_ arguments: [String]) throws -> Data {
+    private func run(_ arguments: [String], cancellable: Bool = true) throws -> Data {
         let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/bin/hdiutil"),
-            arguments: arguments, timeout: 90, cancellable: false, ownershipDescriptor: ownershipDescriptor)
-        return try ProcessExecutor().execute(request).requireSuccess(for: request).stdout
+            arguments: arguments, timeout: 90, cancellable: cancellable, ownershipDescriptor: ownershipDescriptor)
+        return try executor.execute(request).requireSuccess(for: request).stdout
     }
 
     private func device(_ url: URL) throws -> dev_t {
