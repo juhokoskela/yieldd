@@ -334,6 +334,19 @@ final class ProbeVirtualMachine: @unchecked Sendable,
         }
     }
 
+    private(set) var attachedNativeImage: URL?
+    private(set) var nativeDetachCount = 0
+
+    func attachNativeDisk(_ image: URL, completion: @escaping @Sendable (Result<Void, any Error>) -> Void) {
+        lock.withLock { attachedNativeImage = image }
+        completion(.success(()))
+    }
+
+    func detachNativeDisk(completion: @escaping @Sendable (Result<Void, any Error>) -> Void) {
+        lock.withLock { nativeDetachCount += 1 }
+        completion(.success(()))
+    }
+
     func forceStop(
         completion:
             @escaping @Sendable (

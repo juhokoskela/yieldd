@@ -26,6 +26,10 @@ final class ConnectedExecutionAuthorization {
         deadline = nextRenewal + Self.offlineGrace
     }
 
+    // GitHub revokes execution as soon as the completed job leaves the runner.
+    // Cleanup still observes shutdown and the last granted deadline.
+    func stopRenewing() { nextRenewal = .infinity }
+
     func stop() { offer = nil; failure = nil }
 
     func check() throws {

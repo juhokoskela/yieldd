@@ -115,3 +115,19 @@ func executionAuthorizationInterruptsAHostOwnedProcessWhileGuestCommandIsStuck()
     }
     #expect(authorization.failure == .expired)
 }
+
+@Test
+func cleanupHonorsLastDeadlineWithoutRenewingCompletedJob() throws {
+    var now: TimeInterval = 0
+    var renewals = 0
+    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in renewals += 1; return true },
+                                                      checkCancellation: {}, currentTime: { now })
+    authorization.start(authorizationOffer)
+    try authorization.check()
+    authorization.stopRenewing()
+    now = 60
+    try authorization.check()
+    #expect(renewals == 1)
+    now = ConnectedExecutionAuthorization.offlineGrace
+    #expect(throws: ConnectedExecutionError.expired) { try authorization.check() }
+}

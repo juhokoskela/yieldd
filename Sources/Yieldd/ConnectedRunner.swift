@@ -8,6 +8,7 @@ final class ConnectedRunner {
     let accept: (ConnectedOffer) throws -> String
     let complete: (ConnectedOffer) throws -> Void
     let authorization: ConnectedExecutionAuthorization
+    let nativeCache: NativeCacheStore?
     let wait: (TimeInterval) throws -> Void
     var stateChanged: (RunnerSessionState) -> Void
     var currentTime: () -> TimeInterval
@@ -18,6 +19,7 @@ final class ConnectedRunner {
     init(backend: any RunnerBackend, store: ConnectedRunnerStore, server: String, deviceID: String,
          accept: @escaping (ConnectedOffer) throws -> String, complete: @escaping (ConnectedOffer) throws -> Void,
          authorization: ConnectedExecutionAuthorization, wait: @escaping (TimeInterval) throws -> Void,
+         nativeCache: NativeCacheStore? = nil,
          stateChanged: @escaping (RunnerSessionState) -> Void = { _ in },
          currentTime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.backend = backend
@@ -27,6 +29,7 @@ final class ConnectedRunner {
         self.accept = accept
         self.complete = complete
         self.authorization = authorization
+        self.nativeCache = nativeCache
         self.wait = wait
         self.stateChanged = stateChanged
         self.currentTime = currentTime
@@ -40,6 +43,7 @@ final class ConnectedRunner {
             let id = RunnerID(value: lease.offer.runner)
             if absent != id {
                 try backend.destroy(id)
+                try NativeCacheStore.recover(in: store.directory, platform: backend.platform, id: id)
                 absent = id
             }
             try acknowledgeConnectedRunner(lease.offer, complete: complete)
@@ -56,18 +60,21 @@ final class ConnectedRunner {
         absent = nil
         try backend.prepare()
         let id = RunnerID(value: offer.runner)
+        let cache = try nativeCache.map { try NativeCacheSession(store: $0, backend: backend, offer: offer, stateDirectory: store.directory) }
         let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(id.value)")
         defer { ProcessInfo.processInfo.endActivity(activity) }
         try store.save(ConnectedLease(server: server, deviceID: deviceID, offer: offer))
         var failure: (any Error)?
         var machineMayExist = false
         var jobStarted = false
+        var publishCache = false
         do {
             try authorization.check()
             let jit = try accept(offer)
             authorization.start(offer)
             try validateConnectedJIT(jit, runner: offer.runner)
             try authorization.check()
+            try cache?.prepare()
             // Creation can fail after allocating a guest. Retain capacity until destruction succeeds.
             try backend.create(id: id, memory: memory) {
                 releaseOnExit = false
@@ -75,14 +82,18 @@ final class ConnectedRunner {
             }
             try authorization.check()
             try RunnerGuestProtocol.validate(backend: backend, id: id)
-            try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
+            let configure = ["yieldd-configure-runner", "--jit"] + (cache == nil ? [] : ["--local-cache"])
+            try backend.exec(configure, standardInput: Data("\(jit)\n".utf8),
                              timeout: 5 * 60, on: id)
             try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
                                   stateChanged: { state in
                                       if case .jobStarted = state { jobStarted = true }
                                       self.stateChanged(state)
                                   }, currentTime: currentTime)
-                .run(id: id, pickupTimeout: 5 * 60)
+                .run(id: id, pickupTimeout: 5 * 60) { try cache?.handleRequest() }
+            authorization.stopRenewing()
+            publishCache = cache?.detachForPublication() == true
+            if publishCache { try authorization.check() }
         } catch {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation
@@ -94,6 +105,7 @@ final class ConnectedRunner {
         if machineMayExist {
             try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
         }
+        try cleanUp(step: .nativeCache, after: failure) { try cache?.finishAfterDestruction(publish: failure == nil && publishCache) }
         absent = id
         releaseOnExit = false
         releaseCapacity()

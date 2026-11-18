@@ -1,7 +1,7 @@
 import Dispatch
 import Foundation
 
-final class MacOSVirtualizationBackend: RunnerBackend {
+final class MacOSVirtualizationBackend: NativeCacheBackend {
     let platform = RunnerPlatform.macOS
     private final class Guest {
         enum Phase {
@@ -158,6 +158,53 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         }
     }
 
+    private func readyGuest(_ id: RunnerID) throws -> (machine: any MacOSVirtualMachineControlling, ssh: MacOSGuestSSH) {
+        try lock.withLock {
+            guard let guest = guests[id], case let .ready(machine) = guest.phase else {
+                throw MacOSVirtualizationBackendError.notReady(id)
+            }
+            try guest.relay.check()
+            try MacOSVirtualMachineLifecycle.requireRunning(machine)
+            return (machine, guest.ssh)
+        }
+    }
+
+    func attachNativeCache(image: URL, cold _: Bool, on id: RunnerID) throws {
+        try checkCancellation()
+        try loadStorage()?.validatePath(image)
+        let guest = try readyGuest(id)
+        let completion = VirtualMachineCompletion<Void>()
+        guest.machine.attachNativeDisk(image, completion: completion.complete)
+        try completion.wait(operation: "attaching the cache disk", deadline: ProcessInfo.processInfo.systemUptime + 30,
+                            checkCancellation: checkCancellation)
+        // Disk Arbitration mounts removable APFS media asynchronously in the logged-in guest.
+        // A directory left on the guest's root filesystem must never count as a mounted cache.
+        let waitForMount = """
+        set -eu
+        volume=/Volumes/YielddCache
+        system_device=$(/usr/bin/stat -f %d /Volumes)
+        for ((i=0; i<120; ++i)); do
+            if [[ -d "$volume" && ! -L "$volume" && -w "$volume" ]] &&
+               cache_device=$(/usr/bin/stat -f %d "$volume") && [[ "$cache_device" != "$system_device" ]]; then
+                exit 0
+            fi
+            /bin/sleep .25
+        done
+        echo 'The cache disk did not mount at /Volumes/YielddCache.' >&2
+        exit 1
+        """
+        try guest.ssh.execute(["/bin/bash", "-c", waitForMount], timeout: 40, outputCapture: .tail(maxBytes: 4096))
+    }
+
+    func detachNativeCache(on id: RunnerID) throws {
+        let guest = try readyGuest(id)
+        try guest.ssh.execute(["/usr/sbin/diskutil", "unmount", "/Volumes/YielddCache"], timeout: 60, outputCapture: .tail(maxBytes: 4096))
+        let completion = VirtualMachineCompletion<Void>()
+        guest.machine.detachNativeDisk(completion: completion.complete)
+        try completion.wait(operation: "detaching the cache disk", deadline: ProcessInfo.processInfo.systemUptime + 30,
+                            checkCancellation: checkCleanupDeadline)
+    }
+
     @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
@@ -167,14 +214,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         on id: RunnerID
     ) throws -> ProcessResult {
         try checkCancellation()
-        let ssh = try lock.withLock { () throws -> MacOSGuestSSH in
-            guard let guest = guests[id], case let .ready(machine) = guest.phase else {
-                throw MacOSVirtualizationBackendError.notReady(id)
-            }
-            try guest.relay.check()
-            try MacOSVirtualMachineLifecycle.requireRunning(machine)
-            return guest.ssh
-        }
+        let ssh = try readyGuest(id).ssh
         let command: [String]
         if let executable = arguments.first,
            executable == "yieldd-configure-runner" || executable == "yieldd-runner-control" {

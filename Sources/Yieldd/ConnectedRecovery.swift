@@ -29,6 +29,7 @@ func recoverConnectedPlatforms(
                     try AppleContainerBackend(containerURL: container, executor: executor, stateDirectory: directory,
                                               maximumExecutionDeadline: stop.executionDeadline).destroy(id)
                 }
+                try NativeCacheStore.recover(in: directory, platform: store.platform, id: id)
             }
             let workerID = store.platform.connectedWorkerID(slot: store.slot)
             let client = confirmation == nil ? ConnectedHTTPClient(server: server, deviceID: deviceID, token: token,
