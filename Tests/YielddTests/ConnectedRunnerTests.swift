@@ -1296,6 +1296,15 @@ func connectedForbiddenCacheResultDiscardsDiskAndCompletesAssignment() throws {
         lookupError: .http(403, request: "POST /v1/job-result (linux ARM64 slot 0)"))
 }
 
+private func writeNativeRequest(_ operation: String, scope: String, to control: URL) throws {
+    let data = try JSONSerialization.data(withJSONObject: [
+        "id": UUID().uuidString, "operation": operation, "grants": [
+            "repository_id": "1", "repository": connectedOffer.repository, "read_scopes": [scope], "write_scope": scope
+        ]
+    ])
+    try writePrivateRunnerFile(data, to: control.appendingPathComponent("native-request"))
+}
+
 private func checkNativeCachePublication(_ result: ExecutionRenewal, resultBeforeExit: Bool,
                                          lookupError: ConnectedRunnerError? = nil) throws {
     let fixture = try ConnectedFixture()
@@ -1306,17 +1315,11 @@ private func checkNativeCachePublication(_ result: ExecutionRenewal, resultBefor
     defer { try? FileManager.default.removeItem(at: directories.rootURL) }
     let cache = NativeCacheStore(root: fixture.directory.appendingPathComponent("caches"), platform: .linux, diskBytes: 4096)
     let scope = String(repeating: "a", count: 64)
-    func request(_ operation: String) throws {
-        let data = try JSONSerialization.data(withJSONObject: [
-            "id": operation, "operation": operation, "grants": [
-                "repository_id": "1", "repository": connectedOffer.repository, "read_scopes": [scope], "write_scope": scope
-            ]
-        ])
-        try writePrivateRunnerFile(data, to: control.appendingPathComponent("native-request"))
-    }
     let backend = ConnectedBackend()
     backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
-    backend.onStatus = { if backend.statusPolls == 1 { try request("open") } }
+    backend.onStatus = {
+        if backend.statusPolls == 1 { try writeNativeRequest("open", scope: scope, to: control) }
+    }
     var now: TimeInterval = 0
     var saveSent = false
     var events: [String] = []
@@ -1347,7 +1350,7 @@ private func checkNativeCachePublication(_ result: ExecutionRenewal, resultBefor
                 #expect(events.last == "result")
                 now += delay
             } else if !saveSent {
-                try request("save")
+                try writeNativeRequest("save", scope: scope, to: control)
                 saveSent = true
             } else if resultBeforeExit {
                 now = 31
@@ -1378,6 +1381,57 @@ private func checkNativeCachePublication(_ result: ExecutionRenewal, resultBefor
     let next = RunnerID(value: "yieldd-next-job")
     #expect(try cache.open(next, readable: [scope], writable: nil).isCold == (result != .jobSucceeded))
     try cache.discard(next)
+}
+
+@Test
+func connectedFailedNativeReplyDisablesCacheWhileJobFinishes() throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let id = RunnerID(value: connectedOffer.runner)
+    let directories = try RunnerNetworkDirectories(stateDirectory: fixture.directory)
+    let control = try directories.create(for: id)
+    defer { try? FileManager.default.removeItem(at: directories.rootURL) }
+    let response = control.appendingPathComponent("native-response")
+    let scope = String(repeating: "a", count: 64)
+    let cache = NativeCacheStore(root: fixture.directory.appendingPathComponent("caches"), platform: .linux, diskBytes: 4096)
+    let backend = ConnectedBackend()
+    backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
+    backend.onStatus = {
+        if backend.statusPolls == 1 { try writeNativeRequest("open", scope: scope, to: control) }
+    }
+    backend.onDetach = { Issue.record("A failed save reply must invalidate the checkout.") }
+    var polls = 0
+    var acknowledged = false
+    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in .active }, jobResult: { _, _ in
+        Issue.record("A failed cache request must not trigger a job-result lookup.")
+        return .succeeded
+    }, checkCancellation: {})
+    let runner = ConnectedRunner(backend: backend, store: fixture.store, server: "https://example.com/",
+        deviceID: connectedOffer.owner, accept: { _ in try connectedJIT() },
+        complete: { _ in acknowledged = true }, authorization: authorization, wait: { _ in
+            polls += 1
+            switch polls {
+            case 1:
+                // The open succeeded. Block the atomic replacement of the save reply.
+                try FileManager.default.removeItem(at: response)
+                try FileManager.default.createDirectory(at: response, withIntermediateDirectories: false)
+                try writeNativeRequest("save", scope: scope, to: control)
+            case 2:
+                try FileManager.default.removeItem(at: response)
+                try writeNativeRequest("open", scope: scope, to: control)
+            case 3:
+                try writeNativeRequest("save", scope: scope, to: control)
+            default:
+                break
+            }
+        }, nativeCache: cache)
+    try runner.run(connectedOffer, memory: .full)
+    #expect(polls == 4 && backend.nativeAttachments == 1)
+    #expect(!FileManager.default.fileExists(atPath: response.path))
+    #expect(backend.statusPolls == 2 && backend.destroys == 1 && acknowledged)
+    #expect(try fixture.store.load() == nil)
+    #expect(try cache.open(id, readable: [scope], writable: nil).isCold)
+    try cache.discard(id)
 }
 
 @Test(arguments: [false, true])
@@ -1451,7 +1505,8 @@ func failedNativeDiscardKeepsOnlyItsOwnSlotWhileSiblingCompletes(stopDuringRetry
 }
 
 private final class ConnectedBackend: NativeCacheBackend {
-    func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws {}
+    var nativeAttachments = 0
+    func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws { nativeAttachments += 1 }
     var onDetach: () throws -> Void = {}
     func detachNativeCache(on id: RunnerID) throws { try onDetach() }
 

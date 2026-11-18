@@ -34,6 +34,7 @@ final class NativeCacheSession {
 
     private enum State {
         case fresh
+        case mailboxFailed(hasCheckout: Bool)
         case discardOnly
         case attached(Grants, NativeCacheDisk)
         case saveRequested(Grants, NativeCacheDisk)
@@ -64,8 +65,15 @@ final class NativeCacheSession {
     }
 
     func handleRequest() throws {
-        guard let bytes = try readPrivateRunnerFile(directory.appendingPathComponent("native-request"), maximumBytes: 32 * 1024) else { return }
-        let request = try JSONDecoder().decode(Request.self, from: bytes)
+        if case .mailboxFailed = state { return }
+        let request: Request
+        do {
+            guard let bytes = try readPrivateRunnerFile(directory.appendingPathComponent("native-request"), maximumBytes: 32 * 1024) else { return }
+            request = try JSONDecoder().decode(Request.self, from: bytes)
+        } catch {
+            disableMailbox("read the relay request")
+            return
+        }
         guard request.id != lastRequest else { return }
         var response = Response(id: request.id)
         do {
@@ -103,13 +111,23 @@ final class NativeCacheSession {
                     throw NativeCacheSessionError.inconsistentGrant
                 }
             }
-        } catch {
+        } catch where !isCancellation(error) && !(error is ConnectedExecutionError) {
             let detail = [describeError(error), response.error].compactMap { $0 }.joined(separator: " ")
             writeToStandardError("Native cache \(request.operation.rawValue) for \(id.value) failed: \(detail)\n")
             response.error = response.error ?? "The runner could not \(request.operation.rawValue) the native cache."
         }
-        try writePrivateRunnerFile(JSONEncoder().encode(response), to: directory.appendingPathComponent("native-response"))
-        lastRequest = request.id
+        do {
+            try writePrivateRunnerFile(JSONEncoder().encode(response), to: directory.appendingPathComponent("native-response"))
+            lastRequest = request.id
+        } catch {
+            disableMailbox("write the relay response")
+        }
+    }
+
+    private func disableMailbox(_ operation: String) {
+        let hasCheckout = if case .fresh = state { false } else { true }
+        state = .mailboxFailed(hasCheckout: hasCheckout)
+        writeToStandardError("Disabling the native cache for \(id.value) because the host could not \(operation).\n")
     }
 
     var saveRequested: Bool {
@@ -142,8 +160,10 @@ final class NativeCacheSession {
     }
 
     func discard() throws {
-        if case .fresh = state { return }
-        try store.discard(id)
+        switch state {
+        case .fresh, .mailboxFailed(hasCheckout: false): return
+        default: try store.discard(id)
+        }
     }
 }
 

@@ -52,6 +52,31 @@ struct NativeCacheSessionTests {
         try fixture.session.discard()
     }
 
+    @Test(arguments: [false, true])
+    func invalidRequestDisablesMailboxWithoutCreatingCheckout(unreadable: Bool) throws {
+        let fixture = try NativeSessionFixture(validate: { throw TestFailure.unexpectedBackendCall })
+        defer { fixture.remove() }
+        let request = fixture.root.appendingPathComponent("native-request")
+        if unreadable {
+            try FileManager.default.createDirectory(at: request, withIntermediateDirectories: false)
+        } else {
+            try writePrivateRunnerFile(Data("{".utf8), to: request)
+        }
+        try fixture.session.handleRequest()
+        try fixture.session.handleRequest()
+        #expect(!fixture.session.saveRequested)
+        #expect(!fixture.session.detachForPublication())
+        #expect(fixture.backend.attachments == 0)
+        try fixture.session.discard()
+    }
+
+    @Test func cancellationWhileOpeningNativeDiskReachesAssignment() throws {
+        let fixture = try NativeSessionFixture(validate: { throw CancellationError() })
+        defer { fixture.remove() }
+        #expect(throws: CancellationError.self) { try fixture.request("open") }
+        #expect(!FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("native-response").path))
+    }
+
     @Test func partialAttachmentCannotReopenOrPublishTheDisk() throws {
         let fixture = try NativeSessionFixture()
         defer { fixture.remove() }
