@@ -9,11 +9,11 @@ func guestScriptsReportProtocolWithoutGuestSetup(_ script: String) throws {
         arguments: [root.appendingPathComponent("Guest/\(script)").path, "--protocol-version"],
         timeout: 5, outputCapture: .tail(maxBytes: 1024))
     let result = try ProcessExecutor().execute(request).requireSuccess(for: request)
-    #expect(result.stdoutText == "1\n")
+    #expect(result.stdoutText == "2\n")
     #expect(result.stderrText.isEmpty)
 }
 
-@Test(arguments: ["1\n", "2\n", "", "usage", "old-script"])
+@Test(arguments: ["2\n", "1\n", "", "usage", "old-script"])
 func guestProtocolRejectsOutdatedScriptsWithoutSendingCredentials(_ response: String) throws {
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/test/container"), arguments: [])
     let outcome: Result<ProcessResult, any Error> = response == "old-script"
@@ -21,7 +21,7 @@ func guestProtocolRejectsOutdatedScriptsWithoutSendingCredentials(_ response: St
         : .success(processResult(stdout: response))
     let outcomes: [Result<ProcessResult, any Error>] = [outcome, outcome]
     let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: request.executableURL, id: RunnerID(value: "yieldd-test"))
-    if response == "1\n" {
+    if response == "2\n" {
         try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"))
         #expect(executor.requests.count == 2)
     } else {
@@ -38,7 +38,7 @@ func guestProtocolTimeoutIdentifiesTheHelperAndPreservesDiagnostics(completedChe
     let helper = ["yieldd-configure-runner", "yieldd-runner-control"][completedChecks]
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),
         arguments: [], timeout: 5)
-    let outcomes: [Result<ProcessResult, any Error>] = Array(repeating: .success(processResult(stdout: "1\n")), count: completedChecks) + [
+    let outcomes: [Result<ProcessResult, any Error>] = Array(repeating: .success(processResult(stdout: "2\n")), count: completedChecks) + [
             .failure(ProcessExecutionError.timedOut(request: request,
                 result: processResult(stderr: "SSH diagnostic tail"))),
         ]

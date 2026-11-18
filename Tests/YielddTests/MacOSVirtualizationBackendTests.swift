@@ -74,8 +74,7 @@ func macOSBackendPinsSSHToResolvedTemplateAfterSymlinkRetargeting() throws {
 
     try backend.create(id: macOSBackendID, memory: .full)
     try backend.exec(["/usr/bin/true"], on: macOSBackendID)
-    try backend.stopRunner(on: macOSBackendID)
-    #expect(executor.requests.count == 4)
+    #expect(executor.requests.count == 3)
     let resolved = fixture.templateURL.resolvingSymlinksInPath()
     for request in executor.requests {
         #expect(request.arguments.contains(resolved.appendingPathComponent("SSHPrivateKey").path))
@@ -109,10 +108,6 @@ func macOSBackendCreatesOnceAndDestroysRepeatedly() throws {
         #expect(request.arguments.contains("StrictHostKeyChecking=yes"))
         #expect(request.arguments.contains("HostKeyAlias=yieldd-macos-template"))
     }
-    try backend.stopRunner(on: macOSBackendID)
-    let stop = try #require(executor.requests.last)
-    #expect(!stop.cancellable)
-    #expect(stop.timeout == 20)
     try backend.destroy(macOSBackendID)
     try backend.destroy(macOSBackendID)
     #expect(machine.stopCount == 1)
@@ -211,34 +206,6 @@ func macOSCloneStoreRecoversBothPathsWithoutATemplate() throws {
 }
 
 @Test
-func macOSBackendRunsThroughTheExistingSession() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let machine = ProbeVirtualMachine()
-    let github = BackendGitHub()
-    let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 4))
-    let backend = try makeBackend(fixture,
-        executor: executor, makeMachine: { _, _, _ in machine }
-    )
-    let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024,
-        readMemoryPressure: { .normal }
-    )
-    try EphemeralRunnerSession(
-        backend: backend, github: github, memoryAdmission: admission, jobTimeout: 60
-    ).run(id: macOSBackendID, repository: GitHubRepository("owner/repo"))
-    #expect(github.removed == [macOSBackendID.value])
-    #expect(machine.isStopped)
-    #expect(try fixture.cloneRootContents().isEmpty)
-    #expect(executor.requests[2].standardInput == Data("token\n".utf8))
-    #expect(executor.requests[2].arguments.last == "'/Users/runner/bin/yieldd-configure-runner' 'owner/repo' 'yieldd-macos-test'")
-    #expect(executor.requests[3].arguments.last == "'/Users/runner/bin/yieldd-runner-control' 'run'")
-    #expect(executor.requests[3].arguments.contains("runner@yieldd-macos-template"))
-    let reservation = try admission.acquireWithoutWaiting(reserving: RunnerPlatform.macOS.memoryReservationBytes)
-    admission.release(reservation)
-}
-
-@Test
 func macOSBackendRelayStartupFailureDoesNotBootOrRetainClone() throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
@@ -283,39 +250,10 @@ func macOSBackendDoesNotSendCommandsAfterRelayExit() throws {
     let relay = try #require(network.relays.first)
     relay.failure = TestFailure.runnerJob
     #expect(throws: TestFailure.runnerJob) { try backend.exec(["true"], on: macOSBackendID) }
-    #expect(throws: TestFailure.runnerJob) { try backend.stopRunner(on: macOSBackendID) }
     #expect(executor.requests.count == 2)
     try backend.destroy(macOSBackendID)
     #expect(machine.isStopped)
     #expect(relay.stops == 1)
-    #expect(try fixture.cloneRootContents().isEmpty)
-}
-
-@Test
-func macOSBackendRelayCleanupFailureRetainsSessionLeaseAndCapacity() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let network = BackendNetwork()
-    network.relayStopFailure = TestFailure.cleanup
-    let machine = ProbeVirtualMachine()
-    let backend = try makeBackend(fixture,
-        executor: RecordingProcessExecutor(outcomes: [
-            .success(processResult()), .success(processResult()), .failure(TestFailure.runnerConfiguration),
-        ]), network: network, makeMachine: { _, _, _ in machine }
-    )
-    let leaseStore = try RunnerLeaseStore(directory: fixture.rootURL)
-    let memory = RunnerMemoryAdmission(physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024, readMemoryPressure: { .normal })
-    let session = EphemeralRunnerSession(backend: backend, github: BackendGitHub(), memoryAdmission: memory, leaseStore: leaseStore)
-    #expect(throws: RunnerSessionError.self) { try session.run(id: macOSBackendID, repository: GitHubRepository("owner/repo")) }
-    #expect(machine.isStopped)
-    #expect(try !fixture.cloneRootContents().isEmpty)
-    #expect(try leaseStore.load().map(\.runnerID) == [macOSBackendID])
-    #expect(throws: TestFailure.memoryAllocation) {
-        _ = try memory.acquireWithoutWaiting(reserving: RunnerPlatform.macOS.memoryReservationBytes)
-    }
-    network.relays.first?.stopFailure = nil
-    try backend.destroy(macOSBackendID)
-    #expect(network.relays.first?.stops == 2)
     #expect(try fixture.cloneRootContents().isEmpty)
 }
 
@@ -336,7 +274,6 @@ func macOSBackendReleasesTerminallyFailedMachine(replaceDirectly: Bool) throws {
     )
     try backend.create(id: macOSBackendID, memory: .full)
     firstMachine?.setState(.failed(TestFailure.runnerJob))
-    try backend.stopRunner(on: macOSBackendID)
     if !replaceDirectly {
         try backend.destroy(macOSBackendID)
         try backend.destroy(macOSBackendID)
@@ -348,36 +285,6 @@ func macOSBackendReleasesTerminallyFailedMachine(replaceDirectly: Bool) throws {
     #expect(creations == 2)
     try backend.destroy(macOSBackendID)
     #expect(try fixture.cloneRootContents().isEmpty)
-}
-
-@Test
-func macOSBackendTerminalFailurePreservesSessionErrorAndReleasesReservation() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let backend = try makeBackend(fixture,
-        executor: RecordingProcessExecutor(outcomes: []), makeMachine: { _, _, _ in ProbeVirtualMachine(stateAfterStart: .failed(TestFailure.runnerJob)) }
-    )
-    let admission = RunnerMemoryAdmission(
-        physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024, readMemoryPressure: { .normal }
-    )
-    do {
-        try EphemeralRunnerSession(
-            backend: backend, github: BackendGitHub(), memoryAdmission: admission, jobTimeout: 60
-        ).run(id: macOSBackendID, repository: GitHubRepository("owner/repo"))
-        Issue.record("Expected the original VM failure")
-    } catch let MacOSVirtualizationProbeError.virtualMachineFailed(error) {
-        #expect(error as? TestFailure == .runnerJob)
-    } catch {
-        Issue.record("Unexpected error: \(error)")
-    }
-    #expect(try fixture.cloneRootContents().isEmpty)
-    var blocked = false
-    let reservation = try admission.acquire(
-        reserving: MacOSVirtualMachineLifecycle.memoryBytes,
-        checkCancellation: { if blocked { throw TestFailure.cancelled } },
-        onBlocked: { blocked = true }
-    )
-    admission.release(reservation)
 }
 
 @Test
@@ -504,34 +411,6 @@ func macOSClonePublicationDoesNotOverwriteExistingBundle() throws {
     }
     #expect(try Data(contentsOf: identityURL) == identity)
     #expect(try fixture.cloneRootContents().map(\.lastPathComponent) == [clone.url.lastPathComponent])
-}
-
-private final class BackendGitHub: GitHubRunnerManaging {
-    var removed: [String] = []
-    func createRegistrationToken(for repository: GitHubRepository) throws -> String { "token" }
-    func removeRunners(named name: String, from repository: GitHubRepository) throws { removed.append(name) }
-}
-
-@Test
-func macOSBackendBoundsRunnerStopByRemainingShutdownTime() throws {
-    let fixture = try ProbeBundleFixture()
-    defer { fixture.remove() }
-    let machine = ProbeVirtualMachine()
-    let executor = RecordingProcessExecutor(outcomes: Array(repeating: .success(processResult()), count: 3))
-    var deadline: DispatchTime?
-    let backend = try makeBackend(fixture,
-        executor: executor, maximumExecutionDeadline: { deadline }, makeMachine: { _, _, _ in machine }
-    )
-    try backend.create(id: macOSBackendID, memory: .full)
-    deadline = .now() + 5
-    try backend.stopRunner(on: macOSBackendID)
-    let timeout = try #require(executor.requests.last?.timeout)
-    #expect(timeout > 0 && timeout <= 5)
-    deadline = .now()
-    #expect(throws: MacOSVirtualizationProbeError.self) { try backend.stopRunner(on: macOSBackendID) }
-    #expect(executor.requests.count == 3)
-    deadline = nil
-    try backend.destroy(macOSBackendID)
 }
 
 @Test

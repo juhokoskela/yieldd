@@ -6,7 +6,7 @@ enum RunnerGuestProtocol {
             do {
                 let result = try backend.exec([helper, "--protocol-version"], timeout: 5,
                     outputCapture: .tail(maxBytes: 1024), as: .runner, on: id)
-                guard result.stdoutText == "1\n" else { throw RunnerGuestProtocolError.incompatible(helper) }
+                guard result.stdoutText == "2\n" else { throw RunnerGuestProtocolError.incompatible(helper) }
             } catch let error as ProcessExecutionError {
                 if case let .nonZeroExit(_, result) = error,
                    [2, 126, 127].contains(result.terminationStatus),

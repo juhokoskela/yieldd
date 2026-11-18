@@ -83,14 +83,12 @@ struct RunnerNetworkDirectories {
         try FileManager.default.removeItem(at: directory)
     }
 
-    func removeUnleased(keeping ids: Set<RunnerID>) throws {
+    func removeUnleased() throws {
         guard try Self.exists(rootURL) else { return }
-        let retained = Set(try ids.map { try directory(for: $0).lastPathComponent })
         var failures: [RunnerSessionCleanupFailure] = []
         for entry in try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil) {
             let name = entry.lastPathComponent
-            guard name.count == Self.keyBytes * 2, name.allSatisfy({ "0123456789abcdef".contains($0) }),
-                  !retained.contains(name) else { continue }
+            guard name.count == Self.keyBytes * 2, name.allSatisfy({ "0123456789abcdef".contains($0) }) else { continue }
             // Reject replaced paths rather than following a symlink during recovery.
             do {
                 if try Self.exists(entry) { try FileManager.default.removeItem(at: entry) }

@@ -2,13 +2,15 @@
 
 This Go service routes jobs for up to 16 application repositories through one coordinator and one Mac connection. Each repository has its own Linux and optional macOS scale sets. `runs-on: yieldd` targets Linux; `runs-on: yieldd-linux` targets the same scale set when GitHub retains that alias. `runs-on: yieldd-macos` targets macOS. Each platform uses its user-configured fallback target, dispatched through the infrastructure repository, unless that application repository is local-only.
 
-Each repository/platform queue can hold up to 16 assignments. A [connected Mac](../Docs/connected-mac-prototype.md) offers several Linux ARM64 or macOS ARM64 workers, shared across repositories and bounded by its memory budget. macOS is capped at two guests. Paid fallback capacity is configured separately for each queue. Additional demand waits when both local and configured hosted capacity are occupied. An issued local assignment retains only its own worker slot until cleanup is acknowledged. Other slots can keep working, including on the same repository. Idle workers create no guests and reserve no RAM. The installed Swift agent remains standalone; connected mode uses foreground `yieldd connect`.
+Each repository/platform queue can hold up to 16 assignments. A [connected Mac](../Docs/connected-mac-prototype.md) offers several Linux ARM64 or macOS ARM64 workers, shared across repositories and bounded by its memory budget. macOS is capped at two guests. Paid fallback capacity is configured separately for each queue. Additional demand waits when both local and configured hosted capacity are occupied. An issued local assignment retains only its own worker slot until cleanup is acknowledged. Other slots can keep working, including on the same repository. Idle workers create no guests and reserve no RAM. The Mac connects to the coordinator through its installed login agent or foreground `yieldd connect`.
 
 The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scaleset/tree/v0.4.0). It scales from GitHub's assigned-job count, not individual job notifications. GitHub chooses which queued job a runner receives.
 
 ## Setup
 
-Use a Linux or macOS coordinator with Go 1.27.4 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or standalone `yieldd` runner against the same repository's label during the experiment.
+Use a Linux or macOS coordinator with Go 1.27.4 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or legacy standalone `yieldd` service against the same repository's label during the experiment.
+
+Before upgrading from a release that persisted local JIT credentials, stop new demand and drain all queues and Macs. Keep the original credentials and journals until the previous coordinator has reconciled issued registrations and received guest cleanup acknowledgements. This version rejects local credentials in persisted state. Finish recovery with the old binary if startup reports that condition.
 
 When upgrading from the single-repository version, finish its jobs and recovery with the previous binary and original configuration first. Stop it, keep its state intact, and choose a fresh `--state-dir` for this version. Old `state.json` and `macos/state.json` layouts are rejected, not migrated. Existing GitHub scale sets are discovered by name.
 
@@ -207,6 +209,8 @@ go run . \
 If setup included `--macos-fallback-runner '"macos-26"'` or `--repository-routes`, include the same values in this recovery command too. Keep the complete repository list, local-only policy, device ID, fallback targets, and state directory unchanged. `--client-listen` is not needed during recovery.
 
 Targeted recovery validates the full deployment inventory and reconciles only the named lease. Set `repository`, `platform`, and `runner` to the recorded values in both examples above. Use `--recover-all` only when intentionally cancelling and cleaning every queue. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. An empty queue can adopt new infrastructure, fallback, and local-only routing under its original identity. Finish outstanding leases using their recorded route first. Never delete an active lease to force a retry.
+
+The manual fixed-secret bootstrap experiment has been retired. For old manual runs, finish both workflows, reconcile the exact runner registration and then remove its `YIELDD_BOOTSTRAP_JIT` secret. Managed fallback continues to use the infrastructure repository workflow and a separate secret per assignment.
 
 ## Validation status
 

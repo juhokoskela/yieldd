@@ -107,12 +107,10 @@ final class ConnectedAgentControl: @unchecked Sendable {
 
     func session(worker: String, state: RunnerSessionState) {
         switch state {
-        case .listenerStarted, .waitingForJob: update(worker: worker, phase: .waitingForJob)
+        case .listenerStarted: update(worker: worker, phase: .waitingForJob)
         case .jobStarted: update(worker: worker, phase: .running)
-        case .listenerExited, .capacityReleased, .cleaningUp, .waitingForGitHubCleanup: update(worker: worker, phase: .cleaningUp)
-        case .preparing: update(worker: worker, phase: .provisioning)
-        case .waitingForMemory: update(worker: worker, phase: .waitingForMemory)
-        case let .executionStopped(_, reason), let .leaseCleanupFailed(_, reason):
+        case .listenerExited, .capacityReleased: update(worker: worker, phase: .cleaningUp)
+        case let .executionStopped(_, reason):
             lock.withLock { lastError = AgentReportedError(message: reason); workers[worker]?.phase = .cleaningUp }
         case .cleanupCompleted: break
         }

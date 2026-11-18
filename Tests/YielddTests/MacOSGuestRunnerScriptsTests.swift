@@ -4,40 +4,6 @@ import Testing
 @testable import Yieldd
 
 @Test
-func macOSConfigureRunnerUsesTheEphemeralMacOSLabel() throws {
-    let fixture = try MacOSGuestRunnerFixture(configScript: """
-        #!/bin/bash
-        printf '%s\n' "$@" > "$HOME/config-arguments"
-        """)
-    defer { fixture.remove() }
-
-    let request = fixture.request(
-        script: macOSConfigureRunnerURL,
-        arguments: ["owner/repository", "yieldd-macos-test"],
-        standardInput: Data("registration-token\n".utf8)
-    )
-    let result = try ProcessExecutor().execute(request)
-    try result.requireSuccess(for: request)
-
-    let arguments = try String(
-        contentsOf: fixture.homeURL.appendingPathComponent("config-arguments"),
-        encoding: .utf8
-    ).split(separator: "\n").map(String.init)
-    #expect(arguments == [
-        "--unattended",
-        "--ephemeral",
-        "--url", "https://github.com/owner/repository",
-        "--token", "registration-token",
-        "--name", "yieldd-macos-test",
-        "--no-default-labels",
-        "--labels", "yieldd-macos",
-        "--work", "_work",
-    ])
-    #expect(result.stdout.isEmpty)
-    #expect(result.stderr.isEmpty)
-}
-
-@Test
 func macOSJITIsPrivateConsumedOnceAndReportsPickup() throws {
     let fixture = try MacOSGuestRunnerFixture(runScript: """
         #!/bin/bash
@@ -47,6 +13,9 @@ func macOSJITIsPrivateConsumedOnceAndReportsPickup() throws {
         printf 'started\n' >> "$HOME/runner-starts"
         """, configScript: "#!/bin/bash\nexit 11\n")
     defer { fixture.remove() }
+    let premature = try ProcessExecutor().execute(fixture.controlRequest("output"))
+    #expect(premature.terminationStatus != 0)
+    #expect(!FileManager.default.fileExists(atPath: fixture.homeURL.appendingPathComponent("runner-starts").path))
     let configure = fixture.request(script: macOSConfigureRunnerURL, arguments: ["--jit"],
                                     standardInput: Data("private-jit\n".utf8))
     let result = try ProcessExecutor().execute(configure).requireSuccess(for: configure)
@@ -55,7 +24,8 @@ func macOSJITIsPrivateConsumedOnceAndReportsPickup() throws {
     let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
     #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
     #expect(try ProcessExecutor().execute(configure).terminationStatus == 2)
-    let run = fixture.controlRequest("run")
+    try fixture.startAndWaitForExit()
+    let run = fixture.controlRequest("output")
     try ProcessExecutor().execute(run).requireSuccess(for: run)
     try ProcessExecutor().execute(run).requireSuccess(for: run)
     #expect(try fixture.recordedLines(filename: "runner-starts").count == 1)
@@ -73,12 +43,14 @@ func macOSRunnerControlReturnsTheListenerOutputAndStatus() throws {
         """)
     defer { fixture.remove() }
 
-    let firstResult = try ProcessExecutor().execute(fixture.controlRequest("run"))
-    let secondResult = try ProcessExecutor().execute(fixture.controlRequest("run"))
+    try fixture.configure()
+    try fixture.startAndWaitForExit()
+    let firstResult = try ProcessExecutor().execute(fixture.controlRequest("output"))
+    let secondResult = try ProcessExecutor().execute(fixture.controlRequest("output"))
 
     for result in [firstResult, secondResult] {
         #expect(result.terminationReason == .exit)
-        #expect(result.terminationStatus == 7)
+        #expect(result.terminationStatus == 0)
         #expect(result.stdoutText == "job output\n")
         #expect(result.stderr.isEmpty)
     }
@@ -97,13 +69,8 @@ func macOSReservedRunnerPublishesJobStartAndImmutableCompletion() throws {
         printf '%s\n' "$@" > "$HOME/config-arguments"
         """)
     defer { fixture.remove() }
-    let configure = fixture.request(script: macOSConfigureRunnerURL,
-                                    arguments: ["owner/repo", "yieldd-test", "yieldd-request-test"],
-                                    standardInput: Data("token\n".utf8))
+    let configure = fixture.request(script: macOSConfigureRunnerURL, arguments: ["--jit"], standardInput: Data("token\n".utf8))
     try ProcessExecutor().execute(configure).requireSuccess(for: configure)
-    let arguments = try fixture.recordedLines(filename: "config-arguments")
-    #expect(arguments.contains("yieldd-request-test"))
-    #expect(!arguments.contains("yieldd-macos"))
     let start = fixture.controlRequest("start")
     try ProcessExecutor().execute(start).requireSuccess(for: start)
     try waitForFile(fixture.diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: fixture.diagnosticsDirectory)
@@ -120,12 +87,12 @@ func macOSRunnerControlKeepsOneListenerAliveAcrossClientDisconnects() throws {
     let fixture = try MacOSGuestRunnerFixture(runScript: """
         #!/bin/bash
         printf 'started\n' >> "$HOME/runner-starts"
-        trap 'exit 0' TERM
-        while :; do sleep 1; done
+        sleep 1.5
         """)
     defer { fixture.remove() }
+    try fixture.configure()
 
-    try expectTimeout(fixture.controlRequest("run", timeout: 0.25))
+    try fixture.start()
     try waitForFile(
         fixture.homeURL.appendingPathComponent("runner-starts"),
         diagnosticsDirectory: fixture.homeURL.appendingPathComponent(
@@ -136,7 +103,7 @@ func macOSRunnerControlKeepsOneListenerAliveAcrossClientDisconnects() throws {
     let processGroup = try #require(fixture.recordedProcessGroup())
     #expect(processGroupIsRunning(processGroup))
 
-    try expectTimeout(fixture.controlRequest("run", timeout: 0.25))
+    try fixture.start()
     let starts = try String(
         contentsOf: fixture.homeURL.appendingPathComponent("runner-starts"),
         encoding: .utf8
@@ -144,9 +111,7 @@ func macOSRunnerControlKeepsOneListenerAliveAcrossClientDisconnects() throws {
     #expect(starts.count == 1)
     #expect(processGroupIsRunning(processGroup))
 
-    let stopRequest = fixture.controlRequest("stop", timeout: 5)
-    try ProcessExecutor().execute(stopRequest).requireSuccess(for: stopRequest)
-    #expect(!processGroupIsRunning(processGroup))
+    try waitForFile(fixture.diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: fixture.diagnosticsDirectory)
 }
 
 @Test
@@ -155,24 +120,23 @@ func macOSRunnerControlSerializesConcurrentStarts() throws {
         #!/bin/bash
         printf 'started\n' >> "$HOME/runner-starts"
         /bin/ps -o pgid= -p "$$" | tr -d ' ' >> "$HOME/runner-groups"
-        trap 'exit 0' TERM
-        while :; do sleep 1; done
+        sleep 1.5
         """)
     defer { fixture.remove() }
+    try fixture.configure()
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/bin/bash"),
         arguments: [
             "-c",
             """
             for _ in {1..20}; do
-                HOME="$1" "$2" run >/dev/null 2>&1 &
+                HOME="$1" "$2" start >/dev/null 2>&1 &
             done
             for _ in {1..300}; do
                 [[ -f "$1/runner-starts" ]] && break
                 sleep 0.01
             done
             sleep 0.25
-            HOME="$1" "$2" stop
             wait || true
             """,
             "parallel-runner-starts",
@@ -187,77 +151,7 @@ func macOSRunnerControlSerializesConcurrentStarts() throws {
     #expect(try fixture.recordedLines(filename: "runner-starts").count == 1)
     let processGroups = try fixture.recordedPIDs(filename: "runner-groups")
     #expect(processGroups.count == 1)
-    if let processGroup = processGroups.first {
-        #expect(!processGroupIsRunning(processGroup))
-    }
-}
-
-@Test
-func macOSRunnerControlStopsTheActualListenerProcessGroup() throws {
-    let fixture = try MacOSGuestRunnerFixture(
-        runScript: """
-            #!/bin/bash
-            if [[ "${RUNNER_MANUALLY_TRAP_SIG:-}" == 1 ]]; then
-                set -m
-                trap 'kill -INT -$PID' INT TERM
-                ./run-helper.sh &
-                PID=$!
-                wait "$PID"
-                exit $?
-            fi
-            ./run-helper.sh
-            """,
-        runHelperScript: """
-            #!/bin/bash
-            printf '%s\n' "$$" > "$HOME/helper-pid"
-            trap '' INT
-            trap 'exit 0' TERM
-            while :; do sleep 1; done
-            """
-    )
-    defer { fixture.remove() }
-
-    try expectTimeout(fixture.controlRequest("run", timeout: 0.25))
-    try waitForFile(
-        fixture.homeURL.appendingPathComponent("helper-pid"),
-        diagnosticsDirectory: fixture.diagnosticsDirectory
-    )
-    let helperPID = try #require(fixture.recordedPID(filename: "helper-pid"))
-    #expect(processIsRunning(helperPID))
-
-    let stopRequest = fixture.controlRequest("stop", timeout: 5)
-    try ProcessExecutor().execute(stopRequest).requireSuccess(for: stopRequest)
-
-    try waitForProcessToStop(helperPID)
-}
-
-@Test
-func macOSRunnerControlDoesNotSignalACompletedRunsStoredProcessGroup() throws {
-    let fixture = try MacOSGuestRunnerFixture(runScript: """
-        #!/bin/bash
-        printf 'started\n' >> "$HOME/runner-starts"
-        trap 'exit 0' TERM
-        while :; do sleep 1; done
-        """)
-    defer { fixture.remove() }
-
-    try expectTimeout(fixture.controlRequest("run", timeout: 0.25))
-    try waitForFile(
-        fixture.homeURL.appendingPathComponent("runner-starts"),
-        diagnosticsDirectory: fixture.diagnosticsDirectory
-    )
-    let processGroup = try #require(fixture.recordedProcessGroup())
-    defer { _ = Darwin.kill(-processGroup, SIGKILL) }
-    try Data("0\n".utf8).write(
-        to: fixture.diagnosticsDirectory.appendingPathComponent("exit-status"),
-        options: .atomic
-    )
-
-    let stopRequest = fixture.controlRequest("stop", timeout: 5)
-    try ProcessExecutor().execute(stopRequest).requireSuccess(for: stopRequest)
-
-    #expect(processGroupIsRunning(processGroup))
-    #expect(fixture.recordedProcessGroup() == nil)
+    try waitForFile(fixture.diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: fixture.diagnosticsDirectory)
 }
 
 @Test
@@ -271,7 +165,9 @@ func macOSRunnerControlBoundsRetainedOutput() throws {
         """)
     defer { fixture.remove() }
 
-    let request = fixture.controlRequest("run", timeout: 15)
+    try fixture.configure()
+    try fixture.startAndWaitForExit()
+    let request = fixture.controlRequest("output", timeout: 15)
     let result = try ProcessExecutor().execute(request)
     try result.requireSuccess(for: request)
 
@@ -283,22 +179,9 @@ func macOSRunnerControlBoundsRetainedOutput() throws {
     #expect(retainedOutput == result.stdout)
 }
 
-private func expectTimeout(_ request: ProcessRequest) throws {
-    do {
-        _ = try ProcessExecutor(
-            terminationGracePeriod: 0.05,
-            cancellationPollInterval: 0.01
-        ).execute(request)
-        Issue.record("Expected the runner client to time out")
-    } catch ProcessExecutionError.timedOut {
-        return
-    } catch {
-        Issue.record("Unexpected error: \(error)")
-    }
-}
-
-private func waitForFile(_ url: URL, diagnosticsDirectory: URL) throws {
-    for _ in 0..<300 {
+private func waitForFile(_ url: URL, diagnosticsDirectory: URL, timeout: TimeInterval = 3) throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    while ProcessInfo.processInfo.systemUptime < deadline {
         if FileManager.default.fileExists(atPath: url.path) {
             return
         }
@@ -318,20 +201,6 @@ private func waitForFile(_ url: URL, diagnosticsDirectory: URL) throws {
 
 private func processGroupIsRunning(_ processGroup: pid_t) -> Bool {
     Darwin.kill(-processGroup, 0) == 0 || errno == EPERM
-}
-
-private func processIsRunning(_ process: pid_t) -> Bool {
-    Darwin.kill(process, 0) == 0 || errno == EPERM
-}
-
-private func waitForProcessToStop(_ process: pid_t) throws {
-    for _ in 0..<300 {
-        if !processIsRunning(process) {
-            return
-        }
-        Thread.sleep(forTimeInterval: 0.01)
-    }
-    throw MacOSGuestRunnerTestError.processDidNotStop(process)
 }
 
 private struct MacOSGuestRunnerFixture {
@@ -354,7 +223,6 @@ private struct MacOSGuestRunnerFixture {
 
     init(
         runScript: String = "#!/bin/bash\nexit 0\n",
-        runHelperScript: String? = nil,
         configScript: String = "#!/bin/bash\nexit 0\n"
     ) throws {
         try FileManager.default.createDirectory(
@@ -362,12 +230,6 @@ private struct MacOSGuestRunnerFixture {
             withIntermediateDirectories: true
         )
         try writeExecutable(runScript, to: runnerDirectory.appendingPathComponent("run.sh"))
-        if let runHelperScript {
-            try writeExecutable(
-                runHelperScript,
-                to: runnerDirectory.appendingPathComponent("run-helper.sh")
-            )
-        }
         try writeExecutable(configScript, to: runnerDirectory.appendingPathComponent("config.sh"))
     }
 
@@ -385,6 +247,21 @@ private struct MacOSGuestRunnerFixture {
         )
     }
 
+    func configure() throws {
+        let command = request(script: macOSConfigureRunnerURL, arguments: ["--jit"], standardInput: Data("token\n".utf8))
+        try ProcessExecutor().execute(command).requireSuccess(for: command)
+    }
+
+    func start() throws {
+        let command = controlRequest("start")
+        try ProcessExecutor().execute(command).requireSuccess(for: command)
+    }
+
+    func startAndWaitForExit() throws {
+        try start()
+        try waitForFile(diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: diagnosticsDirectory, timeout: 15)
+    }
+
     func controlRequest(_ command: String, timeout: TimeInterval? = 5) -> ProcessRequest {
         request(
             script: macOSRunnerControlURL,
@@ -395,10 +272,6 @@ private struct MacOSGuestRunnerFixture {
 
     func recordedProcessGroup() -> pid_t? {
         recordedPID(at: processGroupURL)
-    }
-
-    func recordedPID(filename: String) -> pid_t? {
-        recordedPID(at: homeURL.appendingPathComponent(filename))
     }
 
     func recordedPIDs(filename: String) throws -> [pid_t] {
@@ -426,20 +299,6 @@ private struct MacOSGuestRunnerFixture {
     }
 
     func remove() {
-        if let processGroup = recordedProcessGroup() {
-            _ = Darwin.kill(-processGroup, SIGKILL)
-        }
-        if let processGroups = try? recordedPIDs(filename: "runner-groups") {
-            for processGroup in Set(processGroups) where processGroup != Darwin.getpgrp() {
-                _ = Darwin.kill(-processGroup, SIGKILL)
-            }
-        }
-        if let helperPID = recordedPID(filename: "helper-pid") {
-            if Darwin.getpgid(helperPID) == helperPID {
-                _ = Darwin.kill(-helperPID, SIGKILL)
-            }
-            _ = Darwin.kill(helperPID, SIGKILL)
-        }
         try? FileManager.default.removeItem(at: homeURL)
     }
 
@@ -454,7 +313,6 @@ private struct MacOSGuestRunnerFixture {
 
 private enum MacOSGuestRunnerTestError: Error {
     case fileDidNotAppear(String)
-    case processDidNotStop(pid_t)
 }
 
 private let macOSGuestDirectory = URL(fileURLWithPath: #filePath)

@@ -65,13 +65,11 @@ func runConnectedService(
         if let installed = try ConnectedAgentStore(directory: leaseStore.directory).load() {
             try installed.requireIdentity(server: serverURL, deviceID: deviceID)
         }
-        guard try leaseStore.load().isEmpty else {
-            throw ValidationError("Run recover to clean up standalone runner leases before connecting.")
-        }
         if let template {
             try RunnerStorage.required(in: leaseStore.directory).validateTemplateLocation(template)
         }
         let directory = leaseStore.directory
+        let ownershipDescriptor = leaseStore.ownershipDescriptor
         // Recover every persisted platform, even if it is no longer enabled.
         // macOS recovery removes abandoned clones without requiring the template.
         try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
@@ -82,7 +80,7 @@ func runConnectedService(
             output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
             return
         }
-        try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
+        try removeUnleasedRunnerFiles(in: directory, checkCancellation: stop.check)
         let storage = try RunnerStorage.required(in: directory)
         try storage.validate(stateDirectory: directory)
         try RunnerNetwork.requireRelay()
@@ -102,7 +100,7 @@ func runConnectedService(
                 try storage.validateContainer(containerExecutable: container)
                 return .linux(containerURL: container)
             case .macOS:
-                guard let template else { throw RunnerServiceConfigurationError.templatePairRequired }
+                guard let template else { throw ValidationError("A macOS worker requires a template.") }
                 return .macOS(templateURL: template)
             }
         }
@@ -124,7 +122,7 @@ func runConnectedService(
             switch worker.backend {
             case let .linux(containerURL):
                 backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
-                    stateDirectory: directory,
+                    stateDirectory: directory, ownershipDescriptor: ownershipDescriptor,
                     checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                     dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
             case let .macOS(templateURL):
@@ -138,7 +136,7 @@ func runConnectedService(
                 authorization: authorization, wait: stop.wait,
                 stateChanged: {
                     control?.session(worker: workerID, state: $0)
-                    reportRunnerServiceState($0, platform: platform, output: output)
+                    reportRunnerServiceState($0, output: output)
                 })
             try runConnectedClient(checkCancellation: stop.check, recover: {
                 control?.update(worker: workerID, phase: .recovering)

@@ -12,7 +12,7 @@ The layout is:
   macos-probes/                        disposable diagnostic clones
 ~/Library/Application Support/yieldd/  outside the guest volume
   storage.json                         pinned volume identity and mount point
-  active-runner.json, connected*.json   cleanup records
+  linux-machine-test, connected*runner*.json   cleanup records
   runner.lock
 ```
 
@@ -20,7 +20,7 @@ yieldd checks the mounted volume's UUID, quota, and storage paths before creatin
 
 ## Set up a Mac
 
-Stop yieldd and finish any outstanding cleanup first. Use `recover` for standalone leases, or reconnect with the original coordinator and device ID for connected leases. When upgrading from an unconfigured storage layout, finish that cleanup with the previous version before upgrading. This version does not search or migrate old Container roots or clone directories. Inspect those locations before retiring them, especially if other applications use Container. Configuration refuses pending leases. Do not delete journals to bypass these checks.
+Stop yieldd and finish any outstanding cleanup first. Use `recover` for interrupted machine tests, or reconnect with the original coordinator and device ID for connected leases. When upgrading from an unconfigured storage layout, finish that cleanup with the previous version before upgrading. This version does not search or migrate old Container roots or clone directories. Inspect those locations before retiring them, especially if other applications use Container. Configuration refuses pending leases. Do not delete journals to bypass these checks.
 
 Create an encrypted APFS volume in Disk Utility with an explicit quota, or use the commands below. They add a volume, not a partition, and do not move existing files. Run them as your normal user. `sudo` requests administrator authorization, and `-passprompt` requests the new volume's encryption passphrase without putting it in shell history. Check the container identifier before adding the volume. Do not repeat this step if the volume already exists.
 
@@ -52,7 +52,7 @@ container build -t local/yieldd-guest:dev Guest
 container builder stop
 ```
 
-Confirm that `paths.appRoot` (or `appRoot` on older Container versions) points to `/Volumes/YielddRunners/container`. yieldd's service-start calls use this configured root, and Linux creation and cleanup check the running service's reported root. Standalone `recover` does not start Container: after a reboot, start it with this root before recovering Linux leases. Starting Container manually without `--app-root` can select its old data; yieldd refuses to create or clean up runners there. Keep the old root until you have checked that unrelated Container data is no longer needed.
+Confirm that `paths.appRoot` (or `appRoot` on older Container versions) points to `/Volumes/YielddRunners/container`. yieldd's service-start calls use this configured root, and Linux creation and cleanup check the running service's reported root. `yieldd recover` does not start Container: after a reboot, start it with this root before recovering a Linux machine test. Starting Container manually without `--app-root` can select its old data; yieldd refuses to create or clean up runners there. Keep the old root until you have checked that unrelated Container data is no longer needed.
 
 The machine-bundle cleanup check uses `plugin-state/machine-apiserver/machines/`, which the pinned Container 1.6.0 build retains. Recheck that boundary when upgrading Container, especially if its machine storage layout changes.
 
@@ -66,7 +66,7 @@ ditto /Users/YOUR_USER/VM.bundle /Volumes/YielddRunners/VM.bundle
   --template /Volumes/YielddRunners/VM.bundle
 ```
 
-Use the new template path in `connect`, `serve`, or the agent configuration. The template must be outside both `macos-runners` and `macos-probes`, and on the same volume as the clones. No guest scripts need changing for storage quotas.
+Use the new template path in `connect` or the agent configuration. The template must be outside both `macos-runners` and `macos-probes`, and on the same volume as the clones. No guest scripts need changing for storage quotas.
 
 ## If the volume fills
 

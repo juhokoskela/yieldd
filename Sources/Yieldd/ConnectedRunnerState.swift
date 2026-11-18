@@ -17,7 +17,7 @@ struct ConnectedOffer: Codable, Equatable, Sendable {
               ["linux", "macos"].contains(platform), architecture == "arm64" else {
             throw ConnectedRunnerError.invalidOffer
         }
-        _ = try GitHubRepository(repository)
+        try validateGitHubRepository(repository)
         self.slot = slot
         self.owner = owner
         self.runner = runner

@@ -63,7 +63,6 @@ struct Doctor {
         } catch {
             checks.append(DoctorCheck(name: "network relay", status: .failed(describeError(error))))
         }
-        checks.append(contentsOf: githubChecks())
         do {
             if let storage = try loadStorage() {
                 if let templateURL {
@@ -158,33 +157,7 @@ struct Doctor {
         return checks
     }
 
-    private func githubChecks() -> [DoctorCheck] {
-        let ghURL: URL
-        do {
-            ghURL = try executableLocator.locate("gh")
-        } catch {
-            return [
-                DoctorCheck(name: "gh executable", status: .failed(describeError(error))),
-                DoctorCheck(
-                    name: "GitHub authentication",
-                    status: .skipped("gh executable is unavailable")
-                ),
-            ]
-        }
 
-        var checks = [DoctorCheck(name: "gh executable", status: .passed(ghURL.path))]
-        let request = ProcessRequest(
-            executableURL: ghURL,
-            arguments: ["auth", "status", "--active", "--hostname", "github.com"]
-        )
-        do {
-            try executor.execute(request).requireSuccess(for: request)
-            checks.append(DoctorCheck(name: "GitHub authentication", status: .passed("authenticated")))
-        } catch {
-            checks.append(DoctorCheck(name: "GitHub authentication", status: .failed(describeError(error))))
-        }
-        return checks
-    }
 }
 
 struct DoctorReport: Equatable {

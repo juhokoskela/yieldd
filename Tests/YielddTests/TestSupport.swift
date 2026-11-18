@@ -13,19 +13,6 @@ func saveTestStorageBinding(in directory: URL) throws {
     try RunnerStorage(volumePath: directory.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString).save(in: directory)
 }
 
-extension AgentConfiguration {
-    init(
-        repositories: [GitHubRepository], macOSRepositories: [GitHubRepository] = [],
-        macOSTemplateURL: URL? = nil, containerURL: URL?, ghURL: URL
-    ) throws {
-        try self.init(
-            runners: RunnerServiceConfiguration(
-                repositories: repositories, macOSRepositories: macOSRepositories, macOSTemplateURL: macOSTemplateURL
-            ), containerURL: containerURL, ghURL: ghURL
-        )
-    }
-}
-
 extension RunnerMemoryAdmission {
     func acquireWithoutWaiting(reserving bytes: UInt64) throws -> RunnerMemoryReservation {
         var blocked = false
@@ -138,7 +125,6 @@ enum TestFailure: Error, Equatable {
     case runnerJob
     case runnerStop
     case runnerConfiguration
-    case registrationToken
     case cleanup
     case githubCleanup
     case machineCleanup

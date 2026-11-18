@@ -48,7 +48,7 @@ struct StorageStatusCommand: ParsableCommand {
 
 func configureRunnerStorage(volume: URL, leaseStore: RunnerLeaseStore,
                             executor: any ProcessExecuting = ProcessExecutor()) throws -> RunnerStorage {
-    guard try leaseStore.load().isEmpty, !ConnectedRunnerStore.hasRecovery(in: leaseStore.directory) else {
+    guard try leaseStore.pendingMachineTest() == nil, !ConnectedRunnerStore.hasRecovery(in: leaseStore.directory) else {
         throw RunnerStorageError.outstandingRecovery
     }
     let url = volume.standardizedFileURL

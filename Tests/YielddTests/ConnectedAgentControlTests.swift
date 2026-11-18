@@ -160,7 +160,7 @@ private struct AgentControlFixture {
     let control: ConnectedAgentControl
     init() throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("agent-control-\(UUID().uuidString)")
-        _ = try AgentConfigurationStore(directory: directory)
+        _ = try RunnerLeaseStore(directory: directory)
         control = ConnectedAgentControl(directory: directory)
     }
     func remove() { try? FileManager.default.removeItem(at: directory) }

@@ -1,24 +1,5 @@
 import Foundation
 
-struct RunnerAssignment {
-    let routingLabel: String
-    let pickupTimeout: TimeInterval
-
-    init(routingLabel: String, pickupTimeout: TimeInterval = 5 * 60) throws {
-        let suffix = routingLabel.dropFirst("yieldd-request-".count)
-        guard routingLabel.hasPrefix("yieldd-request-"), !suffix.isEmpty,
-              routingLabel.utf8.count <= 63,
-              suffix.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }) else {
-            throw RunnerAssignmentError.invalidRoutingLabel
-        }
-        guard pickupTimeout.isFinite, pickupTimeout > 0 else {
-            throw RunnerAssignmentError.invalidPickupTimeout
-        }
-        self.routingLabel = routingLabel
-        self.pickupTimeout = pickupTimeout
-    }
-}
-
 struct ReservedRunnerJob {
     let backend: any RunnerBackend
     let checkCancellation: () throws -> Void
@@ -26,7 +7,7 @@ struct ReservedRunnerJob {
     let stateChanged: (RunnerSessionState) -> Void
     var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
-    func run(id: RunnerID, pickupTimeout: TimeInterval, executionTimeout: TimeInterval?) throws {
+    func run(id: RunnerID, pickupTimeout: TimeInterval) throws {
         try checkCancellation()
         try backend.exec(["yieldd-runner-control", "start"], timeout: 30,
                          outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
@@ -37,7 +18,7 @@ struct ReservedRunnerJob {
             try checkCancellation()
             let remaining = deadline - currentTime()
             guard remaining > 0 else {
-                throw jobStarted ? RunnerAssignmentError.executionTimedOut : RunnerAssignmentError.pickupTimedOut
+                throw RunnerAssignmentError.pickupTimedOut
             }
             let result = try backend.exec(
                 ["yieldd-runner-control", "status"], timeout: min(10, remaining),
@@ -46,33 +27,27 @@ struct ReservedRunnerJob {
             let status = try RunnerListenerStatus.decode(result.stdout)
             if status.jobStarted && !jobStarted {
                 jobStarted = true
-                deadline = executionTimeout.map { currentTime() + $0 } ?? .infinity
+                deadline = .infinity
                 stateChanged(.jobStarted(id))
             }
             if let exitStatus = status.exitStatus {
                 stateChanged(.listenerExited(id, status: exitStatus))
-                let replay: ProcessResult
-                do {
-                    replay = try backend.exec(
-                        ["yieldd-runner-control", "run"], timeout: 30,
-                        outputCapture: .tail(maxBytes: EphemeralRunnerSession.jobOutputTailBytes),
-                        as: .root, on: id
-                    )
-                } catch let ProcessExecutionError.nonZeroExit(_, result) where result.terminationStatus == exitStatus {
-                    replay = result
+                if exitStatus == 0 {
+                    guard jobStarted else { throw RunnerAssignmentError.exitedWithoutJob }
+                    return
                 }
-                guard replay.terminationStatus == exitStatus else { throw RunnerAssignmentError.invalidStatus }
-                guard exitStatus == 0 else {
-                    let output = [replay.stdoutText, replay.stderrText]
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }.joined(separator: "\n")
-                    throw RunnerAssignmentError.listenerFailed(exitStatus, output: output)
-                }
-                guard jobStarted else { throw RunnerAssignmentError.exitedWithoutJob }
-                return
+                let replay = try backend.exec(
+                    ["yieldd-runner-control", "output"], timeout: 30,
+                    outputCapture: .tail(maxBytes: 1_024 * 1_024),
+                    as: .root, on: id
+                )
+                let output = [replay.stdoutText, replay.stderrText]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }.joined(separator: "\n")
+                throw RunnerAssignmentError.listenerFailed(exitStatus, output: output)
             }
             if !status.jobStarted && jobStarted { throw RunnerAssignmentError.invalidStatus }
-            try wait(min(0.5, max(0, deadline - currentTime())))
+            try wait(min(jobStarted ? 2 : 0.5, max(0, deadline - currentTime())))
         }
     }
 }
@@ -100,17 +75,12 @@ private struct RunnerListenerStatus: Decodable {
 }
 
 enum RunnerAssignmentError: Error, Equatable, LocalizedError {
-    case invalidRoutingLabel, invalidPickupTimeout, pickupTimedOut, executionTimedOut, startupTimedOut
+    case pickupTimedOut
     case invalidStatus, exitedWithoutJob, listenerFailed(Int32, output: String)
 
     var errorDescription: String? {
         switch self {
-        case .invalidRoutingLabel:
-            "Routing labels must start with yieldd-request-, contain only lowercase letters, digits, and hyphens, and be at most 63 characters."
-        case .invalidPickupTimeout: "The job pickup timeout must be greater than zero."
         case .pickupTimedOut: "Timed out waiting for the reserved job. This does not prove that the job never started."
-        case .executionTimedOut: "The reserved job exceeded its execution timeout."
-        case .startupTimedOut: "Runner startup exceeded its ten-minute timeout."
         case .invalidStatus: "The guest returned invalid runner lifecycle status. Update the guest scripts before retrying."
         case .exitedWithoutJob: "The runner exited without reporting a job start."
         case let .listenerFailed(status, output):

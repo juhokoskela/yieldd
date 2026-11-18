@@ -1,6 +1,6 @@
 # Server-client architecture
 
-This document records the direction for connected mode. The [Go coordinator prototype](Server/README.md) implements one-repository Scale Set demand and hosted provisioning. The first [connected Mac slice](Docs/connected-mac-prototype.md) adds one foreground Linux ARM64 client, expiring offers, and local-first selection, pending live acceptance. Multiple devices remain future work. Connected agents can run at login through the existing LaunchAgent. Standalone service and agent modes do not require a server.
+Unattended execution requires the coordinator. It listens for GitHub demand by repository and platform, prefers connected Macs, and provisions hosted fallback where configured. Each Mac can connect in the foreground or through its login agent. See the [coordinator runbook](Server/README.md) and [Mac setup guide](Docs/connected-mac-prototype.md).
 
 ## Responsibilities
 
@@ -85,21 +85,9 @@ The label-based fallback dispatches a bootstrap workflow in `yieldd-infra` on a 
 
 Manual repository-JIT experiments established happy-path cross-repository execution on Ubuntu, plus same-repository failure, cancellation, and no-pickup behavior. Live coordinator tests subsequently confirmed automatic hosted execution, restart reconciliation, and workload failure with cleanup. The coordinator records intent before side effects, uses per-bootstrap secrets, bounds provisioning, and reconciles registrations and bootstrap runs. Missing pickup acknowledgement must never trigger replacement execution without reconciling the original attempt.
 
-## Standalone and connected modes
+## Mac operation
 
-Standalone mode keeps the current model:
-
-```sh
-yieldd serve OWNER/REPOSITORY [OWNER/REPOSITORY ...]
-```
-
-The repository list is local, and each argument creates one slot.
-
-The installed local agent persists this same repository list and runs the same pool through a per-user LaunchAgent. It is an unattended form of standalone mode, not the beginning of the server protocol.
-
-Connected mode moves repository authorization and scheduling to the server. Local configuration should then contain device identity, capacity policy, and server connection details rather than an authoritative repository list.
-
-Both modes should use the same local runner-session, cleanup, and recovery code. The standalone LaunchAgent's repository list is local-only and does not define the connected-client configuration.
+The coordinator owns unattended scheduling. The foreground client and login agent run the same connected service. After enrollment, a trusted workflow can verify local job pickup through the coordinator.
 
 ## Open questions
 

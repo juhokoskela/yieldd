@@ -216,67 +216,6 @@ func cancellationDuringDockerReadinessStopsRetries() throws {
 }
 
 @Test
-func stopRunnerRejectsAChangedContainerRoot() throws {
-    let fixture = try StorageFixture()
-    defer { fixture.remove() }
-    let storage = RunnerStorage(volumePath: fixture.directory.resolvingSymlinksInPath().path,
-                                volumeUUID: UUID().uuidString)
-    let executor = RecordingProcessExecutor(outcomes: [
-        .success(processResult()), .success(linuxInspection(id: runnerID)), .success(processResult()),
-        .success(processResult()), .success(processResult()),
-        .success(processResult(stdout: "{\"status\":\"running\",\"paths\":{\"appRoot\":\"\(fixture.directory.path)\"}}")),
-    ])
-    var rootChanged = false
-    let backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
-        stateDirectory: fixture.directory, loadStorage: {
-            if !rootChanged { return nil }
-            try storage.validateContainer(containerExecutable: containerURL, executor: executor)
-            return storage
-        }, network: BackendNetwork())
-    try backend.create(id: runnerID, memory: .full)
-    rootChanged = true
-    executor.clearRequests()
-
-    #expect(throws: RunnerStorageError.containerRootMismatch(path: storage.containerURL.path)) {
-        try backend.stopRunner(on: runnerID)
-    }
-    #expect(executor.requests.map(\.arguments) == [["system", "status", "--format", "json"]])
-}
-
-@Test
-func stopRunnerDoesNotReadStorageOrBootAnUnownedGuest() throws {
-    let fixture = try StorageFixture()
-    defer { fixture.remove() }
-    let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-    let backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
-                                         stateDirectory: fixture.directory)
-
-    try backend.stopRunner(on: runnerID)
-    #expect(executor.requests.isEmpty)
-}
-
-@Test
-func stopRunnerUsesBoundedNoncancellableRootCommand() throws {
-    let (backend, executor) = try readyLinuxBackend(outcomes: [.success(processResult())], containerURL: containerURL, id: runnerID)
-
-    try backend.stopRunner(on: runnerID)
-
-    #expect(executor.requests == [ProcessRequest(
-        executableURL: containerURL,
-        arguments: [
-            "machine", "run",
-            "--name", runnerID.value,
-            "--user", "root",
-            "--",
-            "yieldd-runner-control", "stop",
-        ],
-        timeout: AppleContainerBackend.runnerStopTimeout,
-        outputCapture: .tail(maxBytes: 64 * 1_024),
-        cancellable: false
-    )])
-}
-
-@Test
 func guestCommandsDefaultToBoundedOutput() throws {
     let outcomes: [Result<ProcessResult, any Error>] = [.success(processResult())]
     let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: containerURL, id: runnerID)
@@ -354,7 +293,7 @@ func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
     let (backend, executor) = try readyLinuxBackend(outcomes: outcomes, containerURL: containerURL, id: runnerID)
 
     try backend.exec(
-        ["yieldd-runner-control", "run"],
+        ["yieldd-runner-control", "output"],
         timeout: nil,
         outputCapture: .tail(maxBytes: 1_024),
         as: .root,
@@ -368,7 +307,7 @@ func passesBoundedOutputCaptureWithoutPuttingItInArguments() throws {
             "--name", runnerID.value,
             "--user", "root",
             "--",
-            "yieldd-runner-control", "run",
+            "yieldd-runner-control", "output",
         ],
         outputCapture: .tail(maxBytes: 1_024)
     )])

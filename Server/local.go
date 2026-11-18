@@ -103,7 +103,7 @@ func (c *coordinator) declineDevice(request deviceRequest) error {
 	if l.Local.Phase != localDeclined {
 		next := *l.Local
 		next.Phase = localDeclined
-		if err := a.saveLocal(&next, ""); err != nil {
+		if err := a.saveLocal(&next); err != nil {
 			return err
 		}
 		c.logger.Info("Local offer declined; reconciling without the acceptance delay", "runner", l.Name, "slot", request.Slot)
@@ -121,7 +121,7 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 	next.Phase = localAccepted
 	next.Expires = time.Now().UTC().Add(registrationLifetime)
 	acceptLatency := time.Since(l.Created)
-	if err := a.saveLocal(&next, l.JIT); err != nil {
+	if err := a.saveLocal(&next); err != nil {
 		return nil, err
 	}
 	a.logger.Info("Local offer accepted", "runner", l.Name, "device", next.DeviceID, "accept_latency", acceptLatency)
@@ -137,7 +137,7 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 	issued.Expires = time.Now().UTC().Add(localStartupLifetime)
 	// Persist possible delivery before returning credentials. Never issue them a second time.
 	issuedLease := *a.lease
-	issuedLease.Local, issuedLease.RunnerID, issuedLease.JIT = &issued, generated.Runner.ID, ""
+	issuedLease.Local, issuedLease.RunnerID = &issued, generated.Runner.ID
 	if err := a.replace(&issuedLease); err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 		if !l.Local.JobStarted {
 			next := *l.Local
 			next.JobStarted = true
-			if err := a.saveLocal(&next, ""); err != nil {
+			if err := a.saveLocal(&next); err != nil {
 				return nil, err
 			}
 		}
@@ -197,7 +197,7 @@ func (a *assignment) recordLocalJob(id int, completed bool) error {
 	if next == *l.Local {
 		return nil
 	}
-	return a.saveLocal(&next, "")
+	return a.saveLocal(&next)
 }
 
 func (c *coordinator) completeDevice(ctx context.Context, request deviceRequest) error {
@@ -249,7 +249,7 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, nil
 	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
-	if err := a.saveLocal(nil, l.JIT); err != nil {
+	if err := a.saveLocal(nil); err != nil {
 		return false, err
 	}
 	a.logger.Info("Local offer expired; using hosted fallback", "runner", l.Name, "device", a.state.Config.DeviceID, "offer_age", time.Since(l.Created))
@@ -259,9 +259,9 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 	return false, a.prepare(ctx)
 }
 
-func (a *assignment) saveLocal(local *localLease, jit string) error {
+func (a *assignment) saveLocal(local *localLease) error {
 	nextLease := *a.lease
-	nextLease.Local, nextLease.JIT = local, jit
+	nextLease.Local = local
 	return a.replace(&nextLease)
 }
 

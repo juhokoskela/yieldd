@@ -1,6 +1,6 @@
 import Foundation
 
-struct ConnectedRunner {
+final class ConnectedRunner {
     let backend: any RunnerBackend
     let store: ConnectedRunnerStore
     let server: String
@@ -9,13 +9,43 @@ struct ConnectedRunner {
     let complete: (ConnectedOffer) throws -> Void
     let authorization: ConnectedExecutionAuthorization
     let wait: (TimeInterval) throws -> Void
-    var stateChanged: (RunnerSessionState) -> Void = { _ in }
-    var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var stateChanged: (RunnerSessionState) -> Void
+    var currentTime: () -> TimeInterval
 
-    func recover(confirmRegistrationRemoved runner: String? = nil) throws {
+    // Valid only for this worker process. A restart must prove absence again.
+    private var absent: RunnerID?
+
+    init(backend: any RunnerBackend, store: ConnectedRunnerStore, server: String, deviceID: String,
+         accept: @escaping (ConnectedOffer) throws -> String, complete: @escaping (ConnectedOffer) throws -> Void,
+         authorization: ConnectedExecutionAuthorization, wait: @escaping (TimeInterval) throws -> Void,
+         stateChanged: @escaping (RunnerSessionState) -> Void = { _ in },
+         currentTime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.backend = backend
+        self.store = store
+        self.server = server
+        self.deviceID = deviceID
+        self.accept = accept
+        self.complete = complete
+        self.authorization = authorization
+        self.wait = wait
+        self.stateChanged = stateChanged
+        self.currentTime = currentTime
+    }
+
+    func recover() throws {
         guard store.platform == backend.platform else { throw ConnectedRunnerError.invalidState }
-        try recoverConnectedRunner(store: store, server: server, deviceID: deviceID,
-                                   confirmRegistrationRemoved: runner, destroy: backend.destroy, complete: complete)
+        guard let lease = try store.load() else { return }
+        try lease.requireRecoveryIdentity(server: server, deviceID: deviceID)
+        try withConnectedRunnerActivity(lease.offer.runner) {
+            let id = RunnerID(value: lease.offer.runner)
+            if absent != id {
+                try backend.destroy(id)
+                absent = id
+            }
+            try acknowledgeConnectedRunner(lease.offer, complete: complete)
+            try store.clear()
+            absent = nil
+        }
     }
 
     func run(_ offer: ConnectedOffer, memory: RunnerMemoryAllocation, releaseCapacity: () -> Void = {}) throws {
@@ -23,6 +53,7 @@ struct ConnectedRunner {
         defer { if releaseOnExit { releaseCapacity() } }
         guard offer.runnerPlatform == backend.platform, offer.slot == store.slot else { throw ConnectedRunnerError.invalidOffer }
         guard try store.load() == nil else { throw ConnectedRunnerError.recoveryRequired }
+        absent = nil
         try backend.prepare()
         let id = RunnerID(value: offer.runner)
         let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(id.value)")
@@ -45,13 +76,13 @@ struct ConnectedRunner {
             try authorization.check()
             try RunnerGuestProtocol.validate(backend: backend, id: id)
             try backend.exec(["yieldd-configure-runner", "--jit"], standardInput: Data("\(jit)\n".utf8),
-                             timeout: EphemeralRunnerSession.configurationTimeout, on: id)
+                             timeout: 5 * 60, on: id)
             try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
                                   stateChanged: { state in
                                       if case .jobStarted = state { jobStarted = true }
-                                      stateChanged(state)
+                                      self.stateChanged(state)
                                   }, currentTime: currentTime)
-                .run(id: id, pickupTimeout: 5 * 60, executionTimeout: nil)
+                .run(id: id, pickupTimeout: 5 * 60)
         } catch {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation
@@ -63,11 +94,13 @@ struct ConnectedRunner {
         if machineMayExist {
             try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
         }
+        absent = id
         releaseOnExit = false
         releaseCapacity()
         stateChanged(.capacityReleased(id))
         try cleanUp(step: .githubRunner, after: failure) { try acknowledgeConnectedRunner(offer, complete: complete) }
         try cleanUp(step: .leaseRecord, after: failure) { try store.clear() }
+        absent = nil
         stateChanged(.cleanupCompleted(id))
         if let failure, !isContainedConnectedFailure(failure) { throw failure }
     }
@@ -104,27 +137,20 @@ func isContainedConnectedFailure(_ error: any Error) -> Bool {
         || (error as? ConnectedRunnerError)?.httpStatus == 410
 }
 
-func recoverConnectedRunner(
-    store: ConnectedRunnerStore, server: String, deviceID: String,
-    confirmRegistrationRemoved runner: String? = nil,
-    destroy: (RunnerID) throws -> Void, complete: (ConnectedOffer) throws -> Void
-) throws {
-    guard let lease = try store.load() else {
-        if runner != nil { throw ConnectedRunnerError.confirmationMismatch }
-        return
+extension ConnectedLease {
+    func requireRecoveryIdentity(server: String, deviceID: String) throws {
+        guard try ConnectedHTTPClient.serverURL(self.server) == ConnectedHTTPClient.serverURL(server),
+              self.deviceID == deviceID else { throw ConnectedRunnerError.identityChanged }
     }
-    guard try ConnectedHTTPClient.serverURL(lease.server) == ConnectedHTTPClient.serverURL(server),
-          lease.deviceID == deviceID else { throw ConnectedRunnerError.identityChanged }
-    if let runner, runner != lease.offer.runner { throw ConnectedRunnerError.confirmationMismatch }
-    let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(lease.offer.runner)")
-    defer { ProcessInfo.processInfo.endActivity(activity) }
-    // A restart never resumes execution, even if the acceptance response was lost.
-    try destroy(RunnerID(value: lease.offer.runner))
-    if runner == nil { try acknowledgeConnectedRunner(lease.offer, complete: complete) }
-    try store.clear()
 }
 
-private func acknowledgeConnectedRunner(_ offer: ConnectedOffer, complete: (ConnectedOffer) throws -> Void) throws {
+func withConnectedRunnerActivity(_ runner: String, operation: () throws -> Void) rethrows {
+    let activity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "yieldd runner \(runner)")
+    defer { ProcessInfo.processInfo.endActivity(activity) }
+    try operation()
+}
+
+func acknowledgeConnectedRunner(_ offer: ConnectedOffer, complete: (ConnectedOffer) throws -> Void) throws {
     do { try complete(offer) } catch ConnectedRunnerError.http(409, _, _) {
         throw ConnectedRunnerError.registrationReconciliationRequired(offer.runner)
     }

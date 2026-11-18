@@ -47,7 +47,7 @@ func storageConfigurationRefusesUnresolvedLeases(connected: Bool) throws {
             runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: "owner/repo", platform: "linux", architecture: "arm64")
         try ConnectedRunnerStore(directory: fixture.directory).save(ConnectedLease(server: "https://example.com", deviceID: "device", offer: offer))
     } else {
-        try leases.save(RunnerLease(runnerID: RunnerID(value: "yieldd-pending"), repository: GitHubRepository("owner/repo")))
+        try leases.recordMachineTest(RunnerPlatform.linux.makeTestRunnerID())
     }
     let executor = RecordingProcessExecutor(outcomes: [])
     #expect(throws: RunnerStorageError.outstandingRecovery) {
@@ -187,11 +187,6 @@ func doctorAndInstallerRejectMissingStorageWithoutStartingAnything() throws {
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path)).run()
     #expect(!report.succeeded)
     #expect(report.checks.last == DoctorCheck(name: "Runner storage", status: .failed(describeError(RunnerStorageError.notConfigured))))
-    let command = try AgentInstallCommand.parse(["owner/repo", "--preflight-only"])
-    #expect(throws: RunnerStorageError.notConfigured) {
-        try command.run(locateExecutable: { _ in URL(fileURLWithPath: "/usr/bin/true") }, stateDirectory: fixture.directory,
-                        memoryAdmission: RunnerMemoryAdmission(physicalMemoryBytes: 32 * 1_024 * 1_024 * 1_024))
-    }
     #expect(executor.requests.isEmpty)
     #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("agent.json").path))
 }

@@ -30,7 +30,7 @@ A custom network plugin alone is insufficient. The [runtime registers two fixed 
 
 ### macOS
 
-macOS runners use [VZFileHandleNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment), which exchanges Ethernet frames through a connected datagram socket. It connects to a gVisor-based relay for DHCP, DNS, forwarding, destination checks, and host-to-guest SSH. The manual `agent vm-probe` still uses `VZNATNetworkDeviceAttachment`.
+macOS runners use [VZFileHandleNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment), which exchanges Ethernet frames through a connected datagram socket. It connects to a gVisor-based relay for DHCP, DNS, forwarding, destination checks, and host-to-guest SSH.
 
 The SDK describes `vmnet_enable_isolation_key` as isolation between VM interfaces. It does not promise to block host or LAN destinations. Container's `--internal` option describes a host-only network, not an Internet-only network. Neither satisfies this requirement on its own.
 

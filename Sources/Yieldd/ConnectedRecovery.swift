@@ -8,38 +8,63 @@ func recoverConnectedPlatforms(
     output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
 ) throws {
     control?.recovering(ConnectedRunnerStore.all(in: directory).compactMap { try? $0.load() })
-    var confirmed = false
+    typealias Pending = (ConnectedRunnerStore, ConnectedOffer, ConnectedHTTPClient?)
+    var pending: [Pending] = []
+    var firstFailure: (any Error)?
     for store in ConnectedRunnerStore.all(in: directory) {
-        let platform = store.platform
-        guard let lease = try store.load() else { continue }
-        if let confirmation, lease.offer.runner != confirmation { continue }
-        let workerID = platform.connectedWorkerID(slot: store.slot)
-        let client = ConnectedHTTPClient(server: server, deviceID: deviceID, token: token,
-                                         platform: platform, slot: store.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline,
-            connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
-        while true {
-            try stop.check()
-            do {
-                try recoverConnectedRunner(store: store, server: server.absoluteString, deviceID: deviceID,
-                    confirmRegistrationRemoved: confirmation, destroy: { id in
-                        switch platform {
-                        case .macOS:
-                            try removeMacOSRunnerFiles(id, in: directory, makeCloneStore: makeCloneStore)
-                        case .linux:
-                            let container = try resolveContainer()
-                            let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
-                            try AppleContainerSystem(containerURL: container, executor: executor, stateDirectory: directory).start()
-                            try AppleContainerBackend(containerURL: container, executor: executor, stateDirectory: directory, maximumExecutionDeadline: stop.executionDeadline).destroy(id)
-                        }
-                    }, complete: client.complete)
-                control?.finishAssignment(worker: workerID)
-                confirmed = true
-                break
-            } catch where isTransientConnectedFailure(error) {
-                output.info("Retrying \(platform.rawValue) slot \(store.slot) cleanup in five seconds: \(describeError(error))")
-                try stop.wait(for: 5)
+        try stop.check()
+        do {
+            guard let lease = try store.load() else { continue }
+            if let confirmation, lease.offer.runner != confirmation { continue }
+            try lease.requireRecoveryIdentity(server: server.absoluteString, deviceID: deviceID)
+            let id = RunnerID(value: lease.offer.runner)
+            try withConnectedRunnerActivity(id.value) {
+                switch store.platform {
+                case .macOS:
+                    try removeMacOSRunnerFiles(id, in: directory, makeCloneStore: makeCloneStore)
+                case .linux:
+                    let container = try resolveContainer()
+                    let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+                    try AppleContainerSystem(containerURL: container, executor: executor, stateDirectory: directory).start()
+                    try AppleContainerBackend(containerURL: container, executor: executor, stateDirectory: directory,
+                                              maximumExecutionDeadline: stop.executionDeadline).destroy(id)
+                }
             }
+            let workerID = store.platform.connectedWorkerID(slot: store.slot)
+            let client = confirmation == nil ? ConnectedHTTPClient(server: server, deviceID: deviceID, token: token,
+                platform: store.platform, slot: store.slot, checkCancellation: stop.check,
+                maximumExecutionDeadline: stop.executionDeadline,
+                connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) }) : nil
+            pending.append((store, lease.offer, client))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            firstFailure = firstFailure ?? error
+            output.error(describeError(error))
         }
     }
-    if confirmation != nil && !confirmed { throw ConnectedRunnerError.confirmationMismatch }
+    if pending.isEmpty, confirmation != nil, firstFailure == nil { throw ConnectedRunnerError.confirmationMismatch }
+    while !pending.isEmpty {
+        var retry: [Pending] = []
+        for (store, offer, client) in pending {
+            try stop.check()
+            let workerID = store.platform.connectedWorkerID(slot: store.slot)
+            do {
+                if let client {
+                    try acknowledgeConnectedRunner(offer, complete: client.complete)
+                }
+                try store.clear()
+                control?.finishAssignment(worker: workerID)
+            } catch where isTransientConnectedFailure(error) {
+                retry.append((store, offer, client))
+                output.info("Retrying cleanup acknowledgement for \(offer.runner): \(describeError(error))")
+            } catch {
+                firstFailure = firstFailure ?? error
+                output.error(describeError(error))
+            }
+        }
+        pending = retry
+        if !pending.isEmpty { try stop.wait(for: 5) }
+    }
+    if let firstFailure { throw firstFailure }
 }

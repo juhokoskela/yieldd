@@ -33,54 +33,53 @@ func localAgentEntitlementsEnableVirtualization() throws {
     #expect(entitlements["com.apple.security.virtualization"] as? Bool == true)
 }
 
-@Test(arguments: ["macos", "linux", "unexpected", "failure"])
-func localAgentInstallerPreflightsBeforeReplacingAndBuildsOnlyForLinux(result: String) throws {
+@Test(arguments: ["linux", "macos", "unexpected", "failure"])
+func freshAgentInstallerChecksPreflightBeforeEnrollment(result: String) throws {
     let fixture = try InstallerFixture(preflightResult: result)
     defer { fixture.remove() }
-    let arguments = result == "linux"
-        ? ["owner/linux", "--macos", "owner/mac", "--macos-template", "/template with spaces.bundle"]
-        : ["--macos", "owner/mac", "--macos-template", "/template with spaces.bundle"]
-    let execution = try fixture.run(arguments: arguments)
-    let events = try String(contentsOf: fixture.logURL, encoding: .utf8).split(separator: "\n").map(String.init)
-    #expect(events.prefix(3) == ["build", "codesign", "new:agent install --preflight-only \(arguments.joined(separator: " "))"])
-    if result == "macos" || result == "linux" {
-        #expect(execution.terminationStatus == 0, "\(execution.stderrText)")
-        #expect(events.contains("old:agent uninstall"))
-        #expect(events.last == "new:agent install \(arguments.joined(separator: " "))")
-        #expect(!FileManager.default.fileExists(atPath: fixture.oldMarker.path))
-        if result == "linux" {
-            let operations = events.filter { $0.hasPrefix("container:") }
-            try #require(operations.count == 5)
-            #expect(operations[0].hasPrefix("container:build -t local/yieldd-guest:installing-"))
-            #expect(operations[1] == "container:builder stop")
-            #expect(operations[2] == "container:image delete --force local/yieldd-guest:dev")
-            #expect(operations[3].hasPrefix("container:image tag local/yieldd-guest:installing-"))
-            #expect(operations[4].hasPrefix("container:image delete local/yieldd-guest:installing-"))
-            #expect(try #require(events.firstIndex(of: operations[1])) < #require(events.firstIndex(of: "old:agent uninstall")))
-        } else {
-            #expect(!events.contains { $0.hasPrefix("container:") })
-        }
-    } else {
-        #expect(execution.terminationStatus == (result == "failure" ? 2 : 1))
-        #expect(events.count == 3)
-        #expect(FileManager.default.fileExists(atPath: fixture.oldMarker.path))
-    }
-    let remaining = try FileManager.default.contentsOfDirectory(atPath: fixture.applicationsURL.path)
-    #expect(remaining == ["yieldd.app"])
+    let execution = try fixture.run(arguments: fixture.arguments)
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
+    let valid = result == "linux" || result == "macos"
+    #expect((execution.terminationStatus == 0) == valid)
+    #expect(events.contains("container:build") == (result == "linux"))
+    #expect(events.contains("new:agent install --server") == valid)
+    #expect(FileManager.default.fileExists(atPath: fixture.applicationsURL.appendingPathComponent("yieldd.app").path) == valid)
 }
 
 @Test
-func localAgentInstallerSupportsConnectedConfiguration() throws {
-    let fixture = try InstallerFixture(preflightResult: "macos")
+func interruptedImageBuildStopsTheBuilderBeforeRemovingStaging() throws {
+    let fixture = try InstallerFixture(preflightResult: "linux")
     defer { fixture.remove() }
-    let arguments = ["--connected", "--server", "https://coordinator.example", "--device-id", "01234567-89ab-4def-8123-456789abcdef",
-                     "--platform", "macos", "--macos-template", "/template.bundle"]
-    let result = try fixture.run(arguments: arguments)
-    #expect(result.terminationStatus == 0)
+    let result = try fixture.run(arguments: fixture.arguments, interruptBuild: true)
+    #expect(result.terminationStatus == 143)
     let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
-    #expect(events.contains("new:agent install-connected --preflight-only"))
-    #expect(events.contains("old:agent uninstall"))
-    #expect(events.contains("new:agent install-connected --server"))
+    #expect(events.contains("container:builder stop"))
+    #expect(!events.contains("new:agent install --server"))
+    #expect(!FileManager.default.fileExists(atPath: fixture.applicationsURL.appendingPathComponent(".yieldd-installer").path))
+}
+
+@Test
+func installerRefusesAnExistingAppBeforePreflightOrImageBuild() throws {
+    let fixture = try InstallerFixture(preflightResult: "linux")
+    defer { fixture.remove() }
+    try FileManager.default.createDirectory(at: fixture.oldMarker.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("original".utf8).write(to: fixture.oldMarker)
+    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    #expect(try String(contentsOf: fixture.oldMarker, encoding: .utf8) == "original")
+    #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
+}
+
+@Test
+func failedEnrollmentKeepsTheInstalledBundleForRecovery() throws {
+    let fixture = try InstallerFixture(preflightResult: "macos", enrollmentFails: true)
+    defer { fixture.remove() }
+    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    let executable = fixture.applicationsURL.appendingPathComponent("yieldd.app/Contents/MacOS/yieldd")
+    #expect(FileManager.default.isExecutableFile(atPath: executable.path))
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
+    #expect(events.contains("new:agent install --server"))
+    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    #expect(try String(contentsOf: fixture.logURL, encoding: .utf8) == events)
 }
 
 @Test(arguments: [false, true])
@@ -89,12 +88,13 @@ func agentPreflightBinaryRejectsMissingStorageBeforeReturningInstallerToken(linu
     defer { fixture.remove() }
     let bin = fixture.rootURL.appendingPathComponent("bin")
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-    for name in linux ? ["gh", "container"] : ["gh"] {
+    for name in linux ? ["container"] : [] {
         let executable = bin.appendingPathComponent(name)
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
     }
-    let arguments = linux ? ["owner/repo"] : ["--macos", "owner/repo", "--macos-template", fixture.templateURL.path]
+    let arguments = ["--server", "https://example.test", "--device-id", "01234567-89ab-4def-8123-456789abcdef"]
+            + (linux ? [] : ["--platform", "macos", "--macos-template", fixture.templateURL.path])
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
         arguments: ["CFFIXED_USER_HOME=\(fixture.rootURL.path)", "PATH=\(bin.path)", repositoryRoot.appendingPathComponent(".build/debug/yieldd").path,
@@ -125,19 +125,20 @@ private struct InstallerFixture {
     var applicationsURL: URL { rootURL.appendingPathComponent("Applications") }
     var oldMarker: URL { applicationsURL.appendingPathComponent("yieldd.app/old-marker") }
 
-    init(preflightResult: String) throws {
+    let arguments = ["--server", "https://example.test", "--device-id", "01234567-89ab-4def-8123-456789abcdef"]
+    init(preflightResult: String, enrollmentFails: Bool = false) throws {
         try executable("Scripts/build-local-app.sh", script: "echo build >> \(quote(logURL.path))")
         try executable(".build/yieldd.app/Contents/MacOS/yieldd", script: """
         printf 'new:%s\\n' "$*" >> \(quote(logURL.path))
-        if [ "${3-}" = --preflight-only ]; then
+        if [ "$#" -ge 3 ] && [ "$3" = --preflight-only ]; then
             \(preflightResult == "failure" ? "exit 2" : "echo \(preflightResult)")
+            exit 0
         fi
+        exit \(enrollmentFails ? 1 : 0)
         """)
-        try executable("Applications/yieldd.app/Contents/MacOS/yieldd", script: "printf 'old:%s\\n' \"$*\" >> \(quote(logURL.path))")
-        try Data("original installation".utf8).write(to: oldMarker)
     }
 
-    func run(arguments: [String]) throws -> ProcessResult {
+    func run(arguments: [String], interruptBuild: Bool = false) throws -> ProcessResult {
         let original = try String(contentsOf: repositoryRoot.appendingPathComponent("Scripts/install-local-agent.sh"), encoding: .utf8)
         let scriptDirectoryAssignment = #"script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"#
         let applicationsDirectoryAssignment = #"applications_directory="${HOME:?}/Applications""#
@@ -146,7 +147,10 @@ private struct InstallerFixture {
         try #require(original.contains(applicationsDirectoryAssignment))
         let script = """
         codesign() { echo codesign >> \(quote(logURL.path)); }
-        container() { printf 'container:%s\\n' "$*" >> \(quote(logURL.path)); }
+        container() {
+            printf 'container:%s\\n' "$*" >> \(quote(logURL.path))
+            if [ "$1" = build ] && \(interruptBuild ? "true" : "false"); then kill -TERM "$$"; fi
+        }
         """ + "\n" + original
             .replacingOccurrences(
                 of: scriptDirectoryAssignment,

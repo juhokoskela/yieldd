@@ -148,7 +148,6 @@ struct LinuxRunnerNetworkTests {
     func recoveryDoesNotBootAnUnownedGuestOrRequireTheFork() throws {
         let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: linuxNetworkID.value)), .success(processResult())])
         let backend = try makeLinuxBackend(containerURL: linuxContainer, executor: executor)
-        try backend.stopRunner(on: linuxNetworkID)
         #expect(executor.requests.isEmpty)
         try backend.destroy(linuxNetworkID)
         #expect(executor.requests.map(\.arguments) == [
@@ -164,7 +163,6 @@ struct LinuxRunnerNetworkTests {
         ])
         let backend = try makeLinuxBackend(containerURL: linuxContainer, executor: executor)
         #expect(throws: TestFailure.create) { try backend.create(id: linuxNetworkID, memory: .full) }
-        try backend.stopRunner(on: linuxNetworkID)
         #expect(executor.requests.last?.arguments == ["machine", "boot", linuxNetworkID.value])
         #expect(executor.requests.last?.timeout == AppleContainerBackend.creationTimeout)
         try backend.destroy(linuxNetworkID)

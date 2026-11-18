@@ -84,7 +84,12 @@ struct AgentFailureStore {
 
 func connectedAgentStatus(registration: AgentRegistrationState, directory: URL,
                           request: () throws -> AgentControlSnapshot = { try requestAgentControl("status", timeout: 2) }) -> AgentStatusReport {
-    let configuration = try? ConnectedAgentStore(directory: directory).load()
+    let store = ConnectedAgentStore(directory: directory)
+    let configuration = try? store.load()
+    if registration == .notRegistered, configuration == nil,
+       !FileManager.default.fileExists(atPath: store.file.path) {
+        return AgentStatusReport(registration: registration, configuration: nil, live: nil, unavailableReason: nil, lastFailure: nil)
+    }
     do {
         return AgentStatusReport(registration: registration, configuration: configuration, live: try request(), unavailableReason: nil, lastFailure: nil)
     } catch {
@@ -96,6 +101,7 @@ func connectedAgentStatus(registration: AgentRegistrationState, directory: URL,
 func renderAgentStatus(_ report: AgentStatusReport) -> String {
     var lines = ["Agent registration: \(report.registration.rawValue)"]
     guard let status = report.live else {
+        if report.registration == .notRegistered && report.unavailableReason == nil { return "Agent is not enrolled." }
         if let configuration = report.configuration {
             lines.append("Configured coordinator: \(configuration.server.absoluteString)")
             lines.append("Configured device: \(configuration.deviceID)")

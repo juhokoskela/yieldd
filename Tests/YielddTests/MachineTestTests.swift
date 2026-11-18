@@ -174,6 +174,7 @@ func interruptionAfterCreateCleansUpWithoutRunningChecks() {
 private final class RecordingRunnerBackend: RunnerBackend {
     let platform: RunnerPlatform
     private(set) var calls: [RunnerBackendCall] = []
+    var onCreate: () throws -> Void = {}
     private let createError: (any Error)?
     private var execOutcomes: [Result<Void, any Error>]
     private let destroyError: (any Error)?
@@ -192,6 +193,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
 
     func create(id: RunnerID, memory: RunnerMemoryAllocation) throws {
         calls.append(.create(id, memory))
+        try onCreate()
         if let createError {
             throw createError
         }
@@ -206,7 +208,7 @@ private final class RecordingRunnerBackend: RunnerBackend {
         on id: RunnerID
     ) throws -> ProcessResult {
         calls.append(.exec(id, arguments))
-        if arguments.last == "--protocol-version" { return processResult(stdout: "1\n") }
+        if arguments.last == "--protocol-version" { return processResult(stdout: "2\n") }
         if platform == .macOS {
             #expect(standardInput == Data(MacOSTemplateValidation.script.utf8))
             #expect(outputCapture == .tail(maxBytes: MacOSGuestSSH.outputTailBytes))
@@ -231,13 +233,91 @@ private final class RecordingRunnerBackend: RunnerBackend {
         }
     }
 
-    func stopRunner(on id: RunnerID) throws {
-        Issue.record("Machine tests must not stop a runner")
-    }
+
 }
 
 private enum RunnerBackendCall: Equatable {
     case create(RunnerID, RunnerMemoryAllocation)
     case exec(RunnerID, [String])
     case destroy(RunnerID)
+}
+
+@Test(arguments: [false, true])
+func interruptedLinuxMachineTestRetainsExactGuestUntilDeletion(createFailed: Bool) throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    let id = RunnerPlatform.linux.makeTestRunnerID()
+    let backend = RecordingRunnerBackend(createError: createFailed ? TestFailure.helloWorld : nil,
+        execOutcomes: [.success(())], destroyError: TestFailure.machineCleanup)
+    #expect(throws: (any Error).self) { try machineTestRunner(backend: backend).run(id: id, journal: store) }
+    #expect(try store.pendingMachineTest() == id)
+    #expect(throws: MachineTestError.self) {
+        try withRunnerOwnership(in: directory, connected: true) { _ in Issue.record("Outstanding guest was bypassed") }
+    }
+    let recovery = RecordingRunnerBackend()
+    try withRunnerOwnership(in: directory, recoveringMachineTest: true) { reopened in
+        try reopened.recoverMachineTest { recovery }
+        try reopened.recoverMachineTest { throw TestFailure.unexpectedBackendCall }
+    }
+    #expect(recovery.calls == [.destroy(id)])
+    #expect(try store.pendingMachineTest() == nil)
+}
+
+@Test
+func machineTestRecoveryRejectsOtherMachineNames() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    try writePrivateRunnerFile(Data("someone-elses-machine".utf8), to: directory.appendingPathComponent("linux-machine-test"))
+    #expect(throws: RunnerLeaseError.self) { try store.recoverMachineTest { throw TestFailure.unexpectedBackendCall } }
+}
+
+@Test
+func machineTestJournalAndOwnershipSurviveKilledCreator() async throws {
+    let result = try await #require(processExitsWith: .signal(SIGKILL), observing: [\.standardOutputContent]) {
+        let uuid = UUID()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("machine-crash-\(uuid)")
+        try withRunnerOwnership(in: directory, recoveringMachineTest: true) { store in
+            let backend = RecordingRunnerBackend()
+            backend.onCreate = {
+                try FileHandle.standardOutput.write(contentsOf: Data(uuid.uuidString.utf8))
+                let script = """
+                    kill -KILL "$PPID"
+                    for i in {1..200}; do
+                        if [[ -e "$1/release" ]]; then touch "$1/published"; exit 0; fi
+                        sleep 0.05
+                    done
+                    exit 1
+                    """
+                _ = try ProcessExecutor().execute(ProcessRequest(executableURL: URL(fileURLWithPath: "/bin/bash"),
+                    arguments: ["-c", script, "create", directory.path], ownershipDescriptor: store.ownershipDescriptor))
+            }
+            try machineTestRunner(backend: backend).run(
+                id: RunnerID(value: "yieldd-test-\(uuid.uuidString.lowercased())"), journal: store)
+        }
+    }
+    let uuid = try #require(UUID(uuidString: String(decoding: result.standardOutputContent, as: UTF8.self)))
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("machine-crash-\(uuid)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    #expect(throws: RunnerOwnershipError.alreadyRunning) {
+        try withRunnerOwnership(in: directory, recoveringMachineTest: true) { _ in }
+    }
+    try Data().write(to: directory.appendingPathComponent("release"))
+    let deadline = ContinuousClock.now + .seconds(5)
+    while true {
+        do {
+            try withRunnerOwnership(in: directory, recoveringMachineTest: true) { _ in }
+            break
+        } catch RunnerOwnershipError.alreadyRunning where ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+    }
+    #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("published").path))
+    let recovered = RecordingRunnerBackend()
+    try withRunnerOwnership(in: directory, recoveringMachineTest: true) { store in
+        try store.recoverMachineTest { recovered }
+        #expect(try store.pendingMachineTest() == nil)
+    }
+    #expect(recovered.calls == [.destroy(RunnerID(value: "yieldd-test-\(uuid.uuidString.lowercased())"))])
 }

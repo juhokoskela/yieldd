@@ -34,6 +34,7 @@ struct RunnerMachineOptions: ParsableArguments {
             containerURL: container,
             executor: executor,
             stateDirectory: leaseStore.directory,
+            ownershipDescriptor: leaseStore.ownershipDescriptor,
             checkCancellation: checkCancellation,
             dockerReadiness: DockerReadiness(
                 wait: wait,

@@ -10,8 +10,6 @@ struct Yieldd: AsyncParsableCommand {
             StorageCommand.self,
             RecoverCommand.self,
             MachineTestCommand.self,
-            RunnerTestCommand.self,
-            RunnerServiceCommand.self,
             ConnectCommand.self,
             AgentCommand.self,
         ]

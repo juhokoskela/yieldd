@@ -89,7 +89,7 @@ func damagedDiagnosticHistoryDoesNotBlockLiveStatusOrAgentStartup() throws {
 
 private func liveStatusDirectory() throws -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("agent-status-\(UUID().uuidString)")
-    _ = try AgentConfigurationStore(directory: directory)
+    _ = try RunnerLeaseStore(directory: directory)
     return directory
 }
 
@@ -128,4 +128,16 @@ func unavailableStatusIncludesConfiguredIdentityAndUninstallClearsDiagnosticHist
     #expect(renderAgentStatus(report).contains(configuration.deviceID))
     try store.remove()
     #expect(try AgentFailureStore(directory: directory).load() == nil)
+}
+
+@Test
+func unenrolledMacReportsRegistrationWithoutContactingXPC() throws {
+    let directory = try liveStatusDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let report = connectedAgentStatus(registration: .notRegistered, directory: directory) {
+        Issue.record("Unenrolled Mac attempted XPC")
+        throw AgentControlError.unavailable
+    }
+    #expect(report.configuration == nil && report.live == nil && report.unavailableReason == nil)
+    #expect(renderAgentStatus(report) == "Agent is not enrolled.")
 }
