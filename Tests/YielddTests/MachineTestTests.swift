@@ -241,3 +241,34 @@ private enum RunnerBackendCall: Equatable {
     case exec(RunnerID, [String])
     case destroy(RunnerID)
 }
+
+@Test(arguments: [false, true])
+func interruptedLinuxMachineTestRetainsExactGuestUntilDeletion(createFailed: Bool) throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    let id = RunnerPlatform.linux.makeTestRunnerID()
+    let backend = RecordingRunnerBackend(createError: createFailed ? TestFailure.helloWorld : nil,
+        execOutcomes: [.success(())], destroyError: TestFailure.machineCleanup)
+    #expect(throws: (any Error).self) { try machineTestRunner(backend: backend).run(id: id, journal: store) }
+    #expect(try store.pendingMachineTest() == id)
+    #expect(throws: MachineTestError.self) {
+        try withRunnerOwnership(in: directory, connected: true) { _ in Issue.record("Outstanding guest was bypassed") }
+    }
+    let recovery = RecordingRunnerBackend()
+    try withRunnerOwnership(in: directory, recoveringMachineTest: true) { reopened in
+        try reopened.recoverMachineTest { recovery }
+        try reopened.recoverMachineTest { throw TestFailure.unexpectedBackendCall }
+    }
+    #expect(recovery.calls == [.destroy(id)])
+    #expect(try store.pendingMachineTest() == nil)
+}
+
+@Test
+func machineTestRecoveryRejectsOtherMachineNames() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try RunnerLeaseStore(directory: directory)
+    try writePrivateRunnerFile(Data("someone-elses-machine".utf8), to: directory.appendingPathComponent("linux-machine-test"))
+    #expect(throws: RunnerLeaseError.self) { try store.recoverMachineTest { throw TestFailure.unexpectedBackendCall } }
+}

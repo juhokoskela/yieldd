@@ -163,6 +163,7 @@ func synchronizeRunnerState(_ url: URL) throws {
 func withRunnerOwnership(
     in directory: URL? = nil,
     connected: Bool = false,
+    recoveringMachineTest: Bool = false,
     operation: (RunnerLeaseStore) throws -> Void
 ) throws {
     let stateDirectory = try directory ?? yielddApplicationSupportDirectory()
@@ -187,6 +188,9 @@ func withRunnerOwnership(
 
     if !connected, ConnectedRunnerStore.hasRecovery(in: stateDirectory) {
         throw ConnectedRunnerError.recoveryRequired
+    }
+    if !recoveringMachineTest, try store.pendingMachineTest() != nil {
+        throw MachineTestError.recoveryRequired
     }
     try operation(store)
 }

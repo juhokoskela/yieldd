@@ -11,7 +11,7 @@ struct RecoverCommand: ParsableCommand {
         let stop = try RunnerPoolStop.monitoringSignals()
         let executor = ProcessExecutor(checkCancellation: stop.check)
         let locator = ExecutableLocator()
-        try withRunnerOwnership { store in
+        try withRunnerOwnership(recoveringMachineTest: true) { store in
             try recoverAbandonedRunners(
                 leaseStore: store,
                 makeGitHub: { GitHubRunnerClient(ghURL: try locator.locate("gh"), executor: executor) },
@@ -37,6 +37,7 @@ func recoverAbandonedRunners(
     output: RunnerServiceOutput = .terminal
 ) throws {
     try checkCancellation()
+    try leaseStore.recoverMachineTest(makeBackend: makeLinuxBackend)
     if try leaseStore.load().isEmpty {
         try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: [], checkCancellation: checkCancellation, makeCloneStore: makeCloneStore)
         return
