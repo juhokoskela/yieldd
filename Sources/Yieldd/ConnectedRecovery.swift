@@ -16,7 +16,7 @@ func recoverConnectedPlatforms(
         do {
             guard let lease = try store.load() else { continue }
             if let confirmation, lease.offer.runner != confirmation { continue }
-            try lease.requireRecoveryIdentity(server: server.absoluteString, deviceID: deviceID, confirmation: confirmation)
+            try lease.requireRecoveryIdentity(server: server.absoluteString, deviceID: deviceID)
             let id = RunnerID(value: lease.offer.runner)
             try withConnectedRunnerActivity(id.value) {
                 switch store.platform {
@@ -36,6 +36,8 @@ func recoverConnectedPlatforms(
                 maximumExecutionDeadline: stop.executionDeadline,
                 connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) }) : nil
             pending.append((store, lease.offer, client))
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             firstFailure = firstFailure ?? error
             output.error(describeError(error))
@@ -61,7 +63,6 @@ func recoverConnectedPlatforms(
                 output.error(describeError(error))
             }
         }
-        if let firstFailure { throw firstFailure }
         pending = retry
         if !pending.isEmpty { try stop.wait(for: 5) }
     }
