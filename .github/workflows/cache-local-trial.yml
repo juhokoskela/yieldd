@@ -1,0 +1,84 @@
+name: Disposable guest cache trial
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        required: true
+      phase:
+        type: string
+        required: true
+      platform:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  trial:
+    runs-on: ${{ inputs.runner-label }}
+    timeout-minutes: 15
+    env:
+      PHASE: ${{ inputs.phase }}
+      PLATFORM: ${{ inputs.platform }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Select a fresh dependency key for this pair of guests
+        shell: bash
+        run: |
+          printf '%s\n' "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$PLATFORM" > proof-dependency-key
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        id: go
+        with:
+          go-version-file: Server/go.mod
+          cache-dependency-path: proof-dependency-key
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
+        id: archive
+        with:
+          path: ~/.yieldd-proof-archive
+          key: yieldd-accept-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}
+      - uses: ./actions/native-cache
+        id: native
+      - name: Check cache contents
+        shell: bash
+        env:
+          GO_HIT: ${{ steps.go.outputs.cache-hit }}
+          ARCHIVE_HIT: ${{ steps.archive.outputs.cache-hit }}
+          NATIVE_PATH: ${{ steps.native.outputs.path }}
+        run: |
+          set -euo pipefail
+          test -n "$YIELDD_CACHE_PATH"
+          test "$YIELDD_CACHE_PATH" = "$NATIVE_PATH"
+          test -d "$NATIVE_PATH"
+          expected="$(cat proof-dependency-key)"
+          archive="$HOME/.yieldd-proof-archive"
+          gomod="$(go env GOMODCACHE)"
+          gobuild="$(go env GOCACHE)"
+          if [[ "$PHASE" == seed ]]; then
+            test "$ARCHIVE_HIT" != true && test "$GO_HIT" != true
+            mkdir -p "$archive" "$gomod" "$gobuild"
+            printf '%s\n' "$expected" > "$archive/marker"
+            printf '%s\n' "$expected" > "$gomod/yieldd-proof"
+            printf '%s\n' "$expected" > "$gobuild/yieldd-proof"
+            printf '%s\n' "$expected" > "$NATIVE_PATH/marker"
+            dd if=/dev/urandom of="$NATIVE_PATH/native-payload" bs=65536 count=8 2>/dev/null
+            cp "$NATIVE_PATH/native-payload" "$archive/payload"
+          else
+            test "$ARCHIVE_HIT" = true && test "$GO_HIT" = true
+            for file in "$archive/marker" "$gomod/yieldd-proof" "$gobuild/yieldd-proof" "$NATIVE_PATH/marker"; do
+              test "$(cat "$file")" = "$expected"
+            done
+            cmp "$archive/payload" "$NATIVE_PATH/native-payload"
+          fi
+          {
+            printf 'marker=%s\nplatform=%s\nphase=%s\nrunner=%s\n' "$expected" "$PLATFORM" "$PHASE" "$RUNNER_NAME"
+            printf 'archive_hit=%s\ngo_hit=%s\n' "$ARCHIVE_HIT" "$GO_HIT"
+            shasum -a 256 < "$NATIVE_PATH/native-payload"
+          } > "$RUNNER_TEMP/evidence.txt"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: cache-local-${{ inputs.platform }}-${{ inputs.phase }}
+          path: ${{ runner.temp }}/evidence.txt
+          if-no-files-found: error
+          retention-days: 3

@@ -1,0 +1,33 @@
+name: Disposable guest cache acceptance
+on:
+  push:
+    branches: [test/cache-local-accept-20261118]
+permissions:
+  contents: read
+jobs:
+  macos-seed:
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-70c06d077868-macos-seed
+      phase: seed
+      platform: macos
+  macos-restore:
+    needs: macos-seed
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-70c06d077868-macos-restore
+      phase: restore
+      platform: macos
+  linux-seed:
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-70c06d077868-linux-seed
+      phase: seed
+      platform: linux
+  linux-restore:
+    needs: linux-seed
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-70c06d077868-linux-restore
+      phase: restore
+      platform: linux
