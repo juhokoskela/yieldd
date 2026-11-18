@@ -7,8 +7,8 @@ if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
     exit 0
 fi
 
-if [[ "$#" -ne 1 || "$1" != --jit ]]; then
-    echo "usage: yieldd-configure-runner --jit" >&2
+if [[ "${1:-}" != --jit || "$#" -gt 2 || ( "$#" -eq 2 && "$2" != --local-cache ) ]]; then
+    echo "usage: yieldd-configure-runner --jit [--local-cache]" >&2
     exit 2
 fi
 IFS= read -r credential
@@ -23,13 +23,20 @@ if [[ -e .runner || -e .credentials || -e .yieldd-runner/jit-config ]]; then
     echo "runner credentials already exist; use a fresh guest" >&2
     exit 2
 fi
-for marker in exit-status process-group launched job-started; do
+for marker in exit-status process-group launched job-started local-cache; do
     if [[ -e ".yieldd-runner/$marker" ]]; then
         echo "runner lifecycle state already exists; use a fresh guest" >&2
         exit 2
     fi
 done
 mkdir -p .yieldd-runner
+if [[ "${2:-}" == --local-cache ]]; then
+    if ! shasum -a 256 -c bin/yieldd-cache-worker.sha256 >/dev/null; then
+        echo "Install the yieldd Actions worker before enabling local caches." >&2
+        exit 1
+    fi
+    touch .yieldd-runner/local-cache
+fi
 cat > "$HOME/.yieldd-job-started.sh" <<'HOOK'
 #!/bin/bash
 set -euo pipefail

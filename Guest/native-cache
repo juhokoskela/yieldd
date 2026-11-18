@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+image=/opt/yieldd-cache-exchange/cache.img
+path=/mnt/yieldd-cache
+
+case "$#:${1:-}" in
+    2:mount)
+        test -f "$image"
+        test ! -L "$image"
+        mkdir -p "$path"
+        if mountpoint -q "$path"; then exit 1; fi
+        case "$2" in
+            cold) mkfs.ext4 -q -F -L yieldd-cache "$image" ;;
+            warm) ;;
+            *) exit 2 ;;
+        esac
+        # mount allocates an autoclear loop device. Never execute setuid or device files from a cache.
+        mount -t ext4 -o loop,nosuid,nodev "$image" "$path"
+        if [ "$2" = cold ]; then chown runner:runner "$path"; fi
+        ;;
+    1:unmount)
+        # A busy filesystem must prevent publication.
+        umount "$path"
+        ;;
+    *) exit 2 ;;
+esac

@@ -34,6 +34,29 @@ func macOSJITIsPrivateConsumedOnceAndReportsPickup() throws {
 }
 
 @Test
+func localCacheRequiresTheInstalledWorkerAndEnablesItForTheJob() throws {
+    let fixture = try MacOSGuestRunnerFixture(runScript: """
+        #!/bin/bash
+        echo "$YIELDD_LOCAL_CACHE" > "$HOME/cache-mode"
+        """)
+    defer { fixture.remove() }
+    let configure = fixture.request(script: macOSConfigureRunnerURL, arguments: ["--jit", "--local-cache"],
+                                    standardInput: Data("private-jit\n".utf8))
+    let executor = ProcessExecutor()
+    #expect(try executor.execute(configure).terminationStatus != 0)
+    #expect(!FileManager.default.fileExists(atPath: fixture.diagnosticsDirectory.appendingPathComponent("jit-config").path))
+
+    let bin = fixture.homeURL.appendingPathComponent("actions-runner/bin")
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: false)
+    try Data().write(to: bin.appendingPathComponent("Runner.Worker.dll"))
+    try "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  bin/Runner.Worker.dll\n"
+        .write(to: bin.appendingPathComponent("yieldd-cache-worker.sha256"), atomically: true, encoding: .utf8)
+    try executor.execute(configure).requireSuccess(for: configure)
+    try fixture.startAndWaitForExit()
+    #expect(try fixture.recordedLines(filename: "cache-mode") == ["1"])
+}
+
+@Test
 func macOSRunnerControlReturnsTheListenerOutputAndStatus() throws {
     let fixture = try MacOSGuestRunnerFixture(runScript: """
         #!/bin/bash
