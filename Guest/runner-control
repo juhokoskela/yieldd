@@ -6,6 +6,16 @@ if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
     printf '2\n'
     exit 0
 fi
+if [[ $# -eq 2 && $1 == --protocol-version && $2 == --local-cache ]]; then
+    for tool in nbdfuse fusermount3 mkfs.ext4 yieldd-native-cache; do
+        if ! PATH="$PATH:/usr/sbin" command -v "$tool" >/dev/null; then
+            echo "Rebuild the Linux guest image for local job caches: missing $tool." >&2
+            exit 1
+        fi
+    done
+    printf '3\n'
+    exit 0
+fi
 
 state_directory=/opt/actions-runner/.yieldd-runner
 

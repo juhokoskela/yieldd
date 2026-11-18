@@ -34,6 +34,25 @@ func guestProtocolRejectsOutdatedScriptsWithoutSendingCredentials(_ response: St
 }
 
 @Test(arguments: [0, 1])
+func localCacheRejectsEitherOldHelperBeforeSendingCredentials(completedChecks: Int) throws {
+    let helpers = ["yieldd-configure-runner", "yieldd-runner-control"]
+    let helper = helpers[completedChecks]
+    let outcomes: [Result<ProcessResult, any Error>] =
+        Array(repeating: .success(processResult(stdout: "3\n")), count: completedChecks)
+        + [.success(processResult(stderr: "usage: \(helper)", status: 2))]
+    let (backend, executor) = try readyLinuxBackend(outcomes: outcomes,
+        containerURL: URL(fileURLWithPath: "/test/container"), id: RunnerID(value: "yieldd-test"))
+    let error = try #require(#expect(throws: RunnerGuestProtocolError.self) {
+        try RunnerGuestProtocol.validate(backend: backend, id: RunnerID(value: "yieldd-test"), localCache: true)
+    })
+    #expect(error == .incompatibleCache(helper, .linux))
+    #expect(error.localizedDescription.contains("Rebuild the Linux guest image"))
+    #expect(executor.requests.count == completedChecks + 1)
+    #expect(executor.requests.allSatisfy { $0.arguments.suffix(2) == ["--protocol-version", "--local-cache"]
+        && $0.standardInput == nil })
+}
+
+@Test(arguments: [0, 1])
 func guestProtocolTimeoutIdentifiesTheHelperAndPreservesDiagnostics(completedChecks: Int) throws {
     let helper = ["yieldd-configure-runner", "yieldd-runner-control"][completedChecks]
     let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),

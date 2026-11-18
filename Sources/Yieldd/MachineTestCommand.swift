@@ -36,7 +36,8 @@ struct MachineTestCommand: ParsableCommand {
                 waitingForMemory: {
                     print("Machine test is waiting for available host memory.")
                 }
-            ).run(id: id, journal: backend.platform == .linux ? leaseStore : nil)
+            ).run(id: id, journal: backend.platform == .linux ? leaseStore : nil,
+                  localCache: try JobCacheConfiguration.load(in: leaseStore.directory) != nil)
             print("Machine test passed.")
         }
     }
@@ -62,7 +63,7 @@ struct MachineTestRunner {
         self.waitingForMemory = waitingForMemory
     }
 
-    func run(id: RunnerID, journal: RunnerLeaseStore? = nil) throws {
+    func run(id: RunnerID, journal: RunnerLeaseStore? = nil, localCache: Bool = false) throws {
         let reservation = try memoryAdmission.acquire(
             reserving: backend.platform.memoryReservationBytes,
             checkCancellation: checkCancellation,
@@ -76,7 +77,7 @@ struct MachineTestRunner {
                 machineMayExist = true
             }
             try checkCancellation()
-            try RunnerGuestProtocol.validate(backend: backend, id: id)
+            try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: localCache)
             switch backend.platform {
             case .linux:
                 try backend.exec(

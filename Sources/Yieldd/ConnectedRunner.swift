@@ -80,7 +80,7 @@ final class ConnectedRunner {
                 machineMayExist = true
             }
             try authorization.check()
-            try RunnerGuestProtocol.validate(backend: backend, id: id)
+            try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: cache != nil)
             let configure = ["yieldd-configure-runner", "--jit"] + (cache == nil ? [] : ["--local-cache"])
             try backend.exec(configure, standardInput: Data("\(jit)\n".utf8),
                              timeout: 5 * 60, on: id)

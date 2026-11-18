@@ -13,7 +13,8 @@ For a build directory that is expensive to archive, a workflow can request a pri
    {"trustedGroups": []}
    ```
 
-3. Start the agent. It reads this file at startup. To disable caching, drain and stop the agent, remove the file and start it again. Jobs then use their usual GitHub cache endpoint.
+3. With the agent stopped and the policy file in place, run `yieldd machine-test` for Linux and `yieldd machine-test --template /absolute/path/VM.bundle` for macOS. These commands boot disposable guests and check the cache-enabled helpers and worker.
+4. Start the agent. It reads this file at startup. To disable caching, drain and stop the agent, remove the file and start it again. Jobs then use their usual GitHub cache endpoint.
 
 The agent stores disposable job disks and published caches under `job-caches/` on the configured quota-limited runner volume. Archives use a separate sparse APFS image. Its capacity is at most 16 GiB, one eighth of the runner-volume quota and one quarter of the space available when the image is created, whichever is smallest. The filesystem bounds concurrent uploads, abandoned files, merge scratch and SQLite together. Eviction targets half the image capacity to leave working space. An interrupted agent reuses the same image. For each guest platform, yieldd retains up to 16 native generations across scopes, with a combined budget of 16 GiB counted by allocated blocks. Eviction starts with the least recently used scope. Shared blocks count toward each clone, so the budget can exceed physical usage. Each writable native disk has an 8 GiB virtual capacity. Active native jobs need additional space on the runner volume.
 

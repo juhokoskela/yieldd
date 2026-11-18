@@ -18,6 +18,8 @@ RUN apt-get update \
         dbus \
         docker.io \
         e2fsprogs \
+        fuse3 \
+        libnbd-bin \
         util-linux \
         git \
         jq \
