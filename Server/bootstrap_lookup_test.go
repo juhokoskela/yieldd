@@ -39,17 +39,20 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 				if err := hosted.replace(&lease{Name: hostedName, Created: time.Now().UTC()}); err != nil {
 					t.Fatal(err)
 				}
-				if err := hosted.register(t.Context()); err != nil {
+				registration, err := hosted.generateRegistration(t.Context())
+				if err != nil {
 					t.Fatal(err)
 				}
 				next := *hosted.lease
-				next.DispatchIntent, next.JIT = true, ""
+				next.DispatchIntent, next.RunnerID = true, registration.Runner.ID
 				next.RunID = 101
 				if err := hosted.replace(&next); err != nil {
 					t.Fatal(err)
 				}
-				w.run = &workflowRun{ID: 102, DisplayTitle: "Bootstrap " + hostedName, Status: "completed", Conclusion: "success"}
-				w.runs[101] = w.run
+				api := testAPI(t, func(response http.ResponseWriter, request *http.Request) {
+					fmt.Fprint(response, `{"id":101,"path":".github/workflows/other.yml","status":"completed","conclusion":"success"}`)
+				})
+				c.bootstrap = bootstrapLookup{w, api.getRun}
 				pending := &assignment{coordinator: c}
 				l := &lease{Name: pendingName, Created: time.Now().UTC()}
 				if pendingKind == "expired-local-offer" {
@@ -59,7 +62,7 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 					t.Fatal(err)
 				}
 				if pendingKind == "registered" {
-					if err := pending.register(t.Context()); err != nil {
+					if _, err := pending.generateRegistration(t.Context()); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -72,7 +75,7 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := len(w.events)
-				if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || !c.identityPaused() {
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || !c.verificationPaused() {
 					t.Fatal("restart did not retain the unverified identity", err, c.paused)
 				}
 				for _, event := range w.events[before:] {
@@ -95,6 +98,53 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestPermanentHostedReadFailureBlocksExpiredOffer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 3)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		c.device.pollNow(0)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+			t.Fatal(err)
+		}
+		c.bootstrap = bootstrapLookup{w, func(context.Context, int64) (*workflowRun, error) { return nil, fmt.Errorf("invalid status document") }}
+		time.Sleep(offerLifetime)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err == nil || w.dispatched != 1 || c.verificationPaused() {
+			t.Fatal("permanent read failed to stop provisioning", w.dispatched, err)
+		}
+	})
+}
+
+func TestMissingRunAndTimedOutSiblingGetFreshVerification(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 2)
+		for range 2 {
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+				t.Fatal(err)
+			}
+		}
+		missing := c.state.Leases[c.names()[0]].RunID
+		c.bootstrap = bootstrapLookup{w, func(ctx context.Context, id int64) (*workflowRun, error) {
+			if id == missing {
+				return nil, &missingWorkflowRun{id}
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if _, err := c.HandleDesiredRunnerCount(ctx, 2); err != nil || !c.verificationPaused() {
+			t.Fatal("missing run suppressed timeout retry", err, c.paused)
+		}
+		c.bootstrap = w
+		time.Sleep(cleanupRetryDelay)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused != nil || w.dispatched != 2 {
+			t.Fatal("fresh read did not resume verification", err, c.paused)
+		}
+	})
 }
 
 func TestInitialMixedIdentityAndTransientFailuresRetry(t *testing.T) {
@@ -128,7 +178,7 @@ func TestInitialMixedIdentityAndTransientFailuresRetry(t *testing.T) {
 						}
 						return w.getRun(ctx, id)
 					}}
-					if _, err := c.HandleDesiredRunnerCount(t.Context(), count); err != nil || !c.identityPaused() {
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), count); err != nil || !c.verificationPaused() {
 						t.Fatal("initial mixed failures stopped automatic identity recovery", err, c.paused)
 					}
 					c.bootstrap = w

@@ -44,10 +44,10 @@ func (s *coordinatorLoop) run() error {
 	for {
 		var expired <-chan time.Time
 
-		var deadline time.Time
+		deadline := s.worker.demandRetryAt
 		retryPending := false
-		if s.worker.identityPaused() {
-			deadline = s.worker.identityRetryAt
+		if s.worker.verificationPaused() && (deadline.IsZero() || s.worker.verificationRetryAt.Before(deadline)) {
+			deadline = s.worker.verificationRetryAt
 		}
 		protectDevices := s.protectColdDevices()
 		for _, l := range s.worker.state.Leases {
@@ -55,13 +55,17 @@ func (s *coordinatorLoop) run() error {
 				continue
 			}
 			if l.CleanupIntent {
-				retryPending = true
+				if when := s.worker.hostedCleanupRetry[l.Name]; when.IsZero() {
+					retryPending = true
+				} else if deadline.IsZero() || when.Before(deadline) {
+					deadline = when
+				}
 				continue
 			}
 			if l.Local == nil {
 				continue
 			}
-			if l.Local.Phase == localAccepted || l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered) {
+			if l.Local.Phase == localAccepted || (s.worker.demandRetryAt.IsZero() && (l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered))) {
 				when := l.Local.Expires
 				if l.Local.expired() {
 					when = time.Now()

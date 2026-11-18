@@ -499,7 +499,7 @@ func TestLocalOnlyQueueRejectsHostedStateAndDispatch(t *testing.T) {
 	if _, err := store.load(c.state.Config); err == nil {
 		t.Fatal("hosted state loaded into local-only queue")
 	}
-	if err := c.assigned(singleLease(c.state).Name).prepare(t.Context()); err == nil || len(world.events) != 0 {
+	if err := c.assigned(singleLease(c.state).Name).provisionHosted(t.Context()); err == nil || len(world.events) != 0 {
 		t.Fatal("local-only fallback was attempted", err, world.events)
 	}
 }

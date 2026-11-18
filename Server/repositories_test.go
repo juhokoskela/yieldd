@@ -298,6 +298,24 @@ func TestRepositoryRouteChangeCannotRedirectPersistedCleanup(t *testing.T) {
 	}
 }
 
+func TestActiveQueueComparesDecodedFallbackLabels(t *testing.T) {
+	c, _, store := multipleFallbackFixture(t, 1)
+	c.state.Config.Fallback = "[\"arm64\", \"runner\"]"
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	requested := c.state.Config
+	requested.Fallback = "[ \"arm64\",\n \"r\\u0075nner\" ]"
+	loaded, err := store.load(requested)
+	if err != nil || !reflect.DeepEqual(loaded, c.state) {
+		t.Fatal("reformatted labels changed an active queue", loaded, err)
+	}
+	requested.Fallback = "[\"arm64\",\"other\"]"
+	if _, err := store.load(requested); err == nil {
+		t.Fatal("active lease accepted a different runner target")
+	}
+}
+
 func TestEmptyQueueAdoptsRoutingAndKeepsIdentity(t *testing.T) {
 	c, _, store, request := localFixture(t)
 	if err := c.completeDevice(t.Context(), request); err != nil {

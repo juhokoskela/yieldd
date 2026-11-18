@@ -117,6 +117,15 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 	if a.paused != nil || a.demandUnavailable || l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.CleanupIntent || l.Local.Phase != localOffered || l.Local.expired() {
 		return nil, &deviceError{status: http.StatusGone, message: "offer is no longer available; clean up without starting a runner"}
 	}
+	if a.needsDemandRefresh() {
+		count, err := a.readPlacementDemand(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if l.Local.expired() || !a.demandRetryAt.IsZero() || a.surplusAssignments(count)[l.Name] {
+			return nil, &deviceError{status: http.StatusGone, message: "offer no longer has confirmed demand"}
+		}
+	}
 	next := *l.Local
 	next.Phase = localAccepted
 	next.Expires = time.Now().UTC().Add(registrationLifetime)
@@ -232,7 +241,8 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, nil
 	}
 	expired := l.Local.expired()
-	if recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull())) {
+	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull()))
+	if retire {
 		if err := a.beginCleanup(""); err != nil {
 			return false, err
 		}
@@ -253,10 +263,7 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, err
 	}
 	a.logger.Info("Local offer expired; using hosted fallback", "runner", l.Name, "device", a.state.Config.DeviceID, "offer_age", time.Since(l.Created))
-	if err := a.register(ctx); err != nil {
-		return false, err
-	}
-	return false, a.prepare(ctx)
+	return false, a.provisionHosted(ctx)
 }
 
 func (a *assignment) saveLocal(local *localLease) error {

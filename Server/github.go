@@ -247,7 +247,7 @@ func (g *githubAPI) getRun(ctx context.Context, id int64) (*workflowRun, error) 
 		return nil, err
 	}
 	if run.Path != ".github/workflows/runner-bootstrap.yml" {
-		return nil, errors.New("workflow run does not belong to runner-bootstrap.yml")
+		return nil, fmt.Errorf("%w: run %d does not belong to runner-bootstrap.yml", bootstrapIdentityMismatch, id)
 	}
 	return &run, nil
 }

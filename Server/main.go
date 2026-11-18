@@ -221,7 +221,7 @@ func recoverAssignment(ctx context.Context, directory string, configs []config, 
 		if l == nil {
 			return errors.New("no such assignment in the selected queue")
 		}
-		if saved.Config != cfg {
+		if !saved.Config.sameRoute(cfg) {
 			return errors.New("recover with the original queue configuration")
 		}
 		c, err := newQueueWorker(saved, store, token, 0)

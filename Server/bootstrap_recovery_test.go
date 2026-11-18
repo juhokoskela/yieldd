@@ -127,7 +127,7 @@ func TestJournalFailureStopsIdentityRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.run.ID++
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || !c.identityPaused() {
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || !c.verificationPaused() {
 			t.Fatal(err, c.paused)
 		}
 		w.run.ID--

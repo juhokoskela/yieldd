@@ -646,7 +646,7 @@ func TestOversizedAssignmentStateCannotReplaceReadableJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.state.Leases[c.names()[0]].JIT = strings.Repeat("x", maximumStateBytes)
+	c.state.Leases[c.names()[0]].Conclusion = strings.Repeat("x", maximumStateBytes)
 	if err := store.save(c.state); err == nil {
 		t.Fatal("oversized journal was published")
 	}

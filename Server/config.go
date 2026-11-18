@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -59,12 +60,9 @@ func (c config) validate() error {
 		}
 		return nil
 	}
-	var label string
-	var labels []string
-	if json.Unmarshal([]byte(c.Fallback), &label) == nil {
-		labels = []string{label}
-	} else if json.Unmarshal([]byte(c.Fallback), &labels) != nil {
-		return errors.New("fallback must be a JSON label string or array")
+	labels, err := fallbackLabels(c.Fallback)
+	if err != nil {
+		return err
 	}
 	if len(labels) == 0 {
 		return errors.New("fallback must contain at least one label")
@@ -75,4 +73,32 @@ func (c config) validate() error {
 		}
 	}
 	return nil
+}
+
+func fallbackLabels(value string) ([]string, error) {
+	var label string
+	var labels []string
+	if json.Unmarshal([]byte(value), &label) == nil {
+		labels = []string{label}
+	} else if json.Unmarshal([]byte(value), &labels) != nil {
+		return nil, errors.New("fallback must be a JSON label string or array")
+	}
+	return labels, nil
+}
+
+func (c config) sameRoute(other config) bool {
+	if c == other {
+		return true
+	}
+	raw := c.Fallback
+	c.Fallback = other.Fallback
+	if c != other || c.LocalOnly {
+		return false
+	}
+	left, err := fallbackLabels(raw)
+	if err != nil {
+		return false
+	}
+	right, err := fallbackLabels(other.Fallback)
+	return err == nil && slices.Equal(left, right)
 }

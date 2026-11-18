@@ -150,11 +150,30 @@ func newFixture(t *testing.T) (*coordinator, *fakeWorld, *stateStore) {
 	return &coordinator{state: saved, save: store.save, runners: world, bootstrap: world, device: newDeviceQueue(nil), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), maxFallbackRunners: defaultMaxFallbackRunners}, world, store
 }
 
+func checkJournalOmitsCredential(t *testing.T, c *coordinator, store *stateStore) {
+	t.Helper()
+	save := c.save
+	c.save = func(s *state) error {
+		if err := save(s); err != nil {
+			return err
+		}
+		data, err := store.root.ReadFile("state.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "private-jit") || strings.Contains(string(data), "\"jit\"") {
+			t.Fatal("credential reached the coordinator journal")
+		}
+		return nil
+	}
+}
+
 func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
 	c, w, store := newFixture(t)
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 0); err != nil || n != 0 || len(w.events) != 0 {
 		t.Fatalf("idle: %d %v %v", n, err, w.events)
 	}
+	checkJournalOmitsCredential(t, c, store)
 	w.beforeGenerate = func() {
 		s, err := store.load(testConfig)
 		if err != nil || singleLease(s) == nil || singleLease(s).RunnerID != 0 {
@@ -163,7 +182,7 @@ func TestDemandPersistsBeforeSideEffectsAndBoundsCapacity(t *testing.T) {
 	}
 	w.beforeDispatch = func() {
 		s, err := store.load(testConfig)
-		if err != nil || !singleLease(s).DispatchIntent || singleLease(s).JIT != "" {
+		if err != nil || !singleLease(s).DispatchIntent || singleLease(s).RunnerID != 7 {
 			t.Fatal("dispatch intent not durable", err)
 		}
 	}
@@ -233,53 +252,50 @@ func TestUnknownDispatchNeverRedispatchesOrDropsObligation(t *testing.T) {
 	}
 }
 
-func TestRestartResumesSecretDeliveryBeforeFirstDispatch(t *testing.T) {
-	c, w, store := newFixture(t)
-	w.secretErr = errors.New("secret unavailable")
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
-		t.Fatal("expected secret failure")
-	}
-	saved, err := store.load(testConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if singleLease(saved).JIT != "private-jit" || singleLease(saved).DispatchIntent {
-		t.Fatal("cannot resume secret delivery")
-	}
-	c.state = saved
-	w.secretErr = nil
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
-		t.Fatal(err)
-	}
-	if w.dispatched != 1 || strings.Join(w.events, ",") != "register,secret,secret,dispatch" {
-		t.Fatal(w.events)
-	}
-}
-
-func TestUncertainRegistrationRequiresRecovery(t *testing.T) {
-	c, w, store := newFixture(t)
-	w.generateErr = errors.New("lost registration response")
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
-		t.Fatal("expected registration failure")
-	}
-	saved, err := store.load(testConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.state = saved
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
-		t.Fatal("must not repeat registration")
-	}
-	if strings.Join(w.events, ",") != "register" {
-		t.Fatal(w.events)
-	}
-	// The original request created a runner even though its response was lost.
-	w.runner = &scaleset.RunnerReference{ID: 7, Name: singleLease(c.state).Name, RunnerScaleSetID: 3}
-	if done, err := c.reconcile(t.Context(), true); err != nil || !done {
-		t.Fatal(done, err)
-	}
-	if singleLease(c.state) != nil || w.runner != nil {
-		t.Fatal("registration not recovered")
+func TestInterruptedHostedRegistrationCleansUpBeforeFreshDemand(t *testing.T) {
+	for _, phase := range []string{"before-registration", "lost-registration", "lost-secret-upload"} {
+		t.Run(phase, func(t *testing.T) {
+			c, w, store := newFixture(t)
+			checkJournalOmitsCredential(t, c, store)
+			if phase == "lost-secret-upload" {
+				w.secretErr = errors.New("upload response lost")
+			} else {
+				w.generateErr = errors.New("registration interrupted")
+			}
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
+				t.Fatal("expected interruption")
+			}
+			saved, err := store.load(testConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l := singleLease(saved)
+			if l == nil || l.DispatchIntent || l.RunnerID != 0 {
+				t.Fatal("lost pre-dispatch journal")
+			}
+			switch phase {
+			case "lost-registration":
+				w.runner = &scaleset.RunnerReference{ID: 7, Name: l.Name, RunnerScaleSetID: 3}
+			case "lost-secret-upload":
+				w.secret = "private-jit"
+			}
+			c.state, w.generateErr, w.secretErr = saved, nil, nil
+			before := len(w.events)
+			if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 {
+				t.Fatal("restart cleanup", n, err)
+			}
+			if w.runner != nil || w.secret != "" || w.dispatched != 0 || strings.Contains(strings.Join(w.events[before:], ","), "register") {
+				t.Fatal("cleanup replayed registration or retained resources", w.events)
+			}
+			w.assignedJobs = 0
+			if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 || w.demandCalls != 1 {
+				t.Fatal("cached demand replayed work", n, err)
+			}
+			w.assignedJobs = 1
+			if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || singleLease(c.state).Name == l.Name || w.dispatched != 1 {
+				t.Fatal("fresh demand did not get a new assignment", n, err)
+			}
+		})
 	}
 }
 
@@ -386,7 +402,7 @@ func TestPersistenceFailurePreventsRegistration(t *testing.T) {
 }
 
 func TestEveryPreDispatchPersistenceBarrierPreventsDispatch(t *testing.T) {
-	for failAt := 1; failAt <= 3; failAt++ {
+	for failAt := 1; failAt <= 2; failAt++ {
 		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
 			c, w, store := newFixture(t)
 			failure := errors.New("disk full")
@@ -413,7 +429,7 @@ func TestEveryPreDispatchPersistenceBarrierPreventsDispatch(t *testing.T) {
 			}
 			c.state = saved
 			c.save = store.save
-			if failAt == 3 {
+			if failAt == 2 {
 				if !singleLease(saved).CleanupIntent {
 					t.Fatal("failed dispatch intent was not moved to cleanup")
 				}
@@ -425,15 +441,7 @@ func TestEveryPreDispatchPersistenceBarrierPreventsDispatch(t *testing.T) {
 				}
 				return
 			}
-			if failAt == 2 {
-				if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil {
-					t.Fatal("unknown registration retried")
-				}
-				if done, err := c.reconcile(t.Context(), true); err != nil || !done {
-					t.Fatal(done, err)
-				}
-				return
-			}
+
 			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 				t.Fatal(err)
 			}
@@ -491,6 +499,25 @@ func TestSDKDiagnosticsHidePayloadsAndPreserveIdentity(t *testing.T) {
 	}
 }
 
+func TestLegacyHostedCredentialRequiresOldCoordinator(t *testing.T) {
+	c, _, store := newFixture(t)
+	cfg, err := json.Marshal(testConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := fmt.Sprintf(`{"config":%s,"owner":%q,"scale_set_id":3,"leases":{%q:{"name":%q,"created":"2026-01-01T00:00:00Z","runner_id":7,"jit":"private-jit"}}}`, cfg, c.state.Owner, fixtureRunner, fixtureRunner)
+	if err := store.root.WriteFile("state.json", []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.load(testConfig); err == nil || strings.Contains(err.Error(), "private-jit") {
+		t.Fatal("legacy credential was accepted or disclosed")
+	}
+	after, err := store.root.ReadFile("state.json")
+	if err != nil || string(after) != old {
+		t.Fatal("legacy journal changed on refusal", err)
+	}
+}
+
 func TestPrivateStateAndExclusiveOwnership(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	store, err := openStore(dir)
@@ -504,7 +531,7 @@ func TestPrivateStateAndExclusiveOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := &lease{Name: "yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef", Created: time.Now(), RunnerID: 7, JIT: "private-jit"}
+	l := &lease{Name: "yieldd-bootstrap-01234567-89ab-cdef-0123-456789abcdef", Created: time.Now().UTC(), RunnerID: 7, DispatchIntent: true}
 	saved.Leases = map[string]*lease{l.Name: l}
 	saved.ScaleSetID = 3
 	if err := store.save(saved); err != nil {
@@ -528,7 +555,7 @@ func TestPrivateStateAndExclusiveOwnership(t *testing.T) {
 	}
 	defer reopened.Close()
 	loaded, err := reopened.load(testConfig)
-	if err != nil || singleLease(loaded).JIT != "private-jit" {
+	if err != nil || *singleLease(loaded) != *l {
 		t.Fatal("state did not survive reopen", err)
 	}
 	data, err := json.Marshal(loaded)
