@@ -1,0 +1,77 @@
+import Darwin
+import Foundation
+import Testing
+@testable import Yieldd
+
+@Test func archiveVolumeBoundsConcurrentUnfinishedWritesAcrossRestart() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try RunnerNetworkDirectories.createPrivateDirectory(root)
+    let volume = ArchiveCacheVolume(directory: root, maximumMiB: 128, ownershipDescriptor: nil)
+    defer {
+        // Never remove a fixture until its mount is gone.
+        if (try? volume.detach()) != nil { try? FileManager.default.removeItem(at: root) }
+    }
+    let store = try volume.open()
+    let published = store.directory.appendingPathComponent("published")
+    try Data("keep".utf8).write(to: published)
+    #expect(store.evictionBytes > 0 && store.evictionBytes <= 64 << 20)
+
+    let paths = ["upload.pending", "merge.pending"].map { store.directory.appendingPathComponent($0) }
+    let bytes = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
+        for path in paths { group.addTask { try fillArchiveVolume(path, bytes: 96 << 20) } }
+        var total = 0
+        for try await written in group { total += written }
+        return total
+    }
+    #expect(bytes > 96 << 20)
+    #expect(bytes <= 128 << 20)
+    // A new owner adopts an interrupted mount with its unfinished bytes still charged.
+    let recovered = try ArchiveCacheVolume(directory: root, maximumMiB: 128, ownershipDescriptor: nil).open()
+    #expect(recovered.directory == store.directory)
+    #expect(try String(contentsOf: published, encoding: .utf8) == "keep")
+    try volume.detach()
+    #expect(!FileManager.default.fileExists(atPath: store.directory.path))
+    let reopened = try volume.open()
+    #expect(try paths.allSatisfy { try $0.resourceValues(forKeys: [.fileSizeKey]).fileSize != nil })
+    for path in paths { try FileManager.default.removeItem(at: path) }
+    #expect(try fillArchiveVolume(reopened.directory.appendingPathComponent("next"), bytes: 1 << 20) == 1 << 20)
+}
+
+@Test func archiveVolumePreservesUnexpectedMountContentsOnFailedAttach() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let mount = root.appendingPathComponent("volume")
+    try RunnerNetworkDirectories.createPrivateDirectory(root)
+    let volume = ArchiveCacheVolume(directory: root, maximumMiB: 128, ownershipDescriptor: nil)
+    defer {
+        if (try? volume.detach()) != nil { try? FileManager.default.removeItem(at: root) }
+    }
+    try RunnerNetworkDirectories.createPrivateDirectory(mount)
+    let marker = mount.appendingPathComponent("existing")
+    try Data("keep".utf8).write(to: marker)
+    #expect(throws: (any Error).self) { try volume.open() }
+    try volume.detach()
+    #expect(try String(contentsOf: marker, encoding: .utf8) == "keep")
+    #expect(!FileManager.default.fileExists(atPath: mount.appendingPathComponent("store").path))
+    try FileManager.default.removeItem(at: marker)
+    _ = try volume.open()
+}
+
+private func fillArchiveVolume(_ file: URL, bytes: Int) throws -> Int {
+    let fd = open(file.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { close(fd) }
+    let chunk = [UInt8](repeating: 0xa3, count: 1 << 20)
+    return try chunk.withUnsafeBytes { data in
+        var written = 0
+        while written < bytes {
+            let count = Darwin.write(fd, data.baseAddress, min(bytes - written, data.count))
+            if count < 0 {
+                if errno == ENOSPC { return written }
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            guard count > 0 else { throw POSIXError(.EIO) }
+            written += count
+        }
+        return written
+    }
+}

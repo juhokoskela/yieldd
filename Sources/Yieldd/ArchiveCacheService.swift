@@ -7,12 +7,15 @@ final class ArchiveCacheService: @unchecked Sendable {
     let socketURL: URL
     private let storage: RunnerStorage
     private let stateDirectory: URL
+    private let ownershipDescriptor: Int32?
+    private var volume: ArchiveCacheVolume?
     private let policy: String
     private let lock = NSLock()
     private var child: Process?
     private var lifetime: Pipe?
 
-    private init(storage: RunnerStorage, stateDirectory: URL, policy: Data) throws {
+    private init(storage: RunnerStorage, stateDirectory: URL, policy: Data, ownershipDescriptor: Int32?) throws {
+        self.ownershipDescriptor = ownershipDescriptor
         self.storage = storage
         self.stateDirectory = stateDirectory
         guard let json = String(data: policy, encoding: .utf8), !json.utf8.contains(0) else {
@@ -24,9 +27,9 @@ final class ArchiveCacheService: @unchecked Sendable {
         socketURL = root.appendingPathComponent("archive.sock")
     }
 
-    static func start(storage: RunnerStorage, stateDirectory: URL, policy: Data,
+    static func start(storage: RunnerStorage, stateDirectory: URL, policy: Data, ownershipDescriptor: Int32? = nil,
                       checkCancellation: () throws -> Void) throws -> ArchiveCacheService {
-        let service = try ArchiveCacheService(storage: storage, stateDirectory: stateDirectory, policy: policy)
+        let service = try ArchiveCacheService(storage: storage, stateDirectory: stateDirectory, policy: policy, ownershipDescriptor: ownershipDescriptor)
         try service.ensureRunning(checkCancellation: checkCancellation)
         return service
     }
@@ -37,12 +40,18 @@ final class ArchiveCacheService: @unchecked Sendable {
             stopLocked()
             try checkCancellation()
             // Recheck the volume on every launch, including after a helper crash.
-            try storage.validate(stateDirectory: stateDirectory)
+            let storageVolume = try storage.validate(stateDirectory: stateDirectory)
             let root = storage.volumeURL.appendingPathComponent("job-caches")
             let archives = root.appendingPathComponent("archives")
             try storage.validatePath(archives)
             try RunnerNetworkDirectories.createPrivateDirectory(root)
             try RunnerNetworkDirectories.createPrivateDirectory(archives)
+            let volume = ArchiveCacheVolume(directory: archives, maximumMiB: min(16 << 10, (storageVolume.quotaBytes / 8) >> 20),
+                                            ownershipDescriptor: ownershipDescriptor)
+            self.volume = volume
+            var ready = false
+            defer { if !ready { stopLocked() } }
+            let mounted = try volume.open()
             try removeSocket()
             let process = Process()
             let pipe = Pipe()
@@ -52,36 +61,39 @@ final class ArchiveCacheService: @unchecked Sendable {
                 }
             }
             process.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/yieldd-cache-server")
-            process.currentDirectoryURL = archives
+            process.currentDirectoryURL = mounted.directory
             process.environment = ["YIELDD_CACHE_POLICY": policy, "YIELDD_CACHE_SOCKET": socketURL.path,
-                                   "API_BASE_URL": "http://192.168.127.1:7341", "CACHE_MAX_SIZE_BYTES": "10737418240"]
+                                   "API_BASE_URL": "http://192.168.127.1:7341", "CACHE_MAX_SIZE_BYTES": String(mounted.evictionBytes),
+                                   "SQLITE_TMPDIR": mounted.directory.path, "TMPDIR": mounted.directory.path]
             process.standardInput = pipe
             process.standardOutput = FileHandle.standardError
             process.standardError = FileHandle.standardError
             try process.run()
             lifetime = pipe
             child = process
-            do {
-                try pipe.fileHandleForReading.close()
-                let deadline = DispatchTime.now() + 30
-                while process.isRunning {
-                    try checkCancellation()
-                    var info = stat()
-                    if lstat(socketURL.path, &info) == 0 && info.st_mode & S_IFMT == S_IFSOCK { return }
-                    guard DispatchTime.now() < deadline else { break }
-                    Thread.sleep(forTimeInterval: 0.025)
-                }
-                throw ArchiveCacheError.startupFailed
-            } catch {
-                stopLocked()
-                throw error
+            try pipe.fileHandleForReading.close()
+            let deadline = DispatchTime.now() + 30
+            while process.isRunning {
+                try checkCancellation()
+                var info = stat()
+                if lstat(socketURL.path, &info) == 0 && info.st_mode & S_IFMT == S_IFSOCK { ready = true; return }
+                guard DispatchTime.now() < deadline else { break }
+                Thread.sleep(forTimeInterval: 0.025)
             }
+            throw ArchiveCacheError.startupFailed
         }
     }
 
     func stop() { lock.withLock { stopLocked() } }
 
     private func stopLocked() {
+        defer {
+            if let volume {
+                do { try volume.detach() }
+                catch { FileHandle.standardError.write(Data("Archive disk remains attached: \(describeError(error))\n".utf8)) }
+                self.volume = nil
+            }
+        }
         guard let child else { return }
         if child.isRunning { child.terminate() }
         // Let ordinary shutdown finish database work. Owner EOF also stops the helper

@@ -80,7 +80,7 @@ func runConnectedService(
             output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
             return
         }
-        try removeUnleasedRunnerFiles(in: directory, checkCancellation: stop.check)
+        try removeUnleasedRunnerFiles(in: directory, ownershipDescriptor: ownershipDescriptor, checkCancellation: stop.check)
         let storage = try RunnerStorage.required(in: directory)
         try storage.validate(stateDirectory: directory)
         try RunnerNetwork.requireRelay()
@@ -112,7 +112,7 @@ func runConnectedService(
         }
         let archiveService = try cacheConfiguration.map { configuration in
             try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
-                policy: configuration.data, checkCancellation: stop.check)
+                policy: configuration.data, ownershipDescriptor: ownershipDescriptor, checkCancellation: stop.check)
         }
         defer { archiveService?.stop() }
         let cacheSocket = archiveService?.socketURL
