@@ -73,7 +73,7 @@ final class ArchiveCacheService: @unchecked Sendable {
             process.currentDirectoryURL = mounted.directory
             process.environment = ["YIELDD_CACHE_POLICY": policy, "YIELDD_CACHE_SOCKET": socketURL.path,
                                    "API_BASE_URL": "http://192.168.127.1:7341", "CACHE_MAX_SIZE_BYTES": String(mounted.evictionBytes),
-                                   "SQLITE_TMPDIR": mounted.directory.path, "TMPDIR": mounted.directory.path]
+                                   "MAX_CONCURRENT_MERGES": "0", "SQLITE_TMPDIR": mounted.directory.path, "TMPDIR": mounted.directory.path]
             process.standardInput = pipe
             process.standardOutput = FileHandle.standardError
             process.standardError = FileHandle.standardError

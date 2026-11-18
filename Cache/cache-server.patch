@@ -259,10 +259,132 @@ index facb97e..ff4d834 100644
          metrics.contains("process_start_time_seconds"),
          "process metrics are wired up"
 diff --git a/src/storage.rs b/src/storage.rs
-index 13862d9..28641b7 100644
+index 13862d9..090a1c0 100644
 --- a/src/storage.rs
 +++ b/src/storage.rs
-@@ -659,6 +659,10 @@ impl Storage {
+@@ -6,10 +6,10 @@ mod leases;
+ mod lifecycle;
+ mod object;
+
+-use std::collections::HashMap;
++use std::collections::{HashMap, VecDeque};
+ use std::fmt::Display;
+ use std::io;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex, PoisonError};
+
+ use axum::body::Bytes;
+ use base64::Engine as _;
+@@ -128,6 +128,7 @@ pub(crate) struct Storage {
+     pub(crate) adapter: Arc<Adapter>,
+     config: Arc<Config>,
+     merges: TaskTracker,
++    part_indexes: Mutex<VecDeque<(String, Arc<[u64]>)>>,
+     /// One permit per Merge this process may run at once. Each Merge holds storage connections
+     /// and buffers for its whole duration; unbounded, a burst of first restores exhausts them.
+     merge_slots: Arc<Semaphore>,
+@@ -333,6 +334,7 @@ impl Storage {
+             merge_slots: Arc::new(Semaphore::new(config.max_concurrent_merges)),
+             config,
+             merges: TaskTracker::new(),
++            part_indexes: Mutex::default(),
+         };
+         storage.reconcile_storage_location_sizes().await?;
+         Ok(storage)
+@@ -402,6 +404,40 @@ impl Storage {
+             .collect()
+     }
+
++    // Published parts are immutable. Repeated Azure range requests can share one
++    // directory inventory, even on a machine with many concurrent jobs.
++    async fn part_ends(&self, location: &StorageLocation) -> Result<Arc<[u64]>, ReadError> {
++        if let Some((_, ends)) = self
++            .part_indexes
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .iter()
++            .find(|(id, _)| id == &location.id)
++        {
++            return Ok(Arc::clone(ends));
++        }
++        let mut sizes = self.part_sizes(location).await?;
++        let mut end = 0_u64;
++        for size in &mut sizes {
++            end = end.saturating_add(*size);
++            *size = end;
++        }
++        let ends: Arc<[u64]> = sizes.into();
++        if ends.len() <= 65_536 {
++            let mut indexes = self
++                .part_indexes
++                .lock()
++                .unwrap_or_else(PoisonError::into_inner);
++            if !indexes.iter().any(|(id, _)| id == &location.id) {
++                if indexes.len() == 32 {
++                    indexes.pop_front();
++                }
++                indexes.push_back((location.id.clone(), Arc::clone(&ends)));
++            }
++        }
++        Ok(ends)
++    }
++
+     async fn download_location(
+         &self,
+         location: &StorageLocation,
+@@ -410,34 +446,32 @@ impl Storage {
+         if let Some((object, _)) = whole_object(location) {
+             return self.adapter.download_stream(&object, range).await;
+         }
+-        let part_sizes = self.part_sizes(location).await?;
++        let size = match location
++            .size_bytes
++            .and_then(|size| u64::try_from(size).ok())
++        {
++            Some(size) => size,
++            None => self.part_ends(location).await?.last().copied().unwrap_or(0),
++        };
+         let adapter = Arc::clone(&self.adapter);
+-        let size = part_sizes
+-            .iter()
+-            .fold(0_u64, |total, &part| total.saturating_add(part));
+         let Some(range) = range.filter(|_| size > 0) else {
+-            // An unmerged entry is concatenated from its Parts as it is read. Only an empty entry
+-            // ignores a range, like an empty object does.
++            // HEAD drops this lazy stream without opening any part.
+             return Ok(DownloadStream {
+                 stream: stream_parts(adapter, location, 0, 0),
+-                extent: Extent::Unsized,
++                extent: Extent::Whole { size },
+             });
+         };
+-        // Never the whole entry under a 200: the Azure SDK takes any 200 body as the bytes from
+-        // the offset it asked for.
+         let served = clamp_range(range, size)
+             .ok_or_else(|| ReadError::RangeNotSatisfiable(parts_folder(&location.folder_name)))?;
+-        // The Part the range starts in, and the offset into it.
+-        let (mut first, mut skip) = (0_i32, served.start);
+-        for &part in &part_sizes {
+-            if skip < part {
+-                break;
+-            }
+-            skip = skip.saturating_sub(part);
+-            first = first.saturating_add(1);
+-        }
++        let ends = self.part_ends(location).await?;
++        let first = ends.partition_point(|end| *end <= served.start);
++        let base = first.checked_sub(1).map_or(0, |previous| ends[previous]);
++        let first = i32::try_from(first).map_err(|_| Failure::msg("invalid part index"))?;
+         Ok(DownloadStream {
+-            stream: take_bytes(stream_parts(adapter, location, first, skip), served.len()),
++            stream: take_bytes(
++                stream_parts(adapter, location, first, served.start - base),
++                served.len(),
++            ),
+             extent: Extent::Partial {
+                 range: served,
+                 size,
+@@ -659,6 +693,10 @@ impl Storage {
      /// Reserves `identity` for a new upload; a concurrent reservation of the same identity loses
      /// on the unique reservation hash.
      pub(crate) async fn create_upload(&self, identity: &EntryIdentity) -> Result<CreatedUpload> {
@@ -273,6 +395,21 @@ index 13862d9..28641b7 100644
          let id = random_upload_id();
          let capability = random_capability()?;
          let inserted = uploads::Entity::insert(uploads::ActiveModel {
+@@ -929,8 +967,12 @@ impl Storage {
+         location: &StorageLocation,
+         range: Option<RangeRequest>,
+     ) -> Result<DownloadStream, ReadError> {
+-        // A ranged read serves its slice from the Parts and leaves the Merge to a whole read.
+-        if whole_object(location).is_some() || range.is_some() {
++        // yieldd keeps immutable filesystem parts when merging has been disabled.
++        if whole_object(location).is_some()
++            || range.is_some()
++            || (self.config.max_concurrent_merges == 0
++                && matches!(self.adapter.as_ref(), Adapter::Filesystem(_)))
++        {
+             return self.download_location(location, range).await;
+         }
+         self.part_sizes(location).await?;
 diff --git a/src/storage/filesystem.rs b/src/storage/filesystem.rs
 index f7fb624..5933975 100644
 --- a/src/storage/filesystem.rs
@@ -407,3 +544,98 @@ index f2265a4..695825c 100644
  #[tokio::test]
  async fn rejects_names_escaping_the_root() {
      let (_dir, adapter) = adapter().await;
+diff --git a/src/config.rs b/src/config.rs
+index d0e3bcf..bbebee2 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -49,7 +49,7 @@ pub(crate) struct Config {
+     /// Lifetime of a signed direct-download URL, 1 second to 1 hour.
+     pub(crate) direct_download_url_ttl: Duration,
+     pub(crate) eager_merge: bool,
+-    /// Merges this process runs at once, eager or lazy; at least 1.
++    /// Merges this process runs at once. Zero streams filesystem parts in place.
+     pub(crate) max_concurrent_merges: usize,
+     /// How long a response may wait for its client to read; `None` waits forever.
+     pub(crate) download_idle_timeout: Option<Duration>,
+@@ -286,8 +286,8 @@ struct Vars {
+     direct_download_url_ttl_seconds: Duration,
+     #[arg(long, env, action = ArgAction::Set, default_value_t = false)]
+     eager_merge: bool,
+-    #[arg(long, env, default_value = "16", value_parser = integer::<NonZeroU64>)]
+-    max_concurrent_merges: NonZeroU64,
++    #[arg(long, env, default_value = "16", value_parser = integer::<u64>)]
++    max_concurrent_merges: u64,
+     /// Milliseconds a download waits for its client to read; 0 waits forever
+     #[arg(long, env, default_value = "300000", value_parser = integer::<i32>)]
+     download_idle_timeout_ms: i32,
+@@ -598,7 +598,7 @@ impl Config {
+             enable_direct_downloads: given.enable_direct_downloads,
+             direct_download_url_ttl: given.direct_download_url_ttl_seconds,
+             eager_merge: given.eager_merge,
+-            max_concurrent_merges: usize::try_from(given.max_concurrent_merges.get())
++            max_concurrent_merges: usize::try_from(given.max_concurrent_merges)
+                 .unwrap_or(usize::MAX)
+                 .min(Semaphore::MAX_PERMITS),
+             // `i32` caps it like v9, at the largest delay a Node timer accepts.
+diff --git a/src/tests/downloads.rs b/src/tests/downloads.rs
+index 168c3ed..e14ac22 100644
+--- a/src/tests/downloads.rs
++++ b/src/tests/downloads.rs
+@@ -453,3 +453,37 @@ async fn closes_a_download_whose_client_stopped_reading() {
+         "the client sees a failed download, not a complete one"
+     );
+ }
++
++#[tokio::test]
++async fn unmerged_filesystem_streams_head_ranges_and_whole_without_copying() {
++    let server = TestServer::with(&[("MAX_CONCURRENT_MERGES", "0")]).await;
++    let parts = parts();
++    let location = save_parts(server.storage(), "multipart", &parts).await;
++    let expected = parts.concat();
++    let head = reqwest::Client::new()
++        .head(format!("{}/download/{}", server.url, location.id))
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(head.status(), 200);
++    assert_eq!(
++        response_header(&head, "content-length"),
++        Some(expected.len().to_string())
++    );
++    assert!(head.bytes().await.unwrap().is_empty());
++    assert_serves_ranges(&server, &location.id, &expected, "x-ms-range").await;
++    let full = get(&server, &location.id, None).await;
++    assert_eq!(
++        response_header(&full, "content-length"),
++        Some(expected.len().to_string())
++    );
++    assert_eq!(full.bytes().await.unwrap(), expected);
++    server.storage().wait_for_ongoing_merges().await;
++    assert!(
++        !server
++            .adapter()
++            .object_exists(&format!("{}/merged", location.folder_name))
++            .await
++            .unwrap()
++    );
++}
+diff --git a/src/config/tests.rs b/src/config/tests.rs
+index 53b068c..e4e79af 100644
+--- a/src/config/tests.rs
++++ b/src/config/tests.rs
+@@ -115,9 +115,12 @@ fn bounds_merge_and_download_limits() {
+         Some(Duration::from_mins(5)),
+         "default idle timeout"
+     );
+-    assert!(
+-        config(&[("MAX_CONCURRENT_MERGES", "0")]).is_err(),
+-        "no merges"
++    assert_eq!(
++        config(&[("MAX_CONCURRENT_MERGES", "0")])
++            .unwrap()
++            .max_concurrent_merges,
++        0,
++        "zero disables merging"
+     );
+     let disabled = config(&[("DOWNLOAD_IDLE_TIMEOUT_MS", "0")]).unwrap();
+     assert_eq!(disabled.download_idle_timeout, None, "0 disables it");
