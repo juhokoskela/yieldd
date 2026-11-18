@@ -270,7 +270,7 @@ func TestDeviceFinalResultReadsTheMatchedLeaseWithoutGitHub(t *testing.T) {
 	loop := newCoordinatorLoop(ctx, c)
 	handler := deviceHandlerFor(t, loop, strings.Repeat("x", 32))
 	startLoops(t, cancel, []*coordinatorLoop{loop})
-	check := func(req deviceRequest, want string) {
+	check := func(req deviceRequest, want finalJobResult) {
 		t.Helper()
 		response := requestDevice(handler, "job-result", req)
 		var got deviceJobResult
