@@ -43,21 +43,24 @@ final class RunnerPoolStop: @unchecked Sendable {
 
     private let condition = NSCondition()
     private let shutdownTimeout: TimeInterval?
+    private let onStop: @Sendable () -> Void
     private var requested = false
     private var stopDeadline: DispatchTime?
     private var signalMonitor: SignalMonitor?
 
-    init(shutdownTimeout: TimeInterval? = nil) {
+    init(shutdownTimeout: TimeInterval? = nil, onStop: @escaping @Sendable () -> Void = {}) {
         if let shutdownTimeout {
             precondition(shutdownTimeout.isFinite && shutdownTimeout > 0)
         }
         self.shutdownTimeout = shutdownTimeout
+        self.onStop = onStop
     }
 
     static func monitoringSignals(
-        shutdownTimeout: TimeInterval? = nil
+        shutdownTimeout: TimeInterval? = nil,
+        onStop: @escaping @Sendable () -> Void = {}
     ) throws -> RunnerPoolStop {
-        let stop = RunnerPoolStop(shutdownTimeout: shutdownTimeout)
+        let stop = RunnerPoolStop(shutdownTimeout: shutdownTimeout, onStop: onStop)
         stop.signalMonitor = try SignalMonitor(signalReceived: { [weak stop] _ in
             stop?.request()
         })
@@ -65,10 +68,10 @@ final class RunnerPoolStop: @unchecked Sendable {
     }
 
     func request() {
-        condition.withLock {
+        let firstRequest = condition.withLock {
             guard !requested else {
                 condition.broadcast()
-                return
+                return false
             }
             if let shutdownTimeout {
                 stopDeadline = DispatchTime.now() + .milliseconds(
@@ -77,7 +80,9 @@ final class RunnerPoolStop: @unchecked Sendable {
             }
             requested = true
             condition.broadcast()
+            return true
         }
+        if firstRequest { onStop() }
     }
 
     func check() throws {

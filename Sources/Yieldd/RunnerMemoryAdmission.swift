@@ -21,6 +21,10 @@ final class RunnerMemoryAdmission: @unchecked Sendable {
         self.readMemoryPressure = readMemoryPressure
     }
 
+    var status: RunnerMemoryStatus {
+        condition.withLock { RunnerMemoryStatus(budgetBytes: budgetBytes, reservedBytes: reservedBytes, pressure: readMemoryPressure()) }
+    }
+
     func connectedWorkerCount(for platform: RunnerPlatform) -> Int {
         let limit = platform == .macOS ? RunnerServiceConfiguration.maximumMacOSSlots : RunnerPool.maximumSlots
         return Int(min(UInt64(limit), budgetBytes / platform.memoryReservationBytes))

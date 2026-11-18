@@ -76,7 +76,8 @@ func runConnectedService(
         // macOS recovery removes abandoned clones without requiring the template.
         try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
                                       token: token, confirmation: confirmation, stop: stop,
-                                      resolveContainer: resolveContainer, output: output)
+                                      resolveContainer: resolveContainer, output: output, control: control)
+        control?.starting()
         if confirmation != nil {
             output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
             return
@@ -108,13 +109,15 @@ func runConnectedService(
         let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
+        control?.configure(workers: slots, memory: memory)
         control?.markReady()
-        if control?.snapshot.paused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
+        if control?.isPaused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
         try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
-            let workerID = "\(worker.backend.platform.rawValue)-\(worker.slot)"
+            let workerID = worker.id
             let platform = worker.backend.platform
             let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
-                                             platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+                                             platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline,
+                connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
             let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
             let backend: any RunnerBackend
@@ -133,13 +136,21 @@ func runConnectedService(
             let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
                 server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
                 authorization: authorization, wait: stop.wait,
-                stateChanged: { reportRunnerServiceState($0, platform: platform, output: output) })
+                stateChanged: {
+                    control?.session(worker: workerID, state: $0)
+                    reportRunnerServiceState($0, platform: platform, output: output)
+                })
             try runConnectedClient(checkCancellation: stop.check, recover: {
+                control?.update(worker: workerID, phase: .recovering)
                 try runner.recover()
                 output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
             }, acquire: {
                 try memory.tryAcquire(reserving: platform.memoryReservationBytes)
-            }, release: memory.release, poll: client.poll, decline: client.decline, run: { offer, allocation, release in
+            }, release: memory.release, poll: {
+                control?.update(worker: workerID, phase: .idle)
+                return try client.poll()
+            }, decline: client.decline, run: { offer, allocation, release in
+                control?.assign(worker: workerID, offer: offer)
                 output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                 try runner.run(offer, memory: allocation, releaseCapacity: release)
             }, wait: stop.wait, retrying: { error in
@@ -147,8 +158,9 @@ func runConnectedService(
             }, available: {
                 memory.isAvailable(reserving: platform.memoryReservationBytes)
             }, blocked: {
+                control?.update(worker: workerID, phase: .waitingForMemory)
                 output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
-            }, paused: { control?.snapshot.paused ?? false }, beginAssignment: {
+            }, paused: { control?.isPaused ?? false }, beginAssignment: {
                 control?.beginAssignment(worker: workerID) ?? true
             }, finishAssignment: {
                 control?.finishAssignment(worker: workerID)
@@ -160,6 +172,11 @@ func runConnectedService(
 struct ConnectedWorker: Sendable {
     let backend: RunnerSlotBackend
     let slot: Int
+    var id: String { backend.platform.connectedWorkerID(slot: slot) }
+}
+
+extension RunnerPlatform {
+    func connectedWorkerID(slot: Int) -> String { "\(rawValue)-\(slot)" }
 }
 
 func connectedWorkers(backends: [RunnerSlotBackend], memory: RunnerMemoryAdmission,

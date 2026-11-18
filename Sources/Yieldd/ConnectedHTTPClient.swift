@@ -8,15 +8,17 @@ final class ConnectedHTTPClient {
     let platform: RunnerPlatform
     let slot: Int
     let maximumExecutionDeadline: () -> DispatchTime?
+    let connectionChanged: (AgentConnectionState, String?) -> Void
     private let session: URLSession
 
-    init(server: URL, deviceID: String, token: String, platform: RunnerPlatform = .linux, slot: Int = 0, checkCancellation: @escaping () throws -> Void, maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil }) {
+    init(server: URL, deviceID: String, token: String, platform: RunnerPlatform = .linux, slot: Int = 0, checkCancellation: @escaping () throws -> Void, maximumExecutionDeadline: @escaping () -> DispatchTime? = { nil }, connectionChanged: @escaping (AgentConnectionState, String?) -> Void = { _, _ in }) {
         self.server = server
         self.deviceID = deviceID
         self.token = token
         self.platform = platform
         self.slot = slot
         self.maximumExecutionDeadline = maximumExecutionDeadline
+        self.connectionChanged = connectionChanged
         self.checkCancellation = checkCancellation
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 65
@@ -81,6 +83,21 @@ final class ConnectedHTTPClient {
     }
 
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {
+        do {
+            let result = try performRequest(action, offer: offer, checkCancellation: check)
+            connectionChanged(.connected, nil)
+            return result
+        } catch {
+            if (error as? ConnectedRunnerError)?.httpStatus == 410 {
+                connectionChanged(.connected, nil)
+            } else if !isCancellation(error) {
+                connectionChanged(isTransientConnectedFailure(error) ? .retrying : .failed, describeError(error))
+            }
+            throw error
+        }
+    }
+
+    private func performRequest(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {
         func checkRequest() throws {
             try check()
             if let deadline = maximumExecutionDeadline(), DispatchTime.now() >= deadline { throw CancellationError() }

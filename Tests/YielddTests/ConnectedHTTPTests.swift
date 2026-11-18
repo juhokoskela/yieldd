@@ -218,7 +218,11 @@ private final class ConnectedHTTPFixture: @unchecked Sendable {
             deviceID: "01234567-89ab-4def-8123-456789abcdef", token: token, checkCancellation: {})
     }
 
-    init(response: String?) throws {
+    convenience init(response: String?) throws {
+        try self.init(respond: { _ in response })
+    }
+
+    init(respond: @escaping @Sendable (String) -> String?) throws {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try NWListener(using: parameters)
@@ -230,7 +234,7 @@ private final class ConnectedHTTPFixture: @unchecked Sendable {
             guard let self else { connection.cancel(); return }
             self.connections.append(connection)
             connection.start(queue: self.queue)
-            self.receive(connection, accumulated: Data(), response: response)
+            self.receive(connection, accumulated: Data(), respond: respond)
         }
         listener.start(queue: queue)
         guard ready.wait(timeout: .now() + 5) == .success, listener.port != nil else {
@@ -239,14 +243,14 @@ private final class ConnectedHTTPFixture: @unchecked Sendable {
         }
     }
 
-    private func receive(_ connection: NWConnection, accumulated: Data, response: String?) {
+    private func receive(_ connection: NWConnection, accumulated: Data, respond: @escaping @Sendable (String) -> String?) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, ended, error in
             guard let self, error == nil else { connection.cancel(); return }
             let combined = accumulated + (data ?? Data())
             guard combined.count <= 16384 else { connection.cancel(); return }
             let text = String(decoding: combined, as: UTF8.self)
             guard let separator = text.range(of: "\r\n\r\n") else {
-                if !ended { self.receive(connection, accumulated: combined, response: response) }
+                if !ended { self.receive(connection, accumulated: combined, respond: respond) }
                 return
             }
             let headers = String(text[..<separator.lowerBound])
@@ -255,11 +259,11 @@ private final class ConnectedHTTPFixture: @unchecked Sendable {
                 return Int(line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces))
             }.first ?? 0
             if text[separator.upperBound...].utf8.count < length, !ended {
-                self.receive(connection, accumulated: combined, response: response)
+                self.receive(connection, accumulated: combined, respond: respond)
                 return
             }
             self.lock.withLock { self.received = text }
-            if let response {
+            if let response = respond(text) {
                 connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
             }
         }
@@ -289,4 +293,61 @@ func connectedCleanupHonorsShutdownDeadlineWithoutCancellingEarlyCleanup(expired
         try client.complete(offer)
         #expect(server.request.contains("POST /v1/complete HTTP/1.1"))
     }
+}
+
+@Test(arguments: [204, 503, 401, 410])
+func connectedHTTPReportsLastContactAndFailureWithoutResponseBodies(status: Int) throws {
+    let body = status == 204 ? "" : "private-token private-jit"
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 \(status) Response\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
+    defer { server.close() }
+    let original = server.client
+    var states: [AgentConnectionState] = []
+    var failures: [String] = []
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID, token: original.token,
+        checkCancellation: {}, connectionChanged: { state, error in
+            states.append(state)
+            if let error { failures.append(error) }
+        })
+    if status == 204 { _ = try client.poll() }
+    else { #expect(throws: ConnectedRunnerError.self) { try client.poll() } }
+    #expect(states == [status == 204 || status == 410 ? .connected : status == 503 ? .retrying : .failed])
+    #expect(!failures.joined().contains("private-token"))
+    #expect(!failures.joined().contains("private-jit"))
+}
+
+@Test
+func startupRecoveryReportsCompletedWorkersAndTheRemainingRetry() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("recovery-status-\(UUID().uuidString)")
+    _ = try AgentConfigurationStore(directory: directory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let control = ConnectedAgentControl(directory: directory)
+    let stop = RunnerPoolStop()
+    let server = try ConnectedHTTPFixture(respond: { request in
+        let status = request.contains(#""slot":0"#) ? 200 : 503
+        return "HTTP/1.1 \(status) Response\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    })
+    defer { server.close() }
+    let client = server.client
+    for slot in 0..<2 {
+        let offer = try ConnectedOffer(owner: client.deviceID,
+            runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: "owner/repo", platform: "macos", architecture: "arm64", slot: slot)
+        try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: slot)
+            .save(ConnectedLease(server: client.server.absoluteString, deviceID: client.deviceID, offer: offer))
+    }
+    let output = RunnerServiceOutput(info: { _ in
+        let snapshot = control.snapshot
+        #expect(snapshot.phase == .recovering && !snapshot.ready)
+        #expect(snapshot.activeAssignments == 1)
+        #expect(snapshot.workers.first { $0.slot == 0 }?.runner == nil)
+        #expect(snapshot.workers.first { $0.slot == 0 }?.lastContactAt != nil)
+        #expect(snapshot.workers.first { $0.slot == 1 }?.connection == .retrying)
+        #expect(snapshot.lastError?.message.contains("503") == true)
+        stop.request()
+    }, warning: { _ in }, error: { _ in })
+    #expect(throws: CancellationError.self) {
+        try recoverConnectedPlatforms(directory: directory, server: client.server, deviceID: client.deviceID, token: client.token,
+            confirmation: nil, stop: stop, makeCloneStore: testCloneStores(in: directory), output: output, control: control)
+    }
+    #expect(try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 0).load() == nil)
+    #expect(try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 1).load() != nil)
 }

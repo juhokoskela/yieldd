@@ -10,6 +10,13 @@ struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let paused: Bool
     let ready: Bool
     let activeAssignments: Int
+    let recordedAt: Date
+    let phase: AgentServicePhase
+    let server: String?
+    let deviceID: String?
+    let memory: RunnerMemoryStatus?
+    let workers: [AgentWorkerStatus]
+    let lastError: AgentReportedError?
 
     var drained: Bool { ready && paused && activeAssignments == 0 }
 }
@@ -21,10 +28,17 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private var paused: Bool
     private let instanceID = UUID()
     private var resumeGeneration: UInt64 = 0
-    private var ready = false
     private var assignments: Set<String> = []
+    private var phase: AgentServicePhase = .starting
+    private let server: String?
+    private let deviceID: String?
+    private var memory: RunnerMemoryAdmission?
+    private var workers: [String: AgentWorkerStatus] = [:]
+    private var lastError: AgentReportedError?
 
-    init(directory: URL) {
+    init(directory: URL, configuration: ConnectedAgentConfiguration? = nil) {
+        server = configuration?.server.absoluteString
+        deviceID = configuration?.deviceID
         pauseFile = directory.appendingPathComponent("connected-agent.paused")
         var info = stat()
         paused = Darwin.lstat(pauseFile.path, &info) == 0 || errno != ENOENT
@@ -34,11 +48,82 @@ final class ConnectedAgentControl: @unchecked Sendable {
         lock.withLock { snapshotUnlocked() }
     }
 
-    func markReady() { lock.withLock { ready = true } }
+    var isPaused: Bool { lock.withLock { paused } }
+
+    func starting() {
+        lock.withLock { if phase != .stopping { phase = .starting } }
+    }
+
+    func markReady() {
+        lock.withLock {
+            guard phase != .stopping else { return }
+            phase = .ready
+        }
+    }
+
+    func configure(workers slots: [ConnectedWorker], memory: RunnerMemoryAdmission) {
+        lock.withLock {
+            self.memory = memory
+            precondition(assignments.isEmpty)
+            workers = Dictionary(uniqueKeysWithValues: slots.map { worker in
+                let id = worker.id
+                return (id, AgentWorkerStatus(id: id, platform: worker.backend.platform, slot: worker.slot))
+            })
+        }
+    }
+
+    func recovering(_ leases: [ConnectedLease]) {
+        lock.withLock {
+            if phase != .stopping { phase = .recovering }
+            for lease in leases {
+                let offer = lease.offer
+                let id = offer.runnerPlatform.connectedWorkerID(slot: offer.slot)
+                workers[id] = AgentWorkerStatus(id: id, platform: offer.runnerPlatform, slot: offer.slot,
+                    phase: .recovering, runner: offer.runner, repository: offer.repository)
+                assignments.insert(id)
+            }
+        }
+    }
+
+    func update(worker: String, phase: AgentWorkerPhase) {
+        lock.withLock { workers[worker]?.phase = phase }
+    }
+
+    func assign(worker: String, offer: ConnectedOffer) {
+        lock.withLock {
+            workers[worker]?.phase = .provisioning
+            workers[worker]?.runner = offer.runner
+            workers[worker]?.repository = offer.repository
+        }
+    }
+
+    func connection(worker: String, state: AgentConnectionState, error: String?) {
+        lock.withLock {
+            workers[worker]?.connection = state
+            if state == .connected { workers[worker]?.lastContactAt = Date() }
+            if let error { lastError = AgentReportedError(message: error) }
+        }
+    }
+
+    func session(worker: String, state: RunnerSessionState) {
+        switch state {
+        case .listenerStarted, .waitingForJob: update(worker: worker, phase: .waitingForJob)
+        case .jobStarted: update(worker: worker, phase: .running)
+        case .listenerExited, .capacityReleased, .cleaningUp, .waitingForGitHubCleanup: update(worker: worker, phase: .cleaningUp)
+        case .preparing: update(worker: worker, phase: .provisioning)
+        case .waitingForMemory: update(worker: worker, phase: .waitingForMemory)
+        case let .executionStopped(_, reason), let .leaseCleanupFailed(_, reason):
+            lock.withLock { lastError = AgentReportedError(message: reason); workers[worker]?.phase = .cleaningUp }
+        case .cleanupCompleted: break
+        }
+    }
+
+    func stopping() { lock.withLock { phase = .stopping } }
+
 
     func beginAssignment(worker: String) -> Bool {
         lock.withLock {
-            guard ready, !paused else { return false }
+            guard phase == .ready, !paused else { return false }
             precondition(!assignments.contains(worker))
             assignments.insert(worker)
             return true
@@ -46,7 +131,12 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     func finishAssignment(worker: String) {
-        _ = lock.withLock { assignments.remove(worker) }
+        lock.withLock {
+            assignments.remove(worker)
+            workers[worker]?.phase = .idle
+            workers[worker]?.runner = nil
+            workers[worker]?.repository = nil
+        }
     }
 
     func request(_ command: String) throws -> AgentControlSnapshot {
@@ -79,7 +169,9 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     private func snapshotUnlocked() -> AgentControlSnapshot {
-        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: ready, activeAssignments: assignments.count)
+        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: phase == .ready, activeAssignments: assignments.count,
+            recordedAt: Date(), phase: phase, server: server, deviceID: deviceID, memory: memory?.status,
+            workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError)
     }
 }
 
@@ -117,7 +209,8 @@ final class AgentControlEndpoint: NSObject, AgentControlProtocol, NSXPCListenerD
     }
 }
 
-func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCConnection(machServiceName: agentControlService)) throws -> AgentControlSnapshot {
+func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCConnection(machServiceName: agentControlService), timeout: TimeInterval = 10) throws -> AgentControlSnapshot {
+    precondition(timeout.isFinite && timeout > 0)
     connection.remoteObjectInterface = NSXPCInterface(with: AgentControlProtocol.self)
     let result = Mutex<Result<Data, AgentControlError>?>(nil)
     let completed = DispatchSemaphore(value: 0)
@@ -140,7 +233,7 @@ func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCC
         else if let data { finish(.success(data)) }
         else { finish(.failure(.invalidResponse)) }
     }
-    guard completed.wait(timeout: .now() + 10) == .success else { throw AgentControlError.unavailable }
+    guard completed.wait(timeout: .now() + timeout) == .success else { throw AgentControlError.unavailable }
     guard let value = result.withLock({ $0 }) else { throw AgentControlError.invalidResponse }
     let snapshot = try JSONDecoder().decode(AgentControlSnapshot.self, from: value.get())
     guard snapshot.version == 1 else { throw AgentControlError.invalidResponse }

@@ -19,7 +19,7 @@ func connectedAgentPersistsOnlyConfigurationWithPrivatePermissions() throws {
     #expect(attributes[.posixPermissions] as? Int == 0o600)
     #expect(try !String(contentsOf: fixture.store.file, encoding: .utf8).contains(agentToken))
     try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.store.file.path)
-    #expect(throws: ConnectedAgentError.self) { try fixture.store.load() }
+    #expect(throws: RunnerStateFileError.self) { try fixture.store.load() }
 }
 
 @Test

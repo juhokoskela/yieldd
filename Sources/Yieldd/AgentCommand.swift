@@ -160,17 +160,25 @@ struct AgentStatusCommand: ParsableCommand {
         abstract: "Show local agent registration, configuration, and active runners."
     )
 
+    @Flag(name: .long, help: "Print a versioned JSON report for the connected agent.")
+    var json = false
+
     mutating func run() throws {
         let store = try AgentConfigurationStore()
-        if let connected = try ConnectedAgentStore(directory: store.directory).load() {
+        if FileManager.default.fileExists(atPath: ConnectedAgentStore(directory: store.directory).file.path) {
             let service = try localAgentService()
-            print(registrationStatusDescription(service.status()))
-            print("Connected coordinator: \(connected.server.absoluteString)")
-            print("Device: \(connected.deviceID)")
-            print("Platforms: \(connected.platforms.map(\.rawValue).joined(separator: ", "))")
-            print("Configuration and cleanup records do not establish live health.")
+            let report = connectedAgentStatus(registration: AgentRegistrationState(service.status()), directory: store.directory)
+            if json {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                print(String(decoding: try encoder.encode(report), as: UTF8.self))
+            } else {
+                print(renderAgentStatus(report))
+            }
             return
         }
+        guard !json else { throw ValidationError("JSON status requires an installed connected agent.") }
         try reportAgentStatus(
             store: store,
             service: localAgentService(),
@@ -225,14 +233,14 @@ struct AgentRunCommand: ParsableCommand {
     )
 
     mutating func run() throws {
-        let stop = try RunnerPoolStop.monitoringSignals(
-            shutdownTimeout: Self.shutdownTimeout
-        )
         defer { agentLogger.notice("Stopping yieldd.") }
+        var stateDirectory: URL?
         do {
             let store = try AgentConfigurationStore()
+            stateDirectory = store.directory
             if let connected = try ConnectedAgentStore(directory: store.directory).load() {
-                let control = ConnectedAgentControl(directory: store.directory)
+                let control = ConnectedAgentControl(directory: store.directory, configuration: connected)
+                let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout, onStop: control.stopping)
                 let endpoint = AgentControlEndpoint(control: control)
                 endpoint.start()
                 defer { endpoint.stop() }
@@ -244,6 +252,7 @@ struct AgentRunCommand: ParsableCommand {
                 return
             }
             let configuration = try store.load()
+            let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout)
             try configuration.requireGitHubCLI()
             try withRunnerOwnership(in: store.directory) { leaseStore in
                 let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
@@ -260,6 +269,10 @@ struct AgentRunCommand: ParsableCommand {
         } catch where isCancellation(error) {
             return
         } catch {
+            if let stateDirectory, FileManager.default.fileExists(atPath: ConnectedAgentStore(directory: stateDirectory).file.path) {
+                // Diagnostic history is best effort and never changes recovery obligations.
+                try? AgentFailureStore(directory: stateDirectory).save(AgentReportedError(message: describeError(error)))
+            }
             agentLogger.error("Local agent failed: \(describeError(error), privacy: .public)")
             throw error
         }
