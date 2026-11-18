@@ -80,6 +80,9 @@ func run() error {
 		return err
 	}
 	defer root.Close()
+	if recoverTarget != "" {
+		return recoverAssignment(ctx, directory, configs, recoverTarget, token)
+	}
 	deviceToken := os.Getenv("YIELDD_CLIENT_TOKEN")
 	var deviceListener net.Listener
 	if clientListen != "" && !recoverOnly {
@@ -118,9 +121,6 @@ func run() error {
 		} else {
 			mux.Handle("/", handler)
 		}
-	}
-	if recoverTarget != "" {
-		return recoverAssignment(ctx, workers, recoverTarget)
 	}
 	if deviceListener != nil {
 		if !deviceListener.Addr().(*net.TCPAddr).IP.IsLoopback() {
@@ -191,31 +191,66 @@ func drainDeviceHTTP(server *http.Server) error {
 	return err
 }
 
-func recoverAssignment(ctx context.Context, workers []*platformCoordinator, target string) error {
+func recoverAssignment(ctx context.Context, directory string, configs []config, target, token string) error {
 	split := strings.LastIndexByte(target, '/')
 	if split < 0 || !runnerNamePattern.MatchString(target[split+1:]) {
 		return errors.New("--recover requires OWNER/REPOSITORY/PLATFORM/RUNNER")
 	}
 	queue, runner := target[:split], target[split+1:]
-	for _, p := range workers {
-		c := p.loop.worker
-		if queue != c.state.Config.Repository+"/"+c.state.Config.platform() {
+	for _, cfg := range configs {
+		if queue != cfg.Repository+"/"+cfg.platform() {
 			continue
 		}
-		a := c.assigned(runner)
-		if a.lease == nil {
+		path := filepath.Join(directory, queueDirectory(cfg))
+		if _, err := os.Stat(filepath.Join(path, "state.json")); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return errors.New("no such assignment in the selected queue")
+			}
+			return err
+		}
+		store, err := openStore(path)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		saved, err := store.read()
+		if err != nil {
+			return err
+		}
+		l := saved.Leases[runner]
+		if l == nil {
 			return errors.New("no such assignment in the selected queue")
 		}
-		c.logger.Info("Recovering selected assignment", "runner", runner, "registration", a.lease.RunnerID, "dispatch_intent", a.lease.DispatchIntent, "workflow_run", a.lease.RunID, "cleanup_intent", a.lease.CleanupIntent)
-		for {
-			done, err := a.reconcile(ctx, true)
-			if err != nil || done {
-				return err
-			}
-			if err := waitForRetry(ctx, cleanupRetryDelay); err != nil {
-				return err
-			}
+		if saved.Config != cfg {
+			return errors.New("recover with the original queue configuration")
 		}
+		c, err := newQueueWorker(saved, store, token, 0)
+		if err != nil {
+			return err
+		}
+		c.device = newDeviceQueue(nil)
+		return c.assigned(runner).recover(ctx)
 	}
 	return errors.New("recovery target does not identify a configured queue")
+}
+
+func (a *assignment) recover(ctx context.Context) error {
+	l := a.lease
+	a.logger.Info("Recovering selected assignment", "runner", l.Name, "registration", l.RunnerID, "dispatch_intent", l.DispatchIntent, "workflow_run", l.RunID, "cleanup_intent", l.CleanupIntent)
+	return recoverUntilDone(ctx, func() (bool, error) { return a.reconcile(ctx, true) })
+}
+
+func recoverUntilDone(ctx context.Context, attempt func() (bool, error)) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		done, err := attempt()
+		if err != nil || done {
+			return err
+		}
+		if err := waitForRetry(ctx, cleanupRetryDelay); err != nil {
+			return err
+		}
+	}
 }
