@@ -113,7 +113,8 @@ struct NativeCacheStore {
     func discard(_ id: RunnerID) throws {
         try validate()
         let job = try jobPath(id)
-        // Uncached jobs need no catalog. A recovery retry can also arrive after the checkout disappeared.
+        // Release disk space before replacing the catalog, including when a full volume caused cleanup.
+        do { try manager.removeItem(at: job) } catch CocoaError.fileNoSuchFile {}
         var info = stat()
         if lstat(index.path, &info) == 0 {
             try withLock {
@@ -123,7 +124,6 @@ struct NativeCacheStore {
                 }
             }
         } else if errno != ENOENT { throw lastError() }
-        do { try manager.removeItem(at: job) } catch CocoaError.fileNoSuchFile {}
     }
 
     // Recovery only discards. Publishing requires the original live checkout and an unchanged base.
