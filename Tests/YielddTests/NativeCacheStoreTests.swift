@@ -215,3 +215,74 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     try store.publish(fresh)
     #expect(try read(store.open(runner(), readable: [mainScope], writable: nil)) == "fresh")
 }
+
+@Test func fullNativeStorePreservesIndependentPendingWritesAcrossEvictions() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    for n in 0..<16 {
+        let id = runner()
+        try store.publish(store.open(id, readable: [], writable: String(format: "%064x", n)))
+        try store.discard(id)
+    }
+    let scopes = (16..<21).map { String(format: "%064x", $0) }
+    let writers = try scopes.map { scope in
+        let slot = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+        let disk = try slot.open(runner(), readable: [], writable: scope)
+        try mark(disk, "saved")
+        return (slot, disk)
+    }
+    for (slot, disk) in writers { try slot.publish(disk) }
+    for scope in scopes {
+        let reader = try store.open(runner(), readable: [scope], writable: nil)
+        #expect(try read(reader) == "saved")
+    }
+}
+
+@Test func nativeRecoveryDropsWriterClaimEvenWhenPrivateImageIsGone() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let first = runner(), other = runner()
+    let abandoned = try store.open(first, readable: [], writable: mainScope)
+    let active = try store.open(other, readable: [], writable: pullRequestScope)
+    try FileManager.default.removeItem(at: abandoned.url.deletingLastPathComponent())
+    let recovered = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    try recovered.discard(first)
+    try recovered.discard(first)
+    // Without the claim, a late save is skipped before even opening the missing disk.
+    try store.publish(abandoned)
+    #expect(try recovered.open(runner(), readable: [mainScope], writable: nil).isCold)
+    try mark(active, "alive")
+    try store.publish(active)
+    #expect(try read(recovered.open(runner(), readable: [pullRequestScope], writable: nil)) == "alive")
+}
+
+@Test func nativeByteBudgetEvictsOldestScopesFirst() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let scopes = (0..<3).map { String(format: "%064x", $0) }
+    for scope in scopes { try store.publish(store.open(runner(), readable: [], writable: scope)) }
+    // Use the recorded allocation sizes to exercise a 16 GiB budget with small files.
+    let area = root.appendingPathComponent("linux")
+    let index = area.appendingPathComponent("index.json")
+    var catalog = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
+    var seeds = try #require(catalog["seeds"] as? [String: [String: Any]])
+    for (n, scope) in scopes.enumerated() {
+        var seed = try #require(seeds[scope])
+        let used = Date(timeIntervalSinceReferenceDate: TimeInterval(n))
+        seed["lastUsed"] = used.timeIntervalSinceReferenceDate
+        seed["bytes"] = [Int64(4096), 8 << 30, 10 << 30][n]
+        let id = try #require(seed["generation"] as? String)
+        let image = area.appendingPathComponent("seeds").appendingPathComponent(id + ".img")
+        try FileManager.default.setAttributes([.modificationDate: used], ofItemAtPath: image.path)
+        seeds[scope] = seed
+    }
+    catalog["seeds"] = seeds
+    try writePrivateRunnerFile(JSONSerialization.data(withJSONObject: catalog), to: index)
+    try store.publish(store.open(runner(), readable: [], writable: mainScope))
+    for (n, scope) in scopes.enumerated() {
+        #expect(try store.open(runner(), readable: [scope], writable: nil).isCold == (n < 2))
+    }
+}
