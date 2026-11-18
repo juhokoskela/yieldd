@@ -509,16 +509,20 @@ func (a *assignment) register(ctx context.Context) error {
 	return a.replace(&next)
 }
 
+func (a *assignment) recoveryTarget() string {
+	return a.state.Config.Repository + "/" + a.state.Config.platform() + "/" + a.lease.Name
+}
+
 func (a *assignment) prepare(ctx context.Context) error {
 	if a.state.Config.LocalOnly {
 		return errors.New("local-only queues cannot dispatch fallback runners")
 	}
 	l := a.lease
 	if l.RunnerID == 0 {
-		return fmt.Errorf("registration outcome is unknown; run with --recover %s/%s/%s before provisioning again", a.state.Config.Repository, a.state.Config.platform(), l.Name)
+		return fmt.Errorf("registration outcome is unknown; run with --recover %s before provisioning again", a.recoveryTarget())
 	}
 	if l.JIT == "" {
-		return fmt.Errorf("JIT configuration is missing; run with --recover %s/%s/%s", a.state.Config.Repository, a.state.Config.platform(), l.Name)
+		return fmt.Errorf("JIT configuration is missing; run with --recover %s", a.recoveryTarget())
 	}
 	if err := a.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
 		return fmt.Errorf("store bootstrap credential: %w", err)
@@ -544,7 +548,7 @@ func (a *assignment) prepare(ctx context.Context) error {
 			return errors.Join(err, a.beginCleanup(""))
 		}
 		if dispatchRejected(err) {
-			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover to clean up: %w", err), a.beginCleanup("rejected"))
+			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover %s to clean up: %w", a.recoveryTarget(), err), a.beginCleanup("rejected"))
 		}
 		return fmt.Errorf("dispatch outcome is uncertain; restart to reconcile, not redispatch: %w", err)
 	}
@@ -651,7 +655,7 @@ func (a *assignment) recoverMissingRun(ctx context.Context, recoverOnly bool) (b
 		return false, &sdkError{"check runner for missing workflow", err}
 	}
 	if runner != nil {
-		return false, errors.New("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover")
+		return false, fmt.Errorf("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover %s", a.recoveryTarget())
 	}
 	if err := a.beginCleanup("unknown"); err != nil {
 		return false, err
