@@ -310,7 +310,7 @@ index facb97e..ff4d834 100644
          metrics.contains("process_start_time_seconds"),
          "process metrics are wired up"
 diff --git a/src/storage.rs b/src/storage.rs
-index 13862d9..ef4728f 100644
+index 13862d9..5abc6d5 100644
 --- a/src/storage.rs
 +++ b/src/storage.rs
 @@ -6,10 +6,10 @@ mod leases;
@@ -595,7 +595,7 @@ index 13862d9..ef4728f 100644
              let reason = format!(
                  "Not all parts have been uploaded (only {} of {} parts uploaded)",
                  upload.finished_part_upload_count, upload.started_part_upload_count
-@@ -717,17 +811,22 @@ impl Storage {
+@@ -717,17 +811,34 @@ impl Storage {
              .list_folder(&parts_folder(&upload.folder_name))
              .await?;
          let part_count = i32::try_from(parts.len()).unwrap_or(i32::MAX);
@@ -622,10 +622,31 @@ index 13862d9..ef4728f 100644
 +                )
 +                .await);
 +        }
++        if self
++            .config
++            .cache_max_size_bytes
++            .is_some_and(|budget| size_bytes > budget.get())
++        {
++            return Err(self
++                .abandon_upload(
++                    &upload,
++                    "Archive exceeds the cache storage budget".to_owned(),
++                )
++                .await);
++        }
          let location = StorageLocation {
              id: uuid::Uuid::new_v4().to_string(),
              folder_name: upload.folder_name.clone(),
-@@ -768,38 +867,25 @@ impl Storage {
+@@ -741,7 +852,7 @@ impl Storage {
+
+         self.promote_upload(identity, &upload, &location).await?;
+
+-        if let Err(error) = self.enforce_storage_budget().await {
++        if let Err(error) = self.enforce_storage_budget(Some(&location.id)).await {
+             tracing::warn!(%error, "Capacity-based Eviction failed after upload completion");
+         }
+         if self.config.eager_merge && whole_object(&location).is_none() {
+@@ -768,45 +879,32 @@ impl Storage {
          storage_locations::Entity::insert(location.clone().into_active_model())
              .exec_without_returning(&tx)
              .await?;
@@ -680,7 +701,25 @@ index 13862d9..ef4728f 100644
          tx.commit().await?;
          Ok(())
      }
-@@ -929,8 +1015,12 @@ impl Storage {
+
+     /// Capacity-based Eviction: once usage exceeds the Storage Budget, deletes entries by Cache
+     /// Recency until usage is back at 90% of the budget.
+-    pub(crate) async fn enforce_storage_budget(&self) -> Result<()> {
++    pub(crate) async fn enforce_storage_budget(&self, just_published: Option<&str>) -> Result<()> {
+         let filesystem_usage = match self.config.cache_max_size_bytes {
+             Some(_) => None,
+             None => self.adapter.filesystem_usage().transpose()?,
+@@ -851,6 +949,9 @@ impl Storage {
+             if usage <= target {
+                 break;
+             }
++            if Some(id.as_str()) == just_published {
++                continue;
++            }
+             let tx = self.db.pool.begin().await?;
+             let deletion = delete_storage_location_if_unread(&tx, &id).await?;
+             tx.commit().await?;
+@@ -929,8 +1030,12 @@ impl Storage {
          location: &StorageLocation,
          range: Option<RangeRequest>,
      ) -> Result<DownloadStream, ReadError> {
@@ -695,8 +734,34 @@ index 13862d9..ef4728f 100644
              return self.download_location(location, range).await;
          }
          self.part_sizes(location).await?;
+@@ -1105,6 +1210,25 @@ impl Storage {
+                 whole_object(&location),
+                 self.adapter.as_ref(),
+             ) else {
++                if self.config.max_concurrent_merges == 0
++                    && matches!(self.adapter.as_ref(), Adapter::Filesystem(_))
++                {
++                    let tx = self.db.pool.begin().await?;
++                    let current = storage_locations::Entity::find_by_id(&location.id)
++                        .inner_join(cache_entries::Entity)
++                        .filter(cache_entries::COLUMN.id.eq(entry.id.as_str()))
++                        .lock_exclusive()
++                        .one(&tx)
++                        .await?;
++                    let Some(current) = current else {
++                        continue;
++                    };
++                    // The local URL has been promised but GET has not acquired its own lease yet.
++                    let scope =
++                        whole_object(&current).map_or(ReaderLeaseScope::Parts, |(_, scope)| scope);
++                    leases::reserve_local_url(&tx, &current.id, scope).await?;
++                    tx.commit().await?;
++                }
+                 return Ok(Some(DownloadUrlMatch {
+                     download_url: default_url,
+                     entry,
 diff --git a/src/storage/filesystem.rs b/src/storage/filesystem.rs
-index f7fb624..b62815e 100644
+index f7fb624..92f3fdf 100644
 --- a/src/storage/filesystem.rs
 +++ b/src/storage/filesystem.rs
 @@ -3,7 +3,8 @@
@@ -801,22 +866,6 @@ index f7fb624..b62815e 100644
              }
              file.flush().await?;
              if let Some(parent) = path.parent() {
-@@ -180,10 +246,14 @@ impl FilesystemAdapter {
-             .collect::<Result<Vec<_>>>()?;
-         let written = {
-             let temp = temp.clone();
-+            let root = self.root.clone();
-+            let writing = Arc::clone(&self.writing);
-             tokio::task::spawn_blocking(move || {
-                 let mut merged = std::fs::File::create(&temp)?;
-                 for source in sources {
--                    io::copy(&mut std::fs::File::open(source)?, &mut merged)?;
-+                    let mut part = std::fs::File::open(source)?;
-+                    let _claim = reserve(&root, &writing, part.metadata()?.len())?;
-+                    io::copy(&mut part, &mut merged)?;
-                 }
-                 if let Some(parent) = path.parent() {
-                     std::fs::create_dir_all(parent)?;
 diff --git a/src/storage/filesystem/tests.rs b/src/storage/filesystem/tests.rs
 index f2265a4..ddf434a 100644
 --- a/src/storage/filesystem/tests.rs
@@ -1037,10 +1086,45 @@ index 3839641..8fed83c 100644
                  match self.storage.adapter.delete_folder(folder_name).await {
                      Ok(deleted) => summary.reclaimed(deleted.objects, deleted.bytes),
 diff --git a/src/tests/cleanup.rs b/src/tests/cleanup.rs
-index 14106b5..ea83b9d 100644
+index 14106b5..e3b5703 100644
 --- a/src/tests/cleanup.rs
 +++ b/src/tests/cleanup.rs
-@@ -140,7 +140,10 @@ async fn finalization_succeeds_when_eviction_fails() {
+@@ -77,14 +77,14 @@ async fn evicts_least_recently_used_entries_only_after_exceeding_the_budget() {
+     }
+
+     let at_budget = server.storage_with(&[("CACHE_MAX_SIZE_BYTES", "12")]).await;
+-    at_budget.enforce_storage_budget().await.unwrap();
++    at_budget.enforce_storage_budget(None).await.unwrap();
+     assert!(
+         find_location(server.db(), &old.id).await.is_some(),
+         "within budget: nothing evicted"
+     );
+
+     let over_budget = server.storage_with(&[("CACHE_MAX_SIZE_BYTES", "11")]).await;
+-    over_budget.enforce_storage_budget().await.unwrap();
++    over_budget.enforce_storage_budget(None).await.unwrap();
+     assert!(
+         find_location(server.db(), &old.id).await.is_none(),
+         "least recently used is evicted"
+@@ -113,9 +113,10 @@ async fn finalization_succeeds_when_eviction_fails() {
+     let root_path = root.to_string_lossy().into_owned();
+     let server = TestServer::with(&[
+         ("STORAGE_FILESYSTEM_PATH", &root_path),
+-        ("CACHE_MAX_SIZE_BYTES", "1"),
++        ("CACHE_MAX_SIZE_BYTES", "7"),
+     ])
+     .await;
++    save_parts(server.storage(), "older", &[b"old".to_vec()]).await;
+     let CreatedUpload::Created { upload, .. } = server
+         .storage()
+         .create_upload(&identity("evict"))
+@@ -135,12 +136,15 @@ async fn finalization_succeeds_when_eviction_fails() {
+         .await
+         .unwrap();
+
+-    // Eviction picks the new location but cannot delete its folder.
++    // Eviction picks the older location but cannot delete its folder.
+     let set_mode =
          |mode| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode)).unwrap();
      set_mode(0o555);
      let writable = std::fs::write(root.join("probe"), b"").is_ok();
@@ -1052,7 +1136,7 @@ index 14106b5..ea83b9d 100644
      set_mode(0o755);
      if writable {
          return; // running as root: permissions cannot make the deletion fail
-@@ -327,11 +330,12 @@ async fn failed_finalization_removes_the_upload_folder() {
+@@ -327,11 +331,12 @@ async fn failed_finalization_removes_the_upload_folder() {
      else {
          panic!("fresh key");
      };
@@ -1067,7 +1151,7 @@ index 14106b5..ea83b9d 100644
          .await
          .unwrap_err();
      assert!(
-@@ -341,7 +345,7 @@ async fn failed_finalization_removes_the_upload_folder() {
+@@ -341,7 +346,7 @@ async fn failed_finalization_removes_the_upload_folder() {
      assert!(
          server
              .adapter()
@@ -1076,7 +1160,7 @@ index 14106b5..ea83b9d 100644
              .await
              .unwrap()
              .is_empty(),
-@@ -363,7 +367,13 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
+@@ -363,7 +368,13 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
      else {
          panic!("fresh key");
      };
@@ -1091,7 +1175,7 @@ index 14106b5..ea83b9d 100644
      put(server.adapter(), "orphaned/parts/0", b"orphaned").await;
      put(server.adapter(), "orphaned/parts/1", b"!").await;
 
-@@ -377,7 +387,7 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
+@@ -377,7 +388,7 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
          "reclaimed what was deleted"
      );
      assert_eq!(
@@ -1100,7 +1184,7 @@ index 14106b5..ea83b9d 100644
          1,
          "authorized by its upload"
      );
-@@ -415,3 +425,91 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
+@@ -415,3 +426,178 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
          "nothing was deleted"
      );
  }
@@ -1191,6 +1275,93 @@ index 14106b5..ea83b9d 100644
 +            .unwrap()
 +            .is_none()
 +    );
++}
++
++#[tokio::test]
++async fn oversized_upload_preserves_existing_cache_and_frees_its_staging() {
++    let server = TestServer::with(&[("CACHE_MAX_SIZE_BYTES", "10")]).await;
++    let storage = server.storage();
++    let healthy = save_parts(storage, "healthy", &[b"warm".to_vec()]).await;
++    let big = identity("big");
++    let CreatedUpload::Created { upload, .. } = storage.create_upload(&big).await.unwrap() else {
++        panic!("fresh key");
++    };
++    assert!(
++        storage
++            .upload_part(&upload, 0, super::harness::byte_stream("0123456789x"), None)
++            .await
++            .unwrap()
++    );
++    assert!(
++        storage
++            .complete_upload(&big, Some(11))
++            .await
++            .unwrap_err()
++            .to_string()
++            .contains("budget")
++    );
++    assert_eq!(part_count(&server, &big.upload_folder(upload.id)).await, 0);
++    assert!(find_location(server.db(), &healthy.id).await.is_some());
++    assert!(
++        storage
++            .match_cache_entry(&super::harness::query(&["big"]))
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let fits = save_parts(storage, "maximum", &[b"0123456789".to_vec()]).await;
++    assert!(
++        find_location(server.db(), &fits.id).await.is_some(),
++        "the reclaim target cannot evict its own new entry"
++    );
++}
++
++#[tokio::test]
++async fn local_download_url_survives_eviction_until_the_reader_can_start() {
++    use crate::db::storage_reader_leases;
++    use crate::storage::LocationDeletion;
++    use sea_orm::{ActiveValue::Set, PaginatorTrait as _};
++    let server = TestServer::with(&[("MAX_CONCURRENT_MERGES", "0")]).await;
++    let storage = server.storage();
++    let location = save_parts(storage, "protected", &[b"multi".to_vec(), b"part".to_vec()]).await;
++    for _ in 0..2 {
++        assert!(
++            storage
++                .cache_entry_with_download_url(&super::harness::query(&["protected"]))
++                .await
++                .unwrap()
++                .is_some()
++        );
++    }
++    assert_eq!(
++        storage_reader_leases::Entity::find()
++            .count(&server.db().pool)
++            .await
++            .unwrap(),
++        1
++    );
++    assert_eq!(
++        storage.delete_storage_location(&location.id).await.unwrap(),
++        LocationDeletion::InUse
++    );
++    let reader = storage.download(&location.id, None).await.unwrap().unwrap();
++    storage_reader_leases::Entity::update(storage_reader_leases::ActiveModel {
++        id: Set(location.id.clone()),
++        expires_at: Set(now_ms() - 1),
++        ..Default::default()
++    })
++    .exec(&server.db().pool)
++    .await
++    .unwrap();
++    assert_eq!(
++        storage.delete_storage_location(&location.id).await.unwrap(),
++        LocationDeletion::InUse
++    );
++    assert_eq!(read_all(reader.stream).await.unwrap(), b"multipart");
++    eventually(|| async {
++        storage.delete_storage_location(&location.id).await.unwrap() == LocationDeletion::Deleted
++    })
++    .await;
 +}
 diff --git a/src/db.rs b/src/db.rs
 index 76dab62..6530f47 100644
@@ -1398,3 +1569,41 @@ index f78d74c..02245fa 100644
 +        }
 +    }
 +}
+diff --git a/src/storage/leases.rs b/src/storage/leases.rs
+index f6355e3..acfd04f 100644
+--- a/src/storage/leases.rs
++++ b/src/storage/leases.rs
+@@ -107,6 +107,33 @@ pub(crate) async fn release_merge_lease(
+     Ok(())
+ }
+
++// Each location has at most one handoff lease. Repeated lookups extend it until a
++// transfer can acquire its own renewable lease, even if the helper restarts.
++pub(crate) async fn reserve_local_url(
++    db: &impl ConnectionTrait,
++    location: &str,
++    scope: ReaderLeaseScope,
++) -> Result<()> {
++    use sea_orm::sea_query::OnConflict;
++    storage_reader_leases::Entity::insert(storage_reader_leases::ActiveModel {
++        id: Set(location.to_owned()),
++        storage_location_id: Set(location.to_owned()),
++        scope: Set(scope),
++        expires_at: Set(deadline(LEASE_DURATION)),
++    })
++    .on_conflict(
++        OnConflict::column(storage_reader_leases::Column::Id)
++            .update_columns([
++                storage_reader_leases::Column::Scope,
++                storage_reader_leases::Column::ExpiresAt,
++            ])
++            .to_owned(),
++    )
++    .exec_without_returning(db)
++    .await?;
++    Ok(())
++}
++
+ pub(crate) async fn create_reader_lease(
+     db: &impl ConnectionTrait,
+     storage_location_id: &str,
