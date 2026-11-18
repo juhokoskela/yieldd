@@ -169,8 +169,48 @@ func TestNativeDiskSingleAuthorizedExport(t *testing.T) {
 	}
 }
 
+func TestNativeDiskTrimPreservesAdjacentBlocks(t *testing.T) {
+	f := newNativeDiskFixture(t)
+	const block, free = 4096, 64 << 20
+	end := int64(block + free)
+	disk, err := os.OpenFile(f.image, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disk.Close()
+	used := bytes.Repeat([]byte{0x91}, block)
+	for _, offset := range []int64{0, block, end} {
+		if _, err := disk.WriteAt(used, offset); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.bind(t)
+	conn := f.dial(t)
+	nbdClientHeader(t, conn)
+	nbdClientOption(t, conn, nbdOptExport, nil)
+	info := nbdReadBytes(t, conn, 10)
+	if nbdOrder.Uint16(info[8:])&32 == 0 {
+		t.Fatal("trim unavailable")
+	}
+	nbdClientRequest(t, conn, nbdTrim, 1, block, free)
+	nbdClientReply(t, conn)
+	for _, offset := range []int64{0, block, end} {
+		got := make([]byte, block)
+		if _, err := disk.ReadAt(got, offset); err != nil {
+			t.Fatal(err)
+		}
+		want := used
+		if offset == block {
+			want = make([]byte, block)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("unexpected contents at offset %d", offset)
+		}
+	}
+}
+
 func TestNativeDiskDiscardsFailedTransmission(t *testing.T) {
-	for _, name := range []string{"early-disconnect", "eof", "truncated", "sealed-truncated-header", "sealed-truncated-payload", "out-of-bounds", "overflow", "oversized", "cancel"} {
+	for _, name := range []string{"early-disconnect", "eof", "truncated", "sealed-truncated-header", "sealed-truncated-payload", "out-of-bounds", "trim-out-of-bounds", "overflow", "oversized", "cancel"} {
 		t.Run(name, func(t *testing.T) {
 			f := newNativeDiskFixture(t)
 			f.bind(t)
@@ -195,6 +235,8 @@ func TestNativeDiskDiscardsFailedTransmission(t *testing.T) {
 				nbdClientRequest(t, conn, nbdWrite, 0, 0, 512)
 				nbdWriteBinary(t, conn, []byte("partial"))
 				conn.Close()
+			case "trim-out-of-bounds":
+				nbdClientRequest(t, conn, nbdTrim, 0, 4095, 512)
 			case "out-of-bounds":
 				nbdClientRequest(t, conn, nbdWrite, 0, 4096, 1)
 			case "overflow":

@@ -34,9 +34,10 @@ const (
 	nbdWrite      = 1
 	nbdDisconnect = 2
 	nbdFlush      = 3
+	nbdTrim       = 4
 
-	// HAS_FLAGS, SEND_FLUSH and SEND_FUA. A disk has exactly one writer.
-	nbdExportFlags = uint16(1 | 4 | 8)
+	// HAS_FLAGS, SEND_FLUSH, SEND_FUA and SEND_TRIM. A disk has exactly one writer.
+	nbdExportFlags = uint16(1 | 4 | 8 | 32)
 	nbdMaxRequest  = 32 << 20
 )
 
@@ -232,13 +233,13 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 		if _, err := binary.Decode(header[:], nbdOrder, &req); err != nil {
 			return err
 		}
-		if req.Magic != nbdRequest || req.Length > nbdMaxRequest {
+		if req.Magic != nbdRequest || (req.Command != nbdTrim && req.Length > nbdMaxRequest) {
 			return errors.New("invalid NBD request")
 		}
 		if req.Offset > size || uint64(req.Length) > size-req.Offset {
 			return errors.New("NBD request outside cache disk")
 		}
-		if req.Flags != 0 && !(req.Flags == 1 && req.Command == nbdWrite) {
+		if req.Flags != 0 && !(req.Flags == 1 && (req.Command == nbdWrite || req.Command == nbdTrim)) {
 			return errors.New("unsupported NBD request flags")
 		}
 		if (req.Command == nbdFlush || req.Command == nbdDisconnect) && (req.Offset != 0 || req.Length != 0) {
@@ -255,10 +256,10 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 			if operationErr == nil && written != int64(req.Length) {
 				return io.ErrUnexpectedEOF
 			}
-			// Only sealed generations survive a host crash. The final seal uses
-			// File.Sync for a full drive flush; guest transactions need write ordering.
-			if operationErr == nil && req.Flags == 1 {
-				operationErr = syscall.Fsync(int(disk.Fd()))
+		case nbdTrim:
+			// TRIM has no payload. ext4 routinely discards 128 MiB block groups.
+			if req.Length != 0 {
+				operationErr = punchNativeDisk(disk, int64(req.Offset), int64(req.Length))
 			}
 		case nbdFlush:
 			operationErr = syscall.Fsync(int(disk.Fd()))
@@ -270,6 +271,11 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 		default:
 			return errors.New("unsupported NBD command")
 		}
+		// Only sealed generations survive a host crash. The final seal uses
+		// File.Sync for a full drive flush; guest transactions need write ordering.
+		if operationErr == nil && req.Flags == 1 {
+			operationErr = syscall.Fsync(int(disk.Fd()))
+		}
 		status := uint32(0)
 		if operationErr != nil {
 			status = 5 // NBD_EIO
@@ -279,7 +285,7 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 		if _, err := conn.Write(reply[:]); err != nil {
 			return err
 		}
-		if operationErr != nil {
+		if operationErr != nil && req.Command != nbdTrim {
 			return operationErr
 		}
 		if req.Command == nbdRead {

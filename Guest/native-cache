@@ -31,6 +31,8 @@ case "$#:${1:-}" in
         if [ "$2" = cold ]; then chown runner:runner "$path"; fi
         ;;
     1:unmount)
+        # Reclaim free extents before saving. An unsupported discard still permits a clean unmount.
+        fstrim --minimum 1M "$path" || :
         umount "$path"
         loops=$(losetup -j "$image")
         test -z "$loops"
