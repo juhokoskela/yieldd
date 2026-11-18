@@ -216,14 +216,20 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 		Handle, Offset uint64
 		Length         uint32
 	}
+	var header [28]byte
+	var reply [16]byte
+	nbdOrder.PutUint32(reply[:4], nbdReply)
 	buf := make([]byte, 128<<10)
 	for {
-		if err := binary.Read(conn, nbdOrder, &req); err != nil {
+		if _, err := io.ReadFull(conn, header[:]); err != nil {
 			// nbdfuse can close its TCP connection without sending NBD_CMD_DISC.
 			// Only a host-confirmed guest unmount permits EOF between full requests.
 			if err == io.EOF && nativeDiskSealed(directory) {
 				return disk.Sync()
 			}
+			return err
+		}
+		if _, err := binary.Decode(header[:], nbdOrder, &req); err != nil {
 			return err
 		}
 		if req.Magic != nbdRequest || req.Length > nbdMaxRequest {
@@ -249,11 +255,13 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 			if operationErr == nil && written != int64(req.Length) {
 				return io.ErrUnexpectedEOF
 			}
+			// Only sealed generations survive a host crash. The final seal uses
+			// File.Sync for a full drive flush; guest transactions need write ordering.
 			if operationErr == nil && req.Flags == 1 {
-				operationErr = disk.Sync()
+				operationErr = syscall.Fsync(int(disk.Fd()))
 			}
 		case nbdFlush:
-			operationErr = disk.Sync()
+			operationErr = syscall.Fsync(int(disk.Fd()))
 		case nbdDisconnect:
 			if !nativeDiskSealed(directory) {
 				return errors.New("cache disk was disconnected before host seal")
@@ -264,11 +272,11 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 		}
 		status := uint32(0)
 		if operationErr != nil {
-			status = 5
-		} // NBD_EIO
-		header := nbdOrder.AppendUint32(nil, nbdReply)
-		header = nbdOrder.AppendUint32(header, status)
-		if _, err := conn.Write(nbdOrder.AppendUint64(header, req.Handle)); err != nil {
+			status = 5 // NBD_EIO
+		}
+		nbdOrder.PutUint32(reply[4:8], status)
+		nbdOrder.PutUint64(reply[8:16], req.Handle)
+		if _, err := conn.Write(reply[:]); err != nil {
 			return err
 		}
 		if operationErr != nil {
