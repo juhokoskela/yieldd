@@ -1,6 +1,10 @@
 import Darwin
 import Foundation
 
+func loadJobCachePolicy(in directory: URL) throws -> Data? {
+    try readPrivateRunnerFile(directory.appendingPathComponent("job-caches.json"), maximumBytes: 64 * 1024)
+}
+
 // One SQLite store per enrolled Mac. Workers share the helper and each give their VM
 // its own authenticated route. No archive endpoint is bound to a host TCP interface.
 final class ArchiveCacheService: @unchecked Sendable {

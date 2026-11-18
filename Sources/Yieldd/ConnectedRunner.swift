@@ -67,7 +67,6 @@ final class ConnectedRunner {
         var failure: (any Error)?
         var machineMayExist = false
         var jobStarted = false
-        var publishCache = false
         do {
             try authorization.check()
             let jit = try accept(offer)
@@ -91,7 +90,7 @@ final class ConnectedRunner {
                                   }, currentTime: currentTime)
                 .run(id: id, pickupTimeout: 5 * 60, handleNativeCache: cache.map { $0.handleRequest })
             if let cache, cache.saveRequested, try authorization.confirmNativeSave(wait: wait) {
-                publishCache = cache.detachForPublication()
+                cache.detachForPublication()
                 try authorization.check()
             }
         } catch {
@@ -105,7 +104,7 @@ final class ConnectedRunner {
         if machineMayExist {
             try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
         }
-        try cleanUp(step: .nativeCache, after: failure) { try cache?.finishAfterDestruction(publish: failure == nil && publishCache) }
+        try cleanUp(step: .nativeCache, after: failure) { try cache?.finishAfterDestruction(publish: failure == nil) }
         absent = id
         releaseOnExit = false
         releaseCapacity()

@@ -37,7 +37,7 @@ struct MachineTestCommand: ParsableCommand {
                     print("Machine test is waiting for available host memory.")
                 }
             ).run(id: id, journal: backend.platform == .linux ? leaseStore : nil,
-                  localCache: try JobCacheConfiguration.load(in: leaseStore.directory) != nil)
+                  localCache: try loadJobCachePolicy(in: leaseStore.directory) != nil)
             print("Machine test passed.")
         }
     }

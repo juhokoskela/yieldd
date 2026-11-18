@@ -91,7 +91,7 @@ func runConnectedService(
             try MacOSVirtualizationBackend.validateTemplate(at: template)
             try VirtualizationEntitlement.requireCurrentProcess()
         }
-        let cacheConfiguration = try JobCacheConfiguration.load(in: directory)
+        let cachePolicy = try loadJobCachePolicy(in: directory)
         let backends = try platforms.map { platform -> RunnerSlotBackend in
             switch platform {
             case .linux:
@@ -109,9 +109,9 @@ func runConnectedService(
         let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
-        let archiveService = try cacheConfiguration.map { configuration in
+        let archiveService = try cachePolicy.map { policy in
             try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
-                policy: configuration.data, ownershipDescriptor: ownershipDescriptor, checkCancellation: stop.check)
+                policy: policy, ownershipDescriptor: ownershipDescriptor, checkCancellation: stop.check)
         }
         defer { archiveService?.stop() }
         let cacheSocket = archiveService?.socketURL

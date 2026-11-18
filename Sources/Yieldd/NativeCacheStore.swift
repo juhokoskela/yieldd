@@ -211,3 +211,16 @@ struct NativeCacheStore {
 
     private func lastError() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 }
+
+enum JobCacheError: LocalizedError {
+    case invalidScope, invalidDisk, invalidStore, alreadyOpened
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidScope: "The cache service returned an invalid scope."
+        case .invalidDisk: "The job's cache disk changed identity or size. Its contents were discarded."
+        case .invalidStore: "The native cache store contains an invalid file or directory."
+        case .alreadyOpened: "This job already opened a native cache disk."
+        }
+    }
+}
