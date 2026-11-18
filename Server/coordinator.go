@@ -57,6 +57,7 @@ type coordinator struct {
 	verificationRetryDelay time.Duration
 	maxFallbackRunners     int
 	lastHostedCleanup      string
+	hostedCleanupRetry     map[string]time.Time
 }
 
 type assignment struct {
@@ -258,7 +259,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if a := c.nextHostedCleanup(); a != nil {
 		c.lastHostedCleanup = a.lease.Name
 		_, err := a.finishCleanup(ctx, false)
-		if err == nil && c.nextHostedCleanup() != nil {
+		if c.nextHostedCleanup() != nil {
 			c.device.redrive(c.state.Owner)
 		}
 		return err
@@ -310,7 +311,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			return err
 		}
 		a := c.assigned(name)
-		a.deferHostedCleanup = hostedCleanupAttempted
+		a.deferHostedCleanup = hostedCleanupAttempted || time.Now().Before(c.hostedCleanupRetry[name])
 		l := a.lease
 		local := l.Local
 		if retryLater && l.DispatchIntent && !l.CleanupIntent {
@@ -467,7 +468,7 @@ func (c *coordinator) nextHostedCleanup() *assignment {
 	var first *assignment
 	for _, name := range c.names() {
 		l := c.state.Leases[name]
-		if l.Local != nil || !l.CleanupIntent {
+		if l.Local != nil || !l.CleanupIntent || time.Now().Before(c.hostedCleanupRetry[name]) {
 			continue
 		}
 		if first == nil {
@@ -696,8 +697,16 @@ func (a *assignment) finishCleanup(ctx context.Context, recoverOnly bool) (bool,
 		return false, nil
 	}
 	if err := a.cleanup(ctx); err != nil {
+		// An issued sibling keeps this queue serving after a cleanup failure.
+		if l.Local == nil && a.hasIssuedLocal() && !isJournalWrite(err) {
+			if a.hostedCleanupRetry == nil {
+				a.hostedCleanupRetry = make(map[string]time.Time)
+			}
+			a.hostedCleanupRetry[l.Name] = time.Now().Add(cleanupRetryDelay)
+		}
 		return false, err
 	}
+	delete(a.hostedCleanupRetry, l.Name)
 	if l.Local != nil {
 		a.logger.Info("Local runner cleaned up", "runner", l.Name, "device", l.Local.DeviceID)
 	} else {

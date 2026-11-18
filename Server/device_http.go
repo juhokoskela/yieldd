@@ -51,7 +51,11 @@ func (s *coordinatorLoop) run() error {
 		}
 		for _, l := range s.worker.state.Leases {
 			if l.CleanupIntent {
-				retryPending = true
+				if when := s.worker.hostedCleanupRetry[l.Name]; when.IsZero() {
+					retryPending = true
+				} else if deadline.IsZero() || when.Before(deadline) {
+					deadline = when
+				}
 				continue
 			}
 			if l.Local == nil {

@@ -190,3 +190,71 @@ func TestFailedHostedCleanupDoesNotStarveOtherPendingCleanups(t *testing.T) {
 		}
 	})
 }
+
+func TestExpiredOfferDoesNotHammerFailedHostedCleanup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, w, _ := multipleFallbackFixture(t, 1)
+		c.device.pollNow(0)
+		issued := issueLocal(t, c, 0, 1)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+			t.Fatal(err)
+		}
+		c.device.pollNow(1)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
+			t.Fatal(err)
+		}
+		offer := c.device.pollNow(1)
+		if offer == nil {
+			t.Fatal("missing offer")
+		}
+		for name, l := range c.state.Leases {
+			if l.Local == nil {
+				if err := c.assigned(name).beginCleanup("success"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		time.Sleep(offerLifetime)
+		var attempts []time.Time
+		c.bootstrap = bootstrapCleanup{w, func(ctx context.Context, name string) error {
+			attempts = append(attempts, time.Now())
+			if len(attempts) <= 3 {
+				return &apiError{502}
+			}
+			return w.deleteSecret(ctx, name)
+		}}
+		ctx, cancel := context.WithCancel(t.Context())
+		loop := newCoordinatorLoop(ctx, c)
+		loop.demandObserved, loop.desiredCount = true, 3
+		startLoops(t, cancel, []*coordinatorLoop{loop})
+		start := time.Now()
+		synctest.Wait()
+		for range 3 {
+			if _, err := loop.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := loop.invoke(t.Context(), func(ctx context.Context) error {
+			if len(attempts) != 1 || c.state.Leases[offer.Runner] != nil || w.dispatched != 1 {
+				return fmt.Errorf("after expiry: attempts %v, remaining offer %v, dispatches %d", attempts, c.state.Leases[offer.Runner], w.dispatched)
+			}
+			renewal, err := c.renewDevice(ctx, issued)
+			if err == nil && !renewal.Continue {
+				return fmt.Errorf("issued runner lost authorization")
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(cleanupRetryDelay)
+		synctest.Wait()
+		if err := loop.invoke(t.Context(), func(context.Context) error {
+			if len(attempts) != 2 || attempts[1].Sub(start) != cleanupRetryDelay {
+				return fmt.Errorf("cleanup retry times %v", attempts)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
