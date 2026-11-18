@@ -1,0 +1,22 @@
+name: Local cache compatibility benchmark
+on:
+  push:
+    branches: [bench/cache-routing-20261118]
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: Server/go.mod
+          cache: false
+      - name: Build the loopback cache server and fetch pinned action bundles
+        run: bash Prototypes/CacheBenchmark/prepare.sh
+      - name: Compare archive and native cache paths
+        uses: ./Prototypes/CacheBenchmark

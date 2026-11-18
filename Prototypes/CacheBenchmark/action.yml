@@ -1,0 +1,5 @@
+name: Compare cache routes
+description: Exercise the action handlers with the GitHub job runtime and a loopback results endpoint.
+runs:
+  using: node24
+  main: main.cjs
