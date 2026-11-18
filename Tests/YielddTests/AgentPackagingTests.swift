@@ -17,6 +17,7 @@ func localAgentPlistRunsTheMainExecutableWithBoundedShutdown() throws {
     #expect(plist["ExitTimeOut"] as? Int == 60)
     #expect(plist["ThrottleInterval"] as? Int == 30)
     #expect(plist["KeepAlive"] as? Bool == true)
+    #expect((plist["MachServices"] as? [String: Bool])?["dev.yieldd.agent.control"] == true)
     #expect(plist["AssociatedBundleIdentifiers"] == nil)
 }
 
