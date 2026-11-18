@@ -90,7 +90,10 @@ func installerChecksTheSelectedCertificateBeforePreflight(artifact: String) thro
     let verification = try #require(events.split(separator: "\n").last)
     #expect(verification.hasPrefix("codesign:"))
     #expect(verification.hasSuffix("/\(artifact)"))
+    let identifier = artifact == "yieldd.app" ? "dev.yieldd" : "dev.yieldd.network-relay"
+    #expect(verification.contains("-R=identifier \"\(identifier)\" and anchor apple generic"))
     #expect(verification.contains("certificate leaf = H\"\(fingerprint)\""))
+    #expect(verification.contains("certificate leaf[field.1.2.840.113635.100.6.1.12] exists"))
     #expect(!events.contains("new:agent"))
     #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.applicationsURL.path).isEmpty)
 }

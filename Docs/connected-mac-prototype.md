@@ -147,7 +147,7 @@ Use the installer from this checkout and a trusted repository to validate the in
 3. Pause during a long poll and while jobs are active. Confirm existing jobs finish, new offers are declined, idle capacity stops being advertised, and configured hosted fallback runs new demand. Restart while paused and verify pause persists.
 4. Drain during execution and cleanup retries. Confirm it waits until cleanup is complete, and that Ctrl+C only stops the wait. Resume/re-pause from another terminal and restart the service during separate drain attempts; each wait must fail rather than silently attach to a new admission period.
 5. Interrupt networking and restart the coordinator/client with their original state. Confirm status reports retry/recovery accurately, no duplicate execution starts, and unresolved cleanup remains recorded. Check the unavailable-service report after a startup failure.
-6. Drain and uninstall with the current binary, move the bundle aside, and reinstall. Verify readiness, explicit resume, local execution, and cleanup.
+6. Drain and uninstall with the current binary, move the bundle aside, and reinstall. After the next login, confirm that the agent runs from `~/Applications/yieldd.app/Contents/MacOS/yieldd` while the checkout and previous bundle are still on disk. Verify worker readiness, explicit resume, local execution, and cleanup.
 
 The installed service, real guests, network-isolation checks, and fallback placement are live acceptance boundaries. Unit tests and the anonymous XPC fixture do not establish them.
 
