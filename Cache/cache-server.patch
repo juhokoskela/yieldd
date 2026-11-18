@@ -40,7 +40,7 @@ index e671dc0..50ff7ed 100644
      async fn accept(&mut self) -> (Self::Io, Self::Addr) {
          let (stream, address) = Listener::accept(&mut self.listener).await;
 diff --git a/src/main.rs b/src/main.rs
-index 3b57986..757956a 100644
+index 3b57986..f55d83b 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -12,6 +12,9 @@ mod storage;
@@ -61,20 +61,41 @@ index 3b57986..757956a 100644
          verifier: Arc::new(TokenVerifier::new(&config)?),
          metrics: Arc::new(Metrics::new()?),
          cleanup: Arc::new(Cleanup::new(Arc::clone(&storage), &config)),
-@@ -93,8 +97,13 @@ async fn serve(config: Config) -> Result<()> {
+@@ -92,9 +96,14 @@ async fn shutdown_signal() {
+ async fn serve(config: Config) -> Result<()> {
      tracing::info!("🚀 Starting GitHub Actions Cache Server ({})", version());
      let (host, port) = (config.host.clone(), config.port);
-     let timeout = config.download_idle_timeout;
+-    let timeout = config.download_idle_timeout;
 +    let socket = std::env::var_os("YIELDD_CACHE_SOCKET");
 +    let _owner_lock = socket.as_ref().map(|_| yieldd::owner()).transpose()?;
      let adapter = Adapter::from_config(&config.storage).await?;
      let state = build_state(config, adapter).await?;
 +    if let Some(socket) = socket {
-+        return yieldd::serve(socket.into(), state).await;
++        let listener = tokio::net::UnixListener::bind(std::path::Path::new(&socket))?;
++        return serve_requests(listener, state).await;
 +    }
      let listener = match host {
          Some(host) => TcpListener::bind((host.as_str(), port)).await?,
          None => match TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await {
+@@ -106,9 +115,17 @@ async fn serve(config: Config) -> Result<()> {
+             }
+         },
+     };
++    tracing::info!(address = %listener.local_addr()?, "listening");
++    serve_requests(listener, state).await
++}
++
++async fn serve_requests<L: axum::serve::Listener>(listener: L, state: AppState) -> Result<()>
++where
++    L::Addr: std::fmt::Debug,
++{
++    let timeout = state.config.download_idle_timeout;
+     state.cleanup.spawn_schedules();
+     let storage = Arc::clone(&state.storage);
+-    tracing::info!(address = %listener.local_addr()?, "listening");
+     let listener = StalledClientListener { listener, timeout };
+     axum::serve(listener, router(state))
+         .with_graceful_shutdown(shutdown_signal())
 diff --git a/src/metrics.rs b/src/metrics.rs
 index 054c06f..90825f0 100644
 --- a/src/metrics.rs
@@ -108,17 +129,15 @@ index fee420a..0bfe703 100644
          .route(
              "/devstoreaccount1/upload/{upload_id}",
 diff --git a/src/routes/cache.rs b/src/routes/cache.rs
-index 318e039..8f997bc 100644
+index 318e039..4b49b79 100644
 --- a/src/routes/cache.rs
 +++ b/src/routes/cache.rs
-@@ -59,20 +59,19 @@ impl crate::twirp::CacheService for AppState {
+@@ -59,20 +59,17 @@ impl crate::twirp::CacheService for AppState {
          &self,
          req: Request<CreateCacheEntryRequest>,
      ) -> twirp::Result<twirp::Response<CreateCacheEntryResponse>> {
 -        let scope = self.verifier.cache_scope(req.headers()).await?;
-+        let mut scope = self.verifier.cache_scope(req.headers()).await?;
-+        self.policy.apply(&mut scope);
-+        scope.repo_id = "yieldd".to_owned();
++        let scope = self.archive_scope(req.headers()).await?;
          let CreateCacheEntryRequest { key, version } = req.into_body();
          let identity = save_identity(&scope, key, version)?;
          match self.storage.create_upload(&identity).await? {
@@ -139,29 +158,25 @@ index 318e039..8f997bc 100644
              }
              // GitHub answers a duplicate reservation with 409, not 200 with ok: false.
              CreatedUpload::AlreadyExists => Err(twirp::already_exists(
-@@ -85,7 +84,9 @@ impl crate::twirp::CacheService for AppState {
+@@ -85,7 +82,7 @@ impl crate::twirp::CacheService for AppState {
          &self,
          req: Request<FinalizeCacheEntryUploadRequest>,
      ) -> twirp::Result<twirp::Response<FinalizeCacheEntryUploadResponse>> {
 -        let scope = self.verifier.cache_scope(req.headers()).await?;
-+        let mut scope = self.verifier.cache_scope(req.headers()).await?;
-+        self.policy.apply(&mut scope);
-+        scope.repo_id = "yieldd".to_owned();
++        let scope = self.archive_scope(req.headers()).await?;
          let FinalizeCacheEntryUploadRequest { key, version, .. } = req.into_body();
          let identity = save_identity(&scope, key, version)?;
          let upload = self
-@@ -105,7 +106,9 @@ impl crate::twirp::CacheService for AppState {
+@@ -105,7 +102,7 @@ impl crate::twirp::CacheService for AppState {
          &self,
          req: Request<GetCacheEntryDownloadUrlRequest>,
      ) -> twirp::Result<twirp::Response<GetCacheEntryDownloadUrlResponse>> {
 -        let scope = self.verifier.cache_scope(req.headers()).await?;
-+        let mut scope = self.verifier.cache_scope(req.headers()).await?;
-+        self.policy.apply(&mut scope);
-+        scope.repo_id = "yieldd".to_owned();
++        let scope = self.archive_scope(req.headers()).await?;
          let GetCacheEntryDownloadUrlRequest {
              key,
              restore_keys,
-@@ -124,14 +127,16 @@ impl crate::twirp::CacheService for AppState {
+@@ -124,14 +121,16 @@ impl crate::twirp::CacheService for AppState {
          } else {
              LookupResult::Miss
          });

@@ -1,7 +1,6 @@
 // Host adapter compiled into the pinned cache service. Only the relay can reach this socket.
 use std::collections::BTreeMap;
 use std::io::Read as _;
-use std::path::PathBuf;
 
 use axum::Json;
 use axum::extract::State;
@@ -11,7 +10,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::error::{Failure, Result};
 use crate::routes::AppState;
-use crate::scope::CacheScope;
+use crate::scope::{CacheScope, Unauthorized};
 
 #[derive(Debug, Deserialize, Ord, PartialOrd, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -98,16 +97,32 @@ impl Policy {
     }
 }
 
+impl AppState {
+    async fn job_cache_scope(&self, headers: &HeaderMap) -> Result<CacheScope, Unauthorized> {
+        let mut grants = self.verifier.cache_scope(headers).await?;
+        self.policy.apply(&mut grants);
+        Ok(grants)
+    }
+
+    pub(crate) async fn archive_scope(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<CacheScope, Unauthorized> {
+        let mut grants = self.job_cache_scope(headers).await?;
+        // The resolved scope already includes the repository or its trusted sharing group.
+        grants.repo_id = "yieldd".to_owned();
+        Ok(grants)
+    }
+}
+
 pub(crate) async fn verify(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut grants = state
-        .verifier
-        .cache_scope(&headers)
+    let grants = state
+        .job_cache_scope(&headers)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    state.policy.apply(&mut grants);
     Ok(Json(serde_json::json!({
         "repository_id": grants.repo_id,
         "repository": grants.repository,
@@ -129,21 +144,6 @@ pub(crate) fn transfer<T>(body: T, url: &str) -> twirp::Result<twirp::Response<T
         );
     }
     Ok(response)
-}
-
-pub(crate) async fn serve(socket: PathBuf, state: AppState) -> Result<()> {
-    let listener = tokio::net::UnixListener::bind(socket)?;
-    state.cleanup.spawn_schedules();
-    let storage = state.storage.clone();
-    let listener = crate::http::StalledClientListener {
-        listener,
-        timeout: state.config.download_idle_timeout,
-    };
-    axum::serve(listener, crate::routes::router(state))
-        .with_graceful_shutdown(crate::shutdown_signal())
-        .await?;
-    storage.wait_for_ongoing_merges().await;
-    Ok(())
 }
 
 pub(crate) fn owner() -> Result<std::fs::File> {
