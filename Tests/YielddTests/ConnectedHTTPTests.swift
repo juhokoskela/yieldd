@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Synchronization
 import Testing
 @testable import Yieldd
 
@@ -359,4 +360,31 @@ func startupRecoveryReportsCompletedWorkersAndTheRemainingRetry(failedSlot: Int)
     }
     #expect(try (ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 0).load() == nil) == (failedSlot == 1))
     #expect(try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 1).load() != nil)
+}
+
+@Test
+func startupRecoveryRetriesHealthySlotDespiteIndependentFailure() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    _ = try RunnerLeaseStore(directory: directory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let attempts = Mutex(0)
+    let server = try ConnectedHTTPFixture(respond: { _ in
+        let status = attempts.withLock { $0 += 1; return $0 == 1 ? 503 : 200 }
+        return "HTTP/1.1 \(status) Response\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    })
+    defer { server.close() }
+    let client = server.client
+    for slot in 0..<2 {
+        let offer = try ConnectedOffer(owner: client.deviceID,
+            runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: "owner/repo", platform: "macos", architecture: "arm64", slot: slot)
+        try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: slot)
+            .save(ConnectedLease(server: slot == 0 ? "https://old.example/" : client.server.absoluteString, deviceID: client.deviceID, offer: offer))
+    }
+    #expect(throws: ConnectedRunnerError.self) {
+        try recoverConnectedPlatforms(directory: directory, server: client.server, deviceID: client.deviceID, token: client.token,
+            confirmation: nil, stop: RunnerPoolStop(), makeCloneStore: testCloneStores(in: directory))
+    }
+    #expect(attempts.withLock { $0 } == 2)
+    #expect(try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 0).load() != nil)
+    #expect(try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 1).load() == nil)
 }

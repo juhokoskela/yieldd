@@ -83,8 +83,8 @@ func runnerNetworkDirectoriesArePrivateShortAndRecoverable() throws {
     #expect(kept.appendingPathComponent("n.ssh").path.utf8.count < 104)
     let recovered = try RunnerNetworkDirectories(stateDirectory: fixture.rootURL)
     #expect(recovered.rootURL == store.rootURL)
-    try recovered.removeUnleased(keeping: [first])
-    #expect(FileManager.default.fileExists(atPath: kept.path))
+    try recovered.removeUnleased()
+    #expect(!FileManager.default.fileExists(atPath: kept.path))
     #expect(!FileManager.default.fileExists(atPath: orphan.path))
     try recovered.remove(first)
     try recovered.remove(first)
@@ -104,7 +104,7 @@ func runnerNetworkDirectoriesRejectReplacedPaths() throws {
     try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: fixture.templateURL)
     #expect(throws: POSIXError(.EACCES)) { try store.create(for: id) }
     #expect(throws: POSIXError(.EACCES)) { try store.remove(id) }
-    #expect(throws: RunnerSessionError.self) { try store.removeUnleased(keeping: []) }
+    #expect(throws: RunnerSessionError.self) { try store.removeUnleased() }
     #expect(FileManager.default.fileExists(atPath: fixture.templateURL.path))
 }
 
@@ -121,7 +121,7 @@ func runnerNetworkSweepContinuesAfterInvalidEntries() throws {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entry.path)
     }
     do {
-        try store.removeUnleased(keeping: [])
+        try store.removeUnleased()
         Issue.record("Invalid entries were ignored")
     } catch let RunnerSessionError.cleanupFailed(failures) {
         #expect(failures.count == 2)
@@ -183,7 +183,7 @@ func runnerNetworkOrphansAreRemovedEvenWhenCloneStorageIsMissing() throws {
     defer { try? FileManager.default.removeItem(at: store.rootURL) }
     let orphan = try store.create(for: RunnerID(value: "yieldd-network-orphan"))
     #expect(throws: RunnerSessionError.self) {
-        try removeUnleasedRunnerFiles(in: fixture.rootURL, keeping: [])
+        try removeUnleasedRunnerFiles(in: fixture.rootURL)
     }
     #expect(!FileManager.default.fileExists(atPath: orphan.path))
 }

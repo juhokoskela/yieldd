@@ -13,12 +13,13 @@ func removeMacOSRunnerFiles(_ id: RunnerID, in directory: URL,
     if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
 }
 
-func removeUnleasedRunnerFiles(in directory: URL, keeping ids: Set<RunnerID>, checkCancellation: () throws -> Void = {},
+// Called under exclusive ownership after all outstanding guests have been recovered.
+func removeUnleasedRunnerFiles(in directory: URL, checkCancellation: () throws -> Void = {},
                                makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) }
     var failures: [RunnerSessionCleanupFailure] = []
     try checkCancellation()
-    do { try RunnerNetworkDirectories(stateDirectory: directory).removeUnleased(keeping: ids) }
+    do { try RunnerNetworkDirectories(stateDirectory: directory).removeUnleased() }
     catch {
         if isCancellation(error) { throw error }
         if case let RunnerSessionError.cleanupFailed(entries) = error { failures.append(contentsOf: entries) }
@@ -27,7 +28,7 @@ func removeUnleasedRunnerFiles(in directory: URL, keeping ids: Set<RunnerID>, ch
     for kind in RunnerCloneKind.allCases {
         do {
             try makeCloneStore(kind)
-                .removeUnleased(keeping: kind == .runners ? ids : [], checkCancellation: checkCancellation)
+                .removeUnleased(checkCancellation: checkCancellation)
         } catch {
             if isCancellation(error) { throw error }
             failures.append(.init(step: .machine, error: error))
@@ -55,10 +56,7 @@ struct MacOSRunnerCloneStore {
         }
     }
 
-    func removeUnleased(
-        keeping leasedIDs: Set<RunnerID>,
-        checkCancellation: () throws -> Void = {}
-    ) throws {
+    func removeUnleased(checkCancellation: () throws -> Void = {}) throws {
         guard try rootExists() else { return }
         let entries = try FileManager.default.contentsOfDirectory(
             at: rootURL,
@@ -69,7 +67,7 @@ struct MacOSRunnerCloneStore {
             try checkCancellation()
             guard ["creating", "bundle"].contains(entry.pathExtension) else { continue }
             let id = RunnerID(value: entry.deletingPathExtension().lastPathComponent)
-            guard id.isValid, !leasedIDs.contains(id) else { continue }
+            guard id.isValid else { continue }
             do {
                 let values = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
                 guard values.isDirectory == true, values.isSymbolicLink != true else { continue }

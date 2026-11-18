@@ -138,7 +138,7 @@ func installConnectedAgent(configuration: ConnectedAgentConfiguration, token: St
 
 private func validateEnrollment(_ configuration: ConnectedAgentConfiguration, leases: RunnerLeaseStore) throws {
     guard !FileManager.default.fileExists(atPath: leases.directory.appendingPathComponent("agent.json").path) else {
-        throw AgentError.configurationChanged
+        throw RunnerOwnershipError.previousLease
     }
     for journal in ConnectedRunnerStore.all(in: leases.directory) {
         if let lease = try journal.load() {
@@ -154,7 +154,10 @@ func uninstallConnectedAgent(store: ConnectedAgentStore, credentials: ConnectedA
                              service: LocalAgentService,
                              recover: (ConnectedAgentConfiguration, String) throws -> Void) async throws {
     try await disableAgent(service: service)
-    guard let configuration = try store.load() else { throw ConnectedAgentError.invalidConfiguration }
+    guard let configuration = try store.load() else {
+        if ConnectedRunnerStore.hasRecovery(in: store.directory) { throw ConnectedAgentError.invalidConfiguration }
+        return
+    }
     let token = try ConnectedRunnerStore.hasRecovery(in: store.directory)
         ? credentials.load(configuration.credentialAccount) : ""
     try recover(configuration, token)
@@ -167,7 +170,7 @@ func recoverConnectedAgent(configuration: ConnectedAgentConfiguration, token: St
     try withRunnerOwnership(in: directory, connected: true) { _ in
         try recoverConnectedPlatforms(directory: directory, server: configuration.server, deviceID: configuration.deviceID,
             token: token, confirmation: nil, stop: stop, resolveContainer: configuration.resolveContainer, output: output)
-        try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
+        try removeUnleasedRunnerFiles(in: directory, checkCancellation: stop.check)
     }
 }
 

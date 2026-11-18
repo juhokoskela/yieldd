@@ -36,24 +36,18 @@ struct ReservedRunnerJob {
                     guard jobStarted else { throw RunnerAssignmentError.exitedWithoutJob }
                     return
                 }
-                let replay: ProcessResult
-                do {
-                    replay = try backend.exec(
-                        ["yieldd-runner-control", "output"], timeout: 30,
-                        outputCapture: .tail(maxBytes: 1_024 * 1_024),
-                        as: .root, on: id
-                    )
-                } catch let ProcessExecutionError.nonZeroExit(_, result) where result.terminationStatus == exitStatus {
-                    replay = result
-                }
-                guard replay.terminationStatus == exitStatus else { throw RunnerAssignmentError.invalidStatus }
+                let replay = try backend.exec(
+                    ["yieldd-runner-control", "output"], timeout: 30,
+                    outputCapture: .tail(maxBytes: 1_024 * 1_024),
+                    as: .root, on: id
+                )
                 let output = [replay.stdoutText, replay.stderrText]
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }.joined(separator: "\n")
                 throw RunnerAssignmentError.listenerFailed(exitStatus, output: output)
             }
             if !status.jobStarted && jobStarted { throw RunnerAssignmentError.invalidStatus }
-            try wait(min(0.5, max(0, deadline - currentTime())))
+            try wait(min(jobStarted ? 2 : 0.5, max(0, deadline - currentTime())))
         }
     }
 }
@@ -81,13 +75,12 @@ private struct RunnerListenerStatus: Decodable {
 }
 
 enum RunnerAssignmentError: Error, Equatable, LocalizedError {
-    case pickupTimedOut, startupTimedOut
+    case pickupTimedOut
     case invalidStatus, exitedWithoutJob, listenerFailed(Int32, output: String)
 
     var errorDescription: String? {
         switch self {
         case .pickupTimedOut: "Timed out waiting for the reserved job. This does not prove that the job never started."
-        case .startupTimedOut: "Runner startup exceeded its ten-minute timeout."
         case .invalidStatus: "The guest returned invalid runner lifecycle status. Update the guest scripts before retrying."
         case .exitedWithoutJob: "The runner exited without reporting a job start."
         case let .listenerFailed(status, output):

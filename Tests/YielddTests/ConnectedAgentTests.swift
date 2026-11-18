@@ -76,7 +76,7 @@ func connectedAgentDoesNotReplaceStandaloneConfigurationOrDifferentRecoveryIdent
     try Data("original".utf8).write(to: standalone)
     let keychain = FakeAgentKeychain()
     let service = LocalAgentService(status: { .notRegistered }, register: { Issue.record("Must not register") }, unregister: {})
-    #expect(throws: AgentError.configurationChanged) {
+    #expect(throws: RunnerOwnershipError.previousLease) {
         try installConnectedAgent(configuration: agentConfiguration, token: agentToken, store: fixture.store,
             credentials: keychain.credentials, service: service)
     }

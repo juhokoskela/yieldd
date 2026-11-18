@@ -226,7 +226,7 @@ struct MacOSGuestConnection {
         deadline: TimeInterval,
         attempt: (TimeInterval) throws -> Void,
         shouldRetry: (ProcessExecutionError) -> Bool,
-        timeoutError: (String, ProcessExecutionError?) -> MacOSGuestConnectionError,
+        timeoutError: (ProcessExecutionError?) -> MacOSGuestConnectionError,
         checkCancellation: () throws -> Void,
         wait: (TimeInterval) throws -> Void
     ) throws {
@@ -237,7 +237,7 @@ struct MacOSGuestConnection {
             try checkCancellation()
             let remaining = deadline - currentTime()
             guard remaining > 0 else {
-                throw timeoutError(MacOSGuestSSH.hostKeyAlias, readinessError ?? lastError)
+                throw timeoutError(readinessError ?? lastError)
             }
             do {
                 try attempt(min(Self.sshAttemptTimeout, remaining))
@@ -299,22 +299,22 @@ enum MacOSGuestSSHError: Error, Equatable, LocalizedError {
 }
 
 enum MacOSGuestConnectionError: Error, LocalizedError {
-    case transportTimedOut(address: String, lastError: ProcessExecutionError?)
-    case guestReadinessTimedOut(address: String, lastError: ProcessExecutionError?)
+    case transportTimedOut(lastError: ProcessExecutionError?)
+    case guestReadinessTimedOut(lastError: ProcessExecutionError?)
 
     var errorDescription: String? {
         switch self {
-        case let .transportTimedOut(address, lastError):
+        case let .transportTimedOut(lastError):
             if let lastError {
-                "Timed out waiting for SSH on macOS guest \(address): \(describeError(lastError))"
+                "Timed out waiting for SSH on macOS guest \(MacOSGuestSSH.hostKeyAlias): \(describeError(lastError))"
             } else {
-                "Timed out waiting for SSH on macOS guest \(address)."
+                "Timed out waiting for SSH on macOS guest \(MacOSGuestSSH.hostKeyAlias)."
             }
-        case let .guestReadinessTimedOut(address, lastError):
+        case let .guestReadinessTimedOut(lastError):
             if let lastError {
-                "Timed out waiting for the runner GUI session on macOS guest \(address): \(describeError(lastError))"
+                "Timed out waiting for the runner GUI session on macOS guest \(MacOSGuestSSH.hostKeyAlias): \(describeError(lastError))"
             } else {
-                "Timed out waiting for the runner GUI session on macOS guest \(address)."
+                "Timed out waiting for the runner GUI session on macOS guest \(MacOSGuestSSH.hostKeyAlias)."
             }
         }
     }

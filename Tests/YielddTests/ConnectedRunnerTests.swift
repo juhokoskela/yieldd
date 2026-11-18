@@ -258,7 +258,6 @@ func connectedRunnerContainsFailureOnlyAfterJobStartAndConfirmedCleanup(_ kind: 
     let backend = ConnectedBackend()
     if kind == .listener {
         backend.statuses = [#"{"phase":"listening","jobStarted":true}"#, #"{"phase":"exited","jobStarted":true,"exitStatus":1}"#]
-        backend.replayExitStatus = 1
     } else {
         backend.failAfterJobStart(kind.error)
     }
@@ -267,7 +266,7 @@ func connectedRunnerContainsFailureOnlyAfterJobStartAndConfirmedCleanup(_ kind: 
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ throws in
         #expect(backend.destroyed && releases == 1)
         #expect(try fixture.store.load() != nil)
-    }, wait: { #expect($0 == 0.5) })
+    }, wait: { #expect($0 == 2) })
     runner.stateChanged = { events.append($0) }
     try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
     #expect(backend.destroyed && releases == 1)
@@ -291,7 +290,7 @@ func connectedGuestFailureDoesNotHideCleanupFailure(_ stage: String) throws {
         if stage == "journal" {
             try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.directory.path)
         }
-    }, wait: { #expect($0 == 0.5) })
+    }, wait: { #expect($0 == 2) })
     var releases = 0
     do {
         try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
@@ -325,7 +324,7 @@ func connectedGuestFailureWaitsForAcknowledgementBeforePollingAnotherAssignment(
         acknowledgements += 1
         if acknowledgements == 1 { throw ConnectedRunnerError.transport }
         if acknowledgements == 2 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
-    }, wait: { #expect($0 == 0.5) })
+    }, wait: { #expect($0 == 2) })
     #expect(throws: ConnectedLoopTestStop.finished) {
         try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() },
             acquire: { RunnerMemoryReservation(allocation: .full, bytes: 1) }, release: { _ in releases += 1 }, poll: {
@@ -380,7 +379,7 @@ func connectedGuestTimeoutDoesNotCancelHealthySibling() throws {
                 try connectedJIT(settings: ["AgentName": accepted.runner, "WorkFolder": "_work", "Ephemeral": true])
             }, complete: { _ in #expect(backend.destroyed) },
             authorization: .init(renew: { _, _ in true }, checkCancellation: stop.check),
-            wait: { #expect($0 == 0.5); try stop.check() })
+            wait: { #expect($0 == 2); try stop.check() })
         var polled = false
         do {
             try runConnectedClient(checkCancellation: stop.check, recover: { try runner.recover() },
@@ -440,7 +439,7 @@ func connectedAssignmentIsolationPreservesFatalFailures(_ stage: String) throws 
     }
     if stage == "startup" { backend.configurationFailure = failure }
     else { backend.failAfterJobStart(failure) }
-    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in }, wait: { #expect($0 == 0.5) })
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in }, wait: { #expect($0 == 2) })
     let error = try #require(#expect(throws: (any Error).self) { try runner.run(connectedOffer, memory: .full) })
     #expect(describeError(error) == describeError(failure))
     #expect(backend.destroyed)
@@ -470,8 +469,8 @@ func connectedPreJobFailuresStopPollingInsteadOfReacceptingDemand(_ stage: Conne
         backend.statuses = Array(repeating: #"{"phase":"listening","jobStarted":false}"#, count: 2)
         backend.onStatus = { [unowned backend] in now = backend.statusPolls == 1 ? 290 : 301 }
     case .noJob, .listener:
-        backend.replayExitStatus = stage == .listener ? 1 : 0
-        backend.statuses = ["{\"phase\":\"exited\",\"jobStarted\":false,\"exitStatus\":\(backend.replayExitStatus)}"]
+        let exitStatus = stage == .listener ? 1 : 0
+        backend.statuses = ["{\"phase\":\"exited\",\"jobStarted\":false,\"exitStatus\":\(exitStatus)}"]
         expected = stage == .listener ? RunnerAssignmentError.listenerFailed(1, output: "") : RunnerAssignmentError.exitedWithoutJob
     case .stoppedVM:
         expected = MacOSVirtualizationProbeError.stoppedUnexpectedly
@@ -509,7 +508,7 @@ func connectedPermanentRenewalErrorIsNotContainedAfterJobStart() throws {
     backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
     var now: TimeInterval = 0
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
-        wait: { #expect($0 == 0.5) }, renew: { _, _ in
+        wait: { #expect($0 == 2) }, renew: { _, _ in
             if now >= 30 { throw ConnectedRunnerError.http(401, request: "POST /v1/renew (linux ARM64 slot 0)") }
             return true
         }, currentTime: { now })
@@ -531,7 +530,7 @@ func connectedAuthorizationFailureTakesPrecedenceOverCancelledGuestCommand(_ exp
     var now: TimeInterval = 0
     var events: [RunnerSessionState] = []
     let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
-        wait: { #expect($0 == 0.5) }, renew: { _, _ in now == 0 }, currentTime: { now })
+        wait: { #expect($0 == 2) }, renew: { _, _ in now == 0 }, currentTime: { now })
     runner.stateChanged = { events.append($0) }
     let authorization = runner.authorization
     backend.onStatus = { [unowned backend] in
@@ -863,7 +862,7 @@ func connectedStartupFailureIsReportedBeforeCleanupRetries() throws {
 }
 
 @Test
-func connectedRecoveryReportsIdentityLossAndRequiresExactOperatorConfirmation() throws {
+func connectedWorkerRecoveryRetainsJournalWhenCoordinatorIdentityIsLost() throws {
     let fixture = try ConnectedFixture()
     defer { fixture.remove() }
     try fixture.store.save(ConnectedLease(server: "https://EXAMPLE.com:443/", deviceID: connectedOffer.owner, offer: connectedOffer))
@@ -871,24 +870,9 @@ func connectedRecoveryReportsIdentityLossAndRequiresExactOperatorConfirmation() 
     let runner = fixture.runner(backend: backend, accept: { _ in Issue.record("Recovery must not accept"); return "" },
         complete: { _ in throw ConnectedRunnerError.http(409, request: "POST /v1/complete (linux ARM64 slot 0)",
             reason: "coordinator queue identity does not match; retain local recovery state") })
-    #expect(throws: ConnectedRunnerError.confirmationMismatch) { try runner.recover(confirmRegistrationRemoved: "wrong") }
-    #expect(!backend.destroyed)
     #expect(throws: ConnectedRunnerError.registrationReconciliationRequired(connectedOffer.runner)) { try runner.recover() }
     #expect(try fixture.store.load() != nil)
-    try runner.recover(confirmRegistrationRemoved: connectedOffer.runner)
     #expect(backend.destroyed)
-    #expect(try fixture.store.load() == nil)
-    #expect(throws: ConnectedRunnerError.confirmationMismatch) { try runner.recover(confirmRegistrationRemoved: connectedOffer.runner) }
-}
-
-@Test
-func connectedOperatorConfirmationCannotBypassFailedGuestDestruction() throws {
-    let fixture = try ConnectedFixture()
-    defer { fixture.remove() }
-    try fixture.store.save(ConnectedLease(server: "https://example.com/", deviceID: connectedOffer.owner, offer: connectedOffer))
-    let runner = fixture.runner(backend: ConnectedBackend(failure: .destroy), accept: { _ in "" }, complete: { _ in })
-    #expect(throws: TestFailure.machineCleanup) { try runner.recover(confirmRegistrationRemoved: connectedOffer.runner) }
-    #expect(try fixture.store.load() != nil)
 }
 
 @Test
@@ -985,6 +969,11 @@ func connectedMacOSRecoveryNeedsNoTemplateAndDoesNotClearLinuxJournal(badNetwork
     let socketDirectory = try networks.create(for: RunnerID(value: mac.runner))
     try Data("stale socket".utf8).write(to: socketDirectory.appendingPathComponent("n"))
     try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+    #expect(throws: ConnectedRunnerError.confirmationMismatch) {
+        try recoverConnectedPlatforms(directory: fixture.directory, server: URL(string: "https://example.com/")!,
+            deviceID: mac.owner, token: "", confirmation: "wrong", stop: RunnerPoolStop(), makeCloneStore: testCloneStores(in: fixture.directory))
+    }
+    #expect(FileManager.default.fileExists(atPath: bundle.path))
     if badNetworkDirectory {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: socketDirectory.path)
         #expect(throws: RunnerSessionError.self) {
@@ -1311,7 +1300,6 @@ private final class ConnectedBackend: RunnerBackend {
     var statusFailureOnPoll = 1
     var statusPolls = 0
     var startFailure: (any Error)?
-    var replayExitStatus: Int32 = 0
     var configurationFailure: (any Error)?
     var statuses = [#"{"phase":"exited","jobStarted":true,"exitStatus":0}"#]
     init(failure: Failure? = nil) { self.failure = failure }
@@ -1333,7 +1321,7 @@ private final class ConnectedBackend: RunnerBackend {
         }
         if failure == .run, arguments.last == "start" { throw TestFailure.runnerJob }
         if arguments.last == "start", let startFailure { throw startFailure }
-        if arguments.last == "output" { return processResult(status: replayExitStatus) }
+        if arguments.last == "output" { return processResult() }
         if arguments.last == "status" {
             statusPolls += 1
             try onStatus()

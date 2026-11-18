@@ -23,7 +23,7 @@ struct MachineTestCommand: ParsableCommand {
                 try leaseStore.recoverMachineTest {
                     try AppleContainerBackend(containerURL: locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
                 }
-                try removeUnleasedRunnerFiles(in: leaseStore.directory, keeping: [], checkCancellation: signalMonitor.check)
+                try removeUnleasedRunnerFiles(in: leaseStore.directory, checkCancellation: signalMonitor.check)
             } else {
                 try leaseStore.recoverMachineTest { backend }
             }
@@ -136,7 +136,6 @@ extension RunnerLeaseStore {
     func recoverMachineTest(makeBackend: () throws -> any RunnerBackend) throws {
         guard let id = try pendingMachineTest() else { return }
         let backend = try makeBackend()
-        try backend.prepare()
         try backend.destroy(id)
         try clearMachineTest()
     }

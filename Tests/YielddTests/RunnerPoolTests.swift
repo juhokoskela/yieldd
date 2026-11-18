@@ -4,8 +4,8 @@ import Foundation
 import Testing
 @testable import Yieldd
 
-private let firstPoolRepository = try! GitHubRepository("owner/first")
-private let secondPoolRepository = try! GitHubRepository("owner/second")
+private let firstPoolRepository = "owner/first"
+private let secondPoolRepository = "owner/second"
 
 @Test
 func poolRunsConcurrentMixedPlatformSlots() throws {
@@ -15,9 +15,9 @@ func poolRunsConcurrentMixedPlatformSlots() throws {
         try gate.enter(platform == .linux ? firstPoolRepository : secondPoolRepository)
     }
 
-    #expect(Set(gate.repositories.map(\.fullName)) == [
-        firstPoolRepository.fullName,
-        secondPoolRepository.fullName,
+    #expect(Set(gate.repositories) == [
+        firstPoolRepository,
+        secondPoolRepository,
     ])
     #expect(gate.maximumActiveSlots == 2)
 }
@@ -107,7 +107,7 @@ func capacityWaitObservesPoolStop() throws {
 private final class ConcurrentSlotGate: @unchecked Sendable {
     private let condition = NSCondition()
     private let expected: Int
-    private var recordedRepositories: [GitHubRepository] = []
+    private var recordedRepositories: [String] = []
     private var activeSlots = 0
     private var maximumSlots = 0
 
@@ -115,7 +115,7 @@ private final class ConcurrentSlotGate: @unchecked Sendable {
         self.expected = expected
     }
 
-    var repositories: [GitHubRepository] {
+    var repositories: [String] {
         condition.withLock { recordedRepositories }
     }
 
@@ -123,7 +123,7 @@ private final class ConcurrentSlotGate: @unchecked Sendable {
         condition.withLock { maximumSlots }
     }
 
-    func enter(_ repository: GitHubRepository) throws {
+    func enter(_ repository: String) throws {
         condition.lock()
         recordedRepositories.append(repository)
         activeSlots += 1

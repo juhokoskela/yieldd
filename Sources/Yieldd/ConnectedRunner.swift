@@ -9,8 +9,8 @@ final class ConnectedRunner {
     let complete: (ConnectedOffer) throws -> Void
     let authorization: ConnectedExecutionAuthorization
     let wait: (TimeInterval) throws -> Void
-    var stateChanged: (RunnerSessionState) -> Void = { _ in }
-    var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var stateChanged: (RunnerSessionState) -> Void
+    var currentTime: () -> TimeInterval
 
     // Valid only for this worker process. A restart must prove absence again.
     private var absent: RunnerID?
@@ -32,20 +32,17 @@ final class ConnectedRunner {
         self.currentTime = currentTime
     }
 
-    func recover(confirmRegistrationRemoved runner: String? = nil) throws {
+    func recover() throws {
         guard store.platform == backend.platform else { throw ConnectedRunnerError.invalidState }
-        guard let lease = try store.load() else {
-            if runner != nil { throw ConnectedRunnerError.confirmationMismatch }
-            return
-        }
-        try lease.requireRecoveryIdentity(server: server, deviceID: deviceID, confirmation: runner)
+        guard let lease = try store.load() else { return }
+        try lease.requireRecoveryIdentity(server: server, deviceID: deviceID)
         try withConnectedRunnerActivity(lease.offer.runner) {
             let id = RunnerID(value: lease.offer.runner)
             if absent != id {
                 try backend.destroy(id)
                 absent = id
             }
-            if runner == nil { try acknowledgeConnectedRunner(lease.offer, complete: complete) }
+            try acknowledgeConnectedRunner(lease.offer, complete: complete)
             try store.clear()
             absent = nil
         }
@@ -141,10 +138,9 @@ func isContainedConnectedFailure(_ error: any Error) -> Bool {
 }
 
 extension ConnectedLease {
-    func requireRecoveryIdentity(server: String, deviceID: String, confirmation: String?) throws {
+    func requireRecoveryIdentity(server: String, deviceID: String) throws {
         guard try ConnectedHTTPClient.serverURL(self.server) == ConnectedHTTPClient.serverURL(server),
               self.deviceID == deviceID else { throw ConnectedRunnerError.identityChanged }
-        if let confirmation, confirmation != offer.runner { throw ConnectedRunnerError.confirmationMismatch }
     }
 }
 

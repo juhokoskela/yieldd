@@ -3,6 +3,7 @@ import Foundation
 
 struct RunnerLeaseStore {
     let directory: URL
+    fileprivate(set) var ownershipDescriptor: Int32?
 
     init(directory: URL) throws {
         self.directory = directory
@@ -35,7 +36,7 @@ func withRunnerOwnership(
 ) throws {
     let stateDirectory = try directory ?? yielddApplicationSupportDirectory()
 
-    let store = try RunnerLeaseStore(directory: stateDirectory)
+    var store = try RunnerLeaseStore(directory: stateDirectory)
     let lockURL = stateDirectory.appendingPathComponent("runner.lock", isDirectory: false)
     let descriptor = lockURL.path.withCString { path in
         Darwin.open(
@@ -62,6 +63,7 @@ func withRunnerOwnership(
     if !recoveringMachineTest, try store.pendingMachineTest() != nil {
         throw MachineTestError.recoveryRequired
     }
+    store.ownershipDescriptor = descriptor
     try operation(store)
 }
 

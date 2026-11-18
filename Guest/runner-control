@@ -83,9 +83,8 @@ if [[ "$#" -eq 1 ]]; then
             worker
             ;;
         output)
-            IFS= read -r exit_status < "$state_directory/exit-status"
-            cat "$state_directory/output.log"
-            exit "$exit_status"
+            [[ -f "$state_directory/exit-status" ]] || exit 1
+            exec cat "$state_directory/output.log"
             ;;
         *)
             usage

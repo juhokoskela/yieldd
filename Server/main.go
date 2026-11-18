@@ -198,7 +198,7 @@ func recoverAssignment(ctx context.Context, directory string, configs []config, 
 	}
 	queue, runner := target[:split], target[split+1:]
 	for _, cfg := range configs {
-		if queue != cfg.Repository+"/"+cfg.platform() {
+		if !strings.EqualFold(queue, cfg.Repository+"/"+cfg.platform()) {
 			continue
 		}
 		path := filepath.Join(directory, queueDirectory(cfg))

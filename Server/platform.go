@@ -63,12 +63,26 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if recoverOnly {
 		return p, nil
 	}
+	// An offered lease has never reached registration. A Mac holding an old
+	// offer will get a rejection and poll again after reconnection.
+	droppedOffer := false
+	for name, l := range saved.Leases {
+		if l.Local != nil && l.Local.Phase == localOffered && !l.CleanupIntent {
+			delete(saved.Leases, name)
+			droppedOffer = true
+		}
+	}
+	if droppedOffer {
+		if err := store.save(saved); err != nil {
+			return nil, &journalWriteError{err}
+		}
+	}
 	worker.demandUnavailable = true
 	savedID, owner := saved.ScaleSetID, saved.Owner
 	// Session setup can overlap device requests; keep its SDK client independent.
 	sessionClient, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
 	if err != nil {
-		return nil, err
+		return nil, &sdkError{"initialize session client", err}
 	}
 	p.newSession = func(ctx context.Context) (listenerSession, error) {
 		if p.scaleSetID == 0 {
@@ -78,15 +92,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 				return nil, err
 			}
 			if savedID == 0 {
-				if err := p.loop.invoke(ctx, func(context.Context) error {
-					next := *worker.state
-					next.ScaleSetID = id
-					if err := worker.save(&next); err != nil {
-						return &journalWriteError{err}
-					}
-					*worker.state = next
-					return nil
-				}); err != nil {
+				if err := p.recordScaleSetID(ctx, id); err != nil {
 					return nil, err
 				}
 			}
@@ -95,6 +101,19 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 		return sessionClient.MessageSessionClient(ctx, p.scaleSetID, owner)
 	}
 	return p, nil
+}
+
+func (p *platformCoordinator) recordScaleSetID(ctx context.Context, id int) error {
+	return p.loop.invoke(ctx, func(context.Context) error {
+		worker := p.loop.worker
+		next := *worker.state
+		next.ScaleSetID = id
+		if err := worker.save(&next); err != nil {
+			return &journalWriteError{err}
+		}
+		*worker.state = next
+		return nil
+	})
 }
 
 func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRunners int) (*coordinator, error) {

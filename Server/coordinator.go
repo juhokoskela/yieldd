@@ -570,6 +570,10 @@ func (a *assignment) generateRegistration(ctx context.Context) (*scaleset.Runner
 	return generated, nil
 }
 
+func (a *assignment) recoveryTarget() string {
+	return a.state.Config.Repository + "/" + a.state.Config.platform() + "/" + a.lease.Name
+}
+
 // Called only for a newly journaled hosted assignment or an unissued local offer
 // just converted to hosted. Reconciliation cleans up interrupted attempts.
 func (a *assignment) provisionHosted(ctx context.Context) error {
@@ -605,7 +609,7 @@ func (a *assignment) provisionHosted(ctx context.Context) error {
 			return errors.Join(err, a.beginCleanup(""))
 		}
 		if dispatchRejected(err) {
-			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover to clean up: %w", err), a.beginCleanup("rejected"))
+			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover %s to clean up: %w", a.recoveryTarget(), err), a.beginCleanup("rejected"))
 		}
 		return fmt.Errorf("dispatch outcome is uncertain; restart to reconcile, not redispatch: %w", err)
 	}
@@ -709,7 +713,7 @@ func (a *assignment) recoverMissingRun(ctx context.Context, recoverOnly bool) (b
 		return false, &sdkError{"check runner for missing workflow", err}
 	}
 	if runner != nil {
-		return false, errors.New("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover")
+		return false, fmt.Errorf("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover %s", a.recoveryTarget())
 	}
 	if err := a.beginCleanup("unknown"); err != nil {
 		return false, err

@@ -15,6 +15,7 @@ struct ProcessRequest: Equatable, Sendable {
     let timeout: TimeInterval?
     let outputCapture: ProcessOutputCapture
     let cancellable: Bool
+    let ownershipDescriptor: Int32?
 
     init(
         executableURL: URL,
@@ -22,7 +23,8 @@ struct ProcessRequest: Equatable, Sendable {
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
         outputCapture: ProcessOutputCapture = .all,
-        cancellable: Bool = true
+        cancellable: Bool = true,
+        ownershipDescriptor: Int32? = nil
     ) {
         if let timeout {
             precondition(timeout.isFinite && timeout > 0)
@@ -35,6 +37,7 @@ struct ProcessRequest: Equatable, Sendable {
         self.standardInput = standardInput
         self.timeout = timeout
         self.outputCapture = outputCapture
+        self.ownershipDescriptor = ownershipDescriptor
         self.cancellable = cancellable
     }
 }
@@ -401,6 +404,11 @@ struct ProcessExecutor: ProcessExecuting {
             stderr.fileHandleForWriting.fileDescriptor,
             STDERR_FILENO
         ))
+
+        if let descriptor = request.ownershipDescriptor {
+            // Keep recovery excluded while an orphaned create can still publish its guest.
+            try requirePOSIXSuccess(posix_spawn_file_actions_addinherit_np(&fileActions, descriptor))
+        }
 
         var attributes: posix_spawnattr_t?
         try requirePOSIXSuccess(posix_spawnattr_init(&attributes))

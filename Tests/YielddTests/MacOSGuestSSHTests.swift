@@ -247,8 +247,7 @@ func guestConnectionPreservesTheLastTransportFailureOnTimeout() throws {
             wait: clock.wait
         )
         Issue.record("Expected SSH transport to time out")
-    } catch let MacOSGuestConnectionError.transportTimedOut(address, lastError) {
-        #expect(address == MacOSGuestSSH.hostKeyAlias)
+    } catch let MacOSGuestConnectionError.transportTimedOut(lastError) {
         #expect(lastError != nil)
     } catch {
         Issue.record("Unexpected error: \(error)")
@@ -369,11 +368,10 @@ func guestConnectionReadinessSharesTheTransportDeadline() throws {
         )
         Issue.record("Expected guest readiness to time out")
     } catch let error as MacOSGuestConnectionError {
-        guard case let .guestReadinessTimedOut(address, lastError) = error else {
+        guard case let .guestReadinessTimedOut(lastError) = error else {
             Issue.record("Unexpected connection error: \(error)")
             return
         }
-        #expect(address == MacOSGuestSSH.hostKeyAlias)
         #expect(lastError != nil)
         #expect(error.localizedDescription.contains(diagnostic))
     }
