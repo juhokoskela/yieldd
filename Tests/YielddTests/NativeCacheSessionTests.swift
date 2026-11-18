@@ -75,7 +75,6 @@ private final class NativeSessionFixture {
                                                 attributes: [.posixPermissions: 0o700])
         store = NativeCacheStore(root: root.appendingPathComponent("store"), platform: .linux, diskBytes: 4096)
         session = NativeCacheSession(store: store, backend: backend, id: id, repository: "trusted/project", directory: root)
-        try session.prepare()
     }
     func remove() { try? FileManager.default.removeItem(at: root) }
 

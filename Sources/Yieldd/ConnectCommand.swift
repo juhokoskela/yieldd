@@ -97,8 +97,7 @@ func runConnectedService(
             case .linux:
                 let container = try resolveContainer()
                 try AppleContainerBackend.requireNetworkSupport(containerURL: container,
-                    executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline),
-                    requiresNativeCache: cacheConfiguration != nil)
+                    executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline))
                 try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline), stateDirectory: directory).start()
                 try storage.validateContainer(containerExecutable: container)
                 return .linux(containerURL: container)

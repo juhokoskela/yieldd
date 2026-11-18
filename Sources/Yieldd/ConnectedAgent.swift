@@ -208,8 +208,7 @@ struct AgentInstallCommand: ParsableCommand {
         try RunnerNetwork.requireRelay()
         if platforms.contains(.linux), let container {
             try storage.validatePath(storage.containerURL)
-            try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor(),
-                                                           requiresNativeCache: JobCacheConfiguration.load(in: directory) != nil)
+            try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor())
         }
         let store = ConnectedAgentStore(directory: directory)
         let token = ProcessInfo.processInfo.environment["YIELDD_CLIENT_TOKEN"] ?? ""

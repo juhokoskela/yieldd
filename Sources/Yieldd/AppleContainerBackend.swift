@@ -25,23 +25,13 @@ final class AppleContainerBackend: NativeCacheBackend {
     private let lock = NSLock()
     private struct Guest {
         let relay: any RunnerNetworkRelaying
-        let cacheExchange: URL?
         var booted = false
     }
     private var guests: [RunnerID: Guest] = [:]
-    private var pendingCacheExchanges: [RunnerID: URL] = [:]
-
-    func prepareNativeCache(exchangeDirectory: URL, on id: RunnerID) throws {
-        try lock.withLock {
-            guard id.isValid, guests[id] == nil, pendingCacheExchanges[id] == nil else { throw POSIXError(.EEXIST) }
-            pendingCacheExchanges[id] = exchangeDirectory
-        }
-    }
 
     func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws {
-        guard lock.withLock({ guests[id]?.cacheExchange?.appendingPathComponent("cache.img").path == image.path }) else {
-            throw AppleContainerBackendError.unsupportedConfiguration
-        }
+        let directory = try RunnerNetworkDirectories(stateDirectory: stateDirectory).directory(for: id)
+        try writePrivateRunnerFile(Data(image.path.utf8), to: directory.appendingPathComponent("native-disk"))
         try exec(["yieldd-native-cache", "mount", cold ? "cold" : "warm"], timeout: 120,
                  outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
     }
@@ -49,6 +39,18 @@ final class AppleContainerBackend: NativeCacheBackend {
     func detachNativeCache(on id: RunnerID) throws {
         try exec(["yieldd-native-cache", "unmount"], timeout: 120,
                  outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
+        let directory = try RunnerNetworkDirectories(stateDirectory: stateDirectory).directory(for: id)
+        try writePrivateRunnerFile(Data("seal".utf8), to: directory.appendingPathComponent("native-disk-seal"))
+        try exec(["yieldd-native-cache", "close"], timeout: 30,
+                 outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
+        let closed = directory.appendingPathComponent("native-disk-closed")
+        // The guest can exit its helper early. Only the host export can confirm a flushed disconnect.
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while try readPrivateRunnerFile(closed, maximumBytes: 16) != Data("closed".utf8) {
+            try checkCancellation()
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw POSIXError(.ETIMEDOUT) }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
 
     init(
@@ -87,14 +89,13 @@ final class AppleContainerBackend: NativeCacheBackend {
 
     func create(id: RunnerID, memory allocation: RunnerMemoryAllocation, recordIntent: () throws -> Void) throws {
         try lock.withLock {
-            let exchange = pendingCacheExchanges.removeValue(forKey: id)
             try checkCancellation()
             try prepare()
             guard guests[id] == nil else { throw POSIXError(.EEXIST) }
             try recordIntent()
             let relay = try network.start(for: id, checkCancellation: checkCancellation)
-            guests[id] = Guest(relay: relay, cacheExchange: exchange)
-            var arguments = [
+            guests[id] = Guest(relay: relay)
+            _ = try run([
                 "machine", "create",
                 "--name", id.value,
                 "--no-boot",
@@ -102,13 +103,11 @@ final class AppleContainerBackend: NativeCacheBackend {
                 "--home-mount", "none",
                 "--cpus", String(Self.virtualCPUs),
                 "--memory", Self.memoryArgument,
-            ]
-            if let exchange { arguments += ["--cache-exchange", exchange.path] }
-            arguments.append(Self.image)
-            _ = try run(arguments, timeout: Self.creationTimeout, ownershipDescriptor: ownershipDescriptor, checking: relay.check)
+                Self.image,
+            ], timeout: Self.creationTimeout, ownershipDescriptor: ownershipDescriptor, checking: relay.check)
             let result = try run(["machine", "inspect", id.value], timeout: Self.inspectionTimeout,
                                  outputCapture: .tail(maxBytes: 64 * 1_024), checking: relay.check)
-            try Self.requireRelayConfiguration(result.stdout, id: id, socket: relay.socketURL, exchange: exchange)
+            try Self.requireRelayConfiguration(result.stdout, id: id, socket: relay.socketURL)
             _ = try run(["machine", "boot", id.value], timeout: Self.creationTimeout, checking: relay.check)
             guests[id]?.booted = true
         }
@@ -177,7 +176,6 @@ final class AppleContainerBackend: NativeCacheBackend {
             // After an owner crash there is no relay object, only its socket directory.
             try RunnerNetworkDirectories(stateDirectory: stateDirectory).remove(id)
             guests.removeValue(forKey: id)
-            pendingCacheExchanges.removeValue(forKey: id)
         }
     }
 
@@ -202,29 +200,25 @@ final class AppleContainerBackend: NativeCacheBackend {
         try storage?.requireMachineRemoved(id)
     }
 
-    static func requireRelayConfiguration(_ data: Data, id: RunnerID, socket: URL, exchange: URL? = nil) throws {
+    static func requireRelayConfiguration(_ data: Data, id: RunnerID, socket: URL) throws {
         struct Machine: Decodable, Equatable {
             let id: String
             let homeMount: String
             let networkSocket: String?
-            let cacheExchange: String?
         }
         let machines: [Machine]
         do { machines = try JSONDecoder().decode([Machine].self, from: data) }
         catch { throw AppleContainerBackendError.invalidInspection }
-        guard machines == [Machine(id: id.value, homeMount: "none", networkSocket: socket.path, cacheExchange: exchange?.path)] else {
+        guard machines == [Machine(id: id.value, homeMount: "none", networkSocket: socket.path)] else {
             throw AppleContainerBackendError.unsupportedConfiguration
         }
     }
 
-    static func requireNetworkSupport(containerURL: URL, executor: any ProcessExecuting, requiresNativeCache: Bool = false) throws {
+    static func requireNetworkSupport(containerURL: URL, executor: any ProcessExecuting) throws {
         let request = ProcessRequest(executableURL: containerURL, arguments: ["machine", "create", "--help"],
                                      timeout: Self.preflightTimeout, outputCapture: .tail(maxBytes: 64 * 1_024))
         let result = try executor.execute(request).requireSuccess(for: request)
         guard result.stdoutText.contains("--network-socket") else { throw AppleContainerBackendError.unsupportedCLI }
-        if requiresNativeCache && !result.stdoutText.contains("--cache-exchange") {
-            throw AppleContainerBackendError.unsupportedCacheCLI
-        }
         let boot = ProcessRequest(executableURL: containerURL, arguments: ["machine", "boot", "--help"],
                                   timeout: Self.preflightTimeout, outputCapture: .tail(maxBytes: 64 * 1_024))
         try executor.execute(boot).requireSuccess(for: boot)
@@ -265,7 +259,6 @@ final class AppleContainerBackend: NativeCacheBackend {
 enum AppleContainerBackendError: Error, LocalizedError, Equatable {
     case notReady(RunnerID)
     case unsupportedCLI
-    case unsupportedCacheCLI
     case unsupportedConfiguration
     case invalidInspection
 
@@ -274,8 +267,6 @@ enum AppleContainerBackendError: Error, LocalizedError, Equatable {
         case let .notReady(id): "The Linux runner network is not ready for \(id.value)."
         case .unsupportedCLI:
             "This Container executable does not support isolated runner networking. Build and install the pinned fork with Scripts/build-runner-container.sh, then restart Container before starting yieldd."
-        case .unsupportedCacheCLI:
-            "Linux cache disks require an updated Container fork. Run Scripts/build-runner-container.sh, install the package, and restart Container."
         case .unsupportedConfiguration:
             "Apple Container did not retain the isolated relay configuration. Build and install the pinned fork with Scripts/build-runner-container.sh, restart Container, and retry. The guest was not booted."
         case .invalidInspection:

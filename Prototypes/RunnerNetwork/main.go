@@ -146,6 +146,18 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 		go func() { _ = server.Serve(listener) }()
 		defer func() { cancel(); server.Close(); listener.Close(); cache.client.CloseIdleConnections() }()
 	}
+	if cacheSocket != "" && counts.identity.Platform == "linux" {
+		disk, err := network.Listen("tcp", "192.168.127.1:7342")
+		if err != nil {
+			return err
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = serveNativeDisk(ctx, disk, filepath.Dir(path))
+		}()
+		defer func() { cancel(); disk.Close(); <-done }()
+	}
 	ssh, err := net.ListenUnix("unix", &net.UnixAddr{Name: path + ".ssh", Net: "unix"})
 	if err != nil {
 		return err

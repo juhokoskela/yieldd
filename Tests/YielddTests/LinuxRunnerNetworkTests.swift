@@ -44,34 +44,6 @@ struct LinuxRunnerNetworkTests {
         }
     }
 
-    @Test
-    func linuxRequiresItsPrivateCacheExchangeBeforeBoot() throws {
-        let relay = BackendRelay()
-        let executor = RecordingProcessExecutor(outcomes: [.success(processResult()), .success(linuxInspection(id: linuxNetworkID))])
-        let backend = try AppleContainerBackend(containerURL: linuxContainer, executor: executor,
-            stateDirectory: unconfiguredContainerStateDirectory, loadStorage: { nil }, network: BackendNetwork(relay: relay))
-        let exchange = URL(fileURLWithPath: "/isolated/cache/exchange", isDirectory: true)
-        try backend.prepareNativeCache(exchangeDirectory: exchange, on: linuxNetworkID)
-        #expect(throws: AppleContainerBackendError.unsupportedConfiguration) {
-            try backend.create(id: linuxNetworkID, memory: .full)
-        }
-        let create = try #require(executor.requests.first?.arguments)
-        let flag = try #require(create.firstIndex(of: "--cache-exchange"))
-        #expect(create[flag + 1] == exchange.path)
-        #expect(!executor.requests.contains { $0.arguments.starts(with: ["machine", "boot"]) })
-    }
-
-    @Test
-    func cacheEnabledLinuxRequiresTheCacheCapableContainerCLI() throws {
-        let old = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "--network-socket"))])
-        #expect(throws: AppleContainerBackendError.unsupportedCacheCLI) {
-            try AppleContainerBackend.requireNetworkSupport(containerURL: linuxContainer, executor: old, requiresNativeCache: true)
-        }
-        let current = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: "--network-socket --cache-exchange")),
-                                                         .success(processResult())])
-        try AppleContainerBackend.requireNetworkSupport(containerURL: linuxContainer, executor: current, requiresNativeCache: true)
-    }
-
     @Test(arguments: ["", "machine create --home-mount <homeMount>"])
     func linuxPreflightRejectsTheStockContainerCLI(_ help: String) {
         let executor = RecordingProcessExecutor(outcomes: [.success(processResult(stdout: help))])

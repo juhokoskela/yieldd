@@ -24,7 +24,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/build-local-app
 .build/yieldd.app/Contents/MacOS/yieldd machine-test
 ```
 
-Use your configured volume path instead of `/Volumes/YielddRunners`. The build script creates an ad-hoc-signed development installer; it does not install or restart services. It verifies the pinned source revision and patch before compilation. The installer binaries report `1.6.0+yieldd.2` and the pinned base commit; no Git tag is required. Unexpected cache edits are rejected without being discarded.
+Use your configured volume path instead of `/Volumes/YielddRunners`. The build script creates an ad-hoc-signed development installer; it does not install or restart services. It verifies the pinned source revision and patch before compilation. The installer binaries report `1.6.0+yieldd` and the pinned base commit; no Git tag is required. Unexpected cache edits are rejected without being discarded.
 
 The fork also fixes process-signal forwarding: the Container CLI sends the host-platform signal name, which the API server forwards to the host-side `container-runtime-linux` helper for Linux signal parsing. A numeric Darwin signal would misidentify signals such as SIGUSR1 and SIGUSR2 on Linux. The original integer encoding could instead report `missing signal in xpc message` when interrupting a timed-out guest command. Updating yieldd alone does not replace the installed Container CLI; rebuild and install the package above after jobs and cleanup finish.
 

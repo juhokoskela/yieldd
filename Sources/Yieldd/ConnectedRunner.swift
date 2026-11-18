@@ -74,7 +74,6 @@ final class ConnectedRunner {
             authorization.start(offer, pendingNativeSave: { cache?.saveRequested == true })
             try validateConnectedJIT(jit, runner: offer.runner)
             try authorization.check()
-            try cache?.prepare()
             // Creation can fail after allocating a guest. Retain capacity until destruction succeeds.
             try backend.create(id: id, memory: memory) {
                 releaseOnExit = false

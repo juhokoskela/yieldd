@@ -1,17 +1,11 @@
 import Foundation
 
 protocol NativeCacheBackend: RunnerBackend {
-    func prepareNativeCache(exchangeDirectory: URL, on id: RunnerID) throws
     func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws
     func detachNativeCache(on id: RunnerID) throws
 }
 
-extension NativeCacheBackend {
-    func prepareNativeCache(exchangeDirectory: URL, on id: RunnerID) throws {}
-}
-
-// Confined to the slot worker. Its relay writes verified requests in the private network
-// directory. The writable directory exported to a Linux guest is on a different volume.
+// The slot worker reads verified cache requests from its relay’s private directory.
 final class NativeCacheSession {
     private struct Grants: Decodable, Equatable {
         let repository_id: String
@@ -59,12 +53,6 @@ final class NativeCacheSession {
         let id = RunnerID(value: offer.runner)
         let control = try RunnerNetworkDirectories(stateDirectory: stateDirectory).directory(for: id)
         self.init(store: store, backend: backend, id: id, repository: offer.repository, directory: control)
-    }
-
-    func prepare() throws {
-        guard backend.platform == .linux else { return }
-        let job = try store.jobDirectory(id)
-        try backend.prepareNativeCache(exchangeDirectory: job.appendingPathComponent("exchange"), on: id)
     }
 
     func handleRequest() throws {
