@@ -235,3 +235,38 @@ func TestOpeningQueueRetractsUnacceptedOfferBeforeRestoringCapacity(t *testing.T
 		t.Fatal("old offer held a slot", err)
 	}
 }
+
+func TestUncertainFirstScaleSetIDStopsQueueBeforeOpeningSession(t *testing.T) {
+	c, _, store := newFixture(t)
+	c.state.ScaleSetID = 0
+	if err := store.save(c.state); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	p := &platformCoordinator{loop: newCoordinatorLoop(ctx, c)}
+	failure := errors.New("directory sync failed after publication")
+	c.save = func(s *state) error {
+		if err := store.save(s); err != nil {
+			return err
+		}
+		return failure
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.loop.run() }()
+	if err := p.recordScaleSetID(ctx, 42); !isJournalWrite(err) || !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-stopped:
+		if !errors.Is(err, failure) {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("queue stayed up after uncertain publication")
+	}
+	saved, err := store.load(c.state.Config)
+	if err != nil || saved.ScaleSetID != 42 || c.state.ScaleSetID != 0 {
+		t.Fatal(saved, err)
+	}
+}
