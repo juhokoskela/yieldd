@@ -181,13 +181,14 @@ func TestConcurrentCleanupRefreshesDemandAndRefillsWithoutListenerTick(t *testin
 				t.Fatal(err)
 			}
 		}
+		// Drain the second issuance wake while both slots still satisfy demand.
+		synctest.Wait()
 		if err := router.invoke(t.Context(), first, func(ctx context.Context, c *coordinator) error {
 			w.assignedJobs = 2
 			return c.completeDevice(ctx, first)
 		}); err != nil {
 			t.Fatal(err)
 		}
-		synctest.Wait()
 		router.queue.pollNow(0)
 		synctest.Wait()
 		if offer := router.queue.pollNow(0); offer == nil || offer.Runner == first.Runner {
