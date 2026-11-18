@@ -12,6 +12,13 @@ import Testing
         if (try? volume.detach()) != nil { try? FileManager.default.removeItem(at: root) }
     }
     let store = try volume.open()
+    let reduced = ArchiveCacheVolume(directory: root, mount: volume.mount, maximumMiB: 32, ownershipDescriptor: nil)
+    do {
+        _ = try reduced.open()
+        Issue.record("The archive disk exceeded the reduced quota")
+    } catch {
+        #expect(error.localizedDescription.contains("32 MiB allowance"))
+    }
     let published = store.directory.appendingPathComponent("published")
     try Data("keep".utf8).write(to: published)
     #expect(store.evictionBytes > 0 && store.evictionBytes <= 64 << 20)

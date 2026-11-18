@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-// SQLite, pending multipart uploads, merge scratch, and published archives all live
+// SQLite, pending multipart uploads, and published archives all live
 // on this filesystem. The kernel enforces one limit across simultaneous requests.
 struct ArchiveCacheVolume {
     let directory: URL
@@ -47,7 +47,7 @@ struct ArchiveCacheVolume {
         }
         guard try device(mount) != device(mount.deletingLastPathComponent()) else { throw VolumeError.wrongImage }
         let size = try filesystemSize(mount, available: false)
-        guard size <= maximumMiB << 20 else { throw VolumeError.wrongImage }
+        guard size <= maximumMiB << 20 else { throw VolumeError.quotaReduced(maximumMiB) }
         // The bare mount point is kept empty. Losing the mount before spawn makes the
         // requested working directory disappear, so the helper cannot write to its parent.
         let store = mount.appendingPathComponent("store", isDirectory: true)
@@ -119,10 +119,11 @@ struct ArchiveCacheVolume {
     }
 
     private enum VolumeError: LocalizedError {
-        case insufficientSpace, wrongImage
+        case insufficientSpace, wrongImage, quotaReduced(UInt64)
         var errorDescription: String? {
             switch self {
             case .insufficientSpace: "Runner storage needs more free space to create the archive disk."
+            case let .quotaReduced(limit): "The archive disk exceeds the current \(limit) MiB allowance. Restore the previous runner quota or reset the archive store."
             case .wrongImage: "The archive disk or its private mount point does not match the configured store."
             }
         }
