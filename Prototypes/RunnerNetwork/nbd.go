@@ -255,6 +255,9 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 		case nbdFlush:
 			operationErr = disk.Sync()
 		case nbdDisconnect:
+			if !nativeDiskSealed(directory) {
+				return errors.New("cache disk was disconnected before host seal")
+			}
 			return disk.Sync()
 		default:
 			return errors.New("unsupported NBD command")

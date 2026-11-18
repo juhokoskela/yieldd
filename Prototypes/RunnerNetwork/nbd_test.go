@@ -148,6 +148,9 @@ func TestNativeDiskSingleAuthorizedExport(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.directory, "native-disk-closed")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("premature confirmation: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(f.directory, "native-disk-seal"), []byte("seal"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	nbdClientRequest(t, conn, nbdDisconnect, 0, 0, 0)
 	if err := <-f.done; err != nil {
 		t.Fatal(err)
@@ -167,7 +170,7 @@ func TestNativeDiskSingleAuthorizedExport(t *testing.T) {
 }
 
 func TestNativeDiskDiscardsFailedTransmission(t *testing.T) {
-	for _, name := range []string{"eof", "truncated", "sealed-truncated-header", "sealed-truncated-payload", "out-of-bounds", "overflow", "oversized", "cancel"} {
+	for _, name := range []string{"early-disconnect", "eof", "truncated", "sealed-truncated-header", "sealed-truncated-payload", "out-of-bounds", "overflow", "oversized", "cancel"} {
 		t.Run(name, func(t *testing.T) {
 			f := newNativeDiskFixture(t)
 			f.bind(t)
@@ -181,6 +184,8 @@ func TestNativeDiskDiscardsFailedTransmission(t *testing.T) {
 				}
 			}
 			switch name {
+			case "early-disconnect":
+				nbdClientRequest(t, conn, nbdDisconnect, 0, 0, 0)
 			case "eof":
 				conn.Close()
 			case "sealed-truncated-header":
