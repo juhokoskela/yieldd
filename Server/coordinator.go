@@ -381,6 +381,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if completed {
 		return nil
 	}
+	listenerCount := count
 	if count > 0 && c.refreshDemand {
 		set, err := c.runners.GetRunnerScaleSetByID(ctx, c.state.ScaleSetID)
 		if err != nil {
@@ -395,7 +396,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if count <= len(c.state.Leases) {
 		// A stale positive listener count still needs refreshing after GitHub
 		// reports no work. Keep that protection until positive demand is satisfied.
-		if count > 0 {
+		if count > 0 && listenerCount == count {
 			c.refreshDemand = false
 		}
 		c.device.forget(c.state.Owner)
@@ -422,7 +423,9 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	} else if c.state.Config.LocalOnly {
 		return nil
 	} else if c.fallbackFull() {
-		c.refreshDemand = false
+		if listenerCount == count {
+			c.refreshDemand = false
+		}
 		if c.state.Config.DeviceID != "" {
 			c.device.wait(c.state.Owner)
 		}

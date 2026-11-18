@@ -32,8 +32,12 @@ func TestRefreshedDemandSurvivesProvisioningRedrives(t *testing.T) {
 			t.Fatal(err)
 		}
 		synctest.Wait()
+		// The SDK repeats its last statistics on empty polls.
+		if _, err := loop.HandleDesiredRunnerCount(t.Context(), 3); err != nil {
+			t.Fatal(err)
+		}
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			if w.dispatched != 2 || len(c.state.Leases) != 1 || c.refreshDemand {
+			if w.dispatched != 2 || len(c.state.Leases) != 1 {
 				return fmt.Errorf("cached demand dispatched surplus bootstraps: %d dispatches, %d leases", w.dispatched, len(c.state.Leases))
 			}
 			return nil
