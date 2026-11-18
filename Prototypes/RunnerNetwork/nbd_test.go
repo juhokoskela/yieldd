@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -166,6 +167,49 @@ func TestNativeDiskSingleAuthorizedExport(t *testing.T) {
 	stored, err := os.ReadFile(f.image)
 	if err != nil || len(stored) != 4096 || !bytes.Equal(stored[3584:], data) {
 		t.Fatal("disk write was not retained")
+	}
+}
+
+type countingDiskWrites struct {
+	*os.File
+	count int
+}
+
+func (disk *countingDiskWrites) WriteAt(data []byte, offset int64) (int, error) {
+	disk.count++
+	return disk.File.WriteAt(data, offset)
+}
+
+func TestNativeDiskCoalescesFragmentedWrites(t *testing.T) {
+	const payload = "abcdefghijk"
+	for _, tc := range []struct {
+		name, received, written string
+		writes                  int
+		err                     error
+	}{
+		{"complete", payload, payload, 3, nil},
+		{"truncated chunk", payload[:9], payload[:8], 2, io.ErrUnexpectedEOF},
+		{"missing chunk", payload[:8], payload[:8], 2, io.ErrUnexpectedEOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, err := os.CreateTemp(t.TempDir(), "disk")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			disk := &countingDiskWrites{File: file}
+			src := iotest.OneByteReader(bytes.NewReader([]byte(tc.received)))
+			if err := writeNativeDiskPayload(disk, 2, src, len(payload), make([]byte, 4)); err != tc.err {
+				t.Fatalf("write error %v, want %v", err, tc.err)
+			}
+			if disk.count != tc.writes {
+				t.Fatalf("wrote %d blocks, want %d", disk.count, tc.writes)
+			}
+			got, err := os.ReadFile(file.Name())
+			if err != nil || string(got) != "\x00\x00"+tc.written {
+				t.Fatalf("incorrect offset or payload: %x, %v", got, err)
+			}
+		})
 	}
 }
 

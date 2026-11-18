@@ -250,11 +250,9 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 		switch req.Command {
 		case nbdRead:
 		case nbdWrite:
-			target := io.NewOffsetWriter(disk, int64(req.Offset))
-			var written int64
-			written, operationErr = io.CopyBuffer(target, io.LimitReader(conn, int64(req.Length)), buf)
-			if operationErr == nil && written != int64(req.Length) {
-				return io.ErrUnexpectedEOF
+			operationErr = writeNativeDiskPayload(disk, int64(req.Offset), conn, int(req.Length), buf)
+			if operationErr == io.ErrUnexpectedEOF {
+				return operationErr
 			}
 		case nbdTrim:
 			// TRIM has no payload. ext4 routinely discards 128 MiB block groups.
@@ -298,6 +296,25 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory str
 			}
 		}
 	}
+}
+
+// Fill each block before writing so fragmented network reads do not become separate disk writes.
+func writeNativeDiskPayload(disk io.WriterAt, offset int64, src io.Reader, remaining int, buf []byte) error {
+	for remaining > 0 {
+		block := buf[:min(remaining, len(buf))]
+		if _, err := io.ReadFull(src, block); err != nil {
+			if err == io.EOF {
+				return io.ErrUnexpectedEOF
+			}
+			return err
+		}
+		if _, err := disk.WriteAt(block, offset); err != nil {
+			return err
+		}
+		offset += int64(len(block))
+		remaining -= len(block)
+	}
+	return nil
 }
 
 func nativeDiskSealed(directory string) bool {
