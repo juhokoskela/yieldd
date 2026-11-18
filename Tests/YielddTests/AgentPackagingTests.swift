@@ -47,6 +47,18 @@ func freshAgentInstallerChecksPreflightBeforeEnrollment(result: String) throws {
 }
 
 @Test
+func interruptedImageBuildStopsTheBuilderBeforeRemovingStaging() throws {
+    let fixture = try InstallerFixture(preflightResult: "linux")
+    defer { fixture.remove() }
+    let result = try fixture.run(arguments: fixture.arguments, interruptBuild: true)
+    #expect(result.terminationStatus == 143)
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
+    #expect(events.contains("container:builder stop"))
+    #expect(!events.contains("new:agent install --server"))
+    #expect(!FileManager.default.fileExists(atPath: fixture.applicationsURL.appendingPathComponent(".yieldd-installer").path))
+}
+
+@Test
 func installerRefusesAnExistingAppBeforePreflightOrImageBuild() throws {
     let fixture = try InstallerFixture(preflightResult: "linux")
     defer { fixture.remove() }
@@ -126,7 +138,7 @@ private struct InstallerFixture {
         """)
     }
 
-    func run(arguments: [String]) throws -> ProcessResult {
+    func run(arguments: [String], interruptBuild: Bool = false) throws -> ProcessResult {
         let original = try String(contentsOf: repositoryRoot.appendingPathComponent("Scripts/install-local-agent.sh"), encoding: .utf8)
         let scriptDirectoryAssignment = #"script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"#
         let applicationsDirectoryAssignment = #"applications_directory="${HOME:?}/Applications""#
@@ -135,7 +147,10 @@ private struct InstallerFixture {
         try #require(original.contains(applicationsDirectoryAssignment))
         let script = """
         codesign() { echo codesign >> \(quote(logURL.path)); }
-        container() { printf 'container:%s\\n' "$*" >> \(quote(logURL.path)); }
+        container() {
+            printf 'container:%s\\n' "$*" >> \(quote(logURL.path))
+            if [ "$1" = build ] && \(interruptBuild ? "true" : "false"); then kill -TERM "$$"; fi
+        }
         """ + "\n" + original
             .replacingOccurrences(
                 of: scriptDirectoryAssignment,

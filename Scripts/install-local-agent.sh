@@ -25,9 +25,11 @@ if ! mkdir -m 700 "$lock"; then
     exit 1
 fi
 staged="$lock/yieldd.app"
+builder_active=false
 cleanup() {
     result=$?
     trap - EXIT
+    if "$builder_active"; then container builder stop || :; fi
     rm -rf "$lock"
     exit "$result"
 }
@@ -47,16 +49,19 @@ codesign --verify --strict "$staged"
 platform=$("$staged/Contents/MacOS/yieldd" agent install --preflight-only "$@")
 case "$platform" in
     linux)
-        if ! container build -t local/yieldd-guest:dev "$repository_directory/Guest"; then
-            container builder stop
-            exit 1
-        fi
+        builder_active=true
+        container build -t local/yieldd-guest:dev "$repository_directory/Guest"
         container builder stop
+        builder_active=false
         ;;
     macos) ;;
     *) echo "Unexpected installation preflight: $platform" >&2; exit 1 ;;
 esac
 
+if [ -e "$installed_application" ] || [ -L "$installed_application" ]; then
+    echo "Install destination appeared during staging: $installed_application" >&2
+    exit 1
+fi
 mv "$staged" "$installed_application"
 # Registration may have saved credentials or started a worker even if it reports failure.
 "$installed_application/Contents/MacOS/yieldd" agent install "$@"
