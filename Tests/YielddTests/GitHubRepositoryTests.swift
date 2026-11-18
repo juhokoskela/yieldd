@@ -3,12 +3,8 @@ import Testing
 @testable import Yieldd
 
 @Test
-func parsesRepositoryFullName() throws {
-    let repository = try GitHubRepository("juhokoskela/yieldd")
-
-    #expect(repository.owner == "juhokoskela")
-    #expect(repository.name == "yieldd")
-    #expect(repository.fullName == "juhokoskela/yieldd")
+func acceptsRepositoryFullName() throws {
+    try validateGitHubRepository("juhokoskela/yieldd")
 }
 
 @Test(arguments: [
@@ -23,6 +19,6 @@ func parsesRepositoryFullName() throws {
 ])
 func rejectsInvalidRepositoryFullName(_ value: String) {
     #expect(throws: GitHubRepositoryError.invalidFormat(value)) {
-        try GitHubRepository(value)
+        try validateGitHubRepository(value)
     }
 }
