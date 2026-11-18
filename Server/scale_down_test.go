@@ -27,7 +27,8 @@ func TestPositiveScaleDownRetiresUnusedLocalAssignmentsBeforeFallback(t *testing
 					t.Fatal(err)
 				}
 				if phase == localAccepted {
-					if err := a.register(t.Context()); err != nil {
+					// GitHub may have created the runner before the registration response was lost.
+					if _, err := a.generateRegistration(t.Context()); err != nil {
 						t.Fatal(err)
 					}
 				}
