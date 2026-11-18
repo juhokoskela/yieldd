@@ -128,3 +128,54 @@ func TestListenerRejectsOperationsAfterShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestColdSessionSetupDoesNotBlockIssuedDevice(t *testing.T) {
+	c, world, store, req := localFixture(t)
+	if _, err := c.acceptDevice(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	dir := store.root.Name()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	p, err := openPlatformCoordinator(ctx, c.state.Config, dir, "test-token", false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCoordinators(p)
+	c = p.loop.worker
+	c.runners, c.bootstrap = world, world
+	if _, err := newDeviceRouter(testDevice, []*coordinatorLoop{p.loop}); err != nil {
+		t.Fatal(err)
+	}
+	if !c.demandUnavailable {
+		t.Fatal("restored offers eligible before fresh demand")
+	}
+	entered := make(chan struct{})
+	p.newSession = func(ctx context.Context) (listenerSession, error) {
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.run(ctx, false) }()
+	<-entered
+	if err := p.loop.invoke(ctx, func(ctx context.Context) error {
+		auth, err := c.renewDevice(ctx, req)
+		if err != nil {
+			return err
+		}
+		if !auth.Continue {
+			return errors.New("issued guest lost authorization")
+		}
+		return c.completeDevice(ctx, req)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

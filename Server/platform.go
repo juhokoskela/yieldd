@@ -68,23 +68,36 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if recoverOnly {
 		return p, nil
 	}
-	id, err := ensurePlatformScaleSet(ctx, client, cfg, saved.ScaleSetID)
+	worker.demandUnavailable = true
+	savedID, owner := saved.ScaleSetID, saved.Owner
+	// Session setup can overlap device requests; keep its SDK client independent.
+	sessionClient, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
 	if err != nil {
 		return nil, err
 	}
-	if saved.ScaleSetID == 0 {
-		saved.ScaleSetID = id
-		if err := store.save(saved); err != nil {
-			return nil, err
-		}
-	}
-	owner := saved.Owner
-	p.scaleSetID = id
 	p.newSession = func(ctx context.Context) (listenerSession, error) {
-		return client.MessageSessionClient(ctx, id, owner)
-	}
-	if err := p.openMessages(ctx); err != nil {
-		return nil, err
+		if p.scaleSetID == 0 {
+			id, err := ensurePlatformScaleSet(ctx, sessionClient, cfg, savedID)
+			if err != nil {
+				worker.logger.Warn("Scale set verification failed; provisioning suspended", "error", err)
+				return nil, err
+			}
+			if savedID == 0 {
+				if err := p.loop.invoke(ctx, func(context.Context) error {
+					next := *worker.state
+					next.ScaleSetID = id
+					if err := worker.save(&next); err != nil {
+						return &journalWriteError{err}
+					}
+					*worker.state = next
+					return nil
+				}); err != nil {
+					return nil, err
+				}
+			}
+			p.scaleSetID = id
+		}
+		return sessionClient.MessageSessionClient(ctx, p.scaleSetID, owner)
 	}
 	return p, nil
 }
@@ -173,7 +186,13 @@ func (p *platformCoordinator) listen() error {
 	delay := listenerRetryDelay
 	for {
 		started := time.Now()
-		err := p.messages.Run(ctx, p.loop)
+		var err error
+		if p.messages == nil {
+			err = p.openMessages(ctx)
+		}
+		if err == nil {
+			err = p.messages.Run(ctx, p.loop)
+		}
 		var callback *callbackError
 		if errors.As(err, &callback) {
 			return callback
