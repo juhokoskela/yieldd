@@ -1,0 +1,36 @@
+name: Disposable guest without cache grants
+on:
+  push:
+    branches: [test/cache-local-none-20261118]
+permissions:
+  contents: read
+jobs:
+  no-cache-grants:
+    cache-mode: none
+    runs-on: yieldd-cache-proof-70c06d077868-macos-none
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Ordinary command
+        run: uname -m
+      - uses: ./actions/native-cache
+        id: native
+      - name: Verify the disk was skipped and create an artifact
+        shell: bash
+        env:
+          NATIVE_PATH: ${{ steps.native.outputs.path }}
+        run: |
+          set -eu
+          test "$NATIVE_PATH" = "$YIELDD_CACHE_PATH"
+          case "$NATIVE_PATH" in "$RUNNER_TEMP"/*) ;; *) exit 1;; esac
+          test ! -e /Volumes/YielddCache
+          printf 'no-cache-fallback-ok\nrunner=%s\n' "$RUNNER_NAME" > "$NATIVE_PATH/none-proof.txt"
+          cp "$NATIVE_PATH/none-proof.txt" "$RUNNER_TEMP/none-proof.txt"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: no-cache-grants
+          path: ${{ runner.temp }}/none-proof.txt
+          if-no-files-found: error
+          retention-days: 3
