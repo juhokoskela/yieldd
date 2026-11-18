@@ -279,6 +279,14 @@ func TestPlatformLabelsPreserveLinuxIdentity(t *testing.T) {
 	if id, err := ensurePlatformScaleSet(t.Context(), mac, cfg, 0); err != nil || id != 42 {
 		t.Fatal(id, err)
 	}
+	// A discovered set can have the correct labels but still replace the pinned guest worker.
+	mac.set.RunnerSetting.DisableUpdate = false
+	if _, err := ensurePlatformScaleSet(t.Context(), mac, cfg, 42); err != nil || mac.updated != 1 || !mac.set.RunnerSetting.DisableUpdate {
+		t.Fatal("did not disable runner updates on the existing scale set", mac.updated, err)
+	}
+	if _, err := ensurePlatformScaleSet(t.Context(), mac, cfg, 42); err != nil || mac.updated != 1 {
+		t.Fatal("unnecessary update to matching settings", mac.updated, err)
+	}
 	if mac.requestedName != "yieldd-macos" || len(mac.set.Labels) != 1 || mac.set.Labels[0].Name != "yieldd-macos" {
 		t.Fatal(mac)
 	}
