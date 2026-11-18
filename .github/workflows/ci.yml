@@ -36,6 +36,9 @@ jobs:
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
 
+      - name: Test archive storage and cache policy
+        run: Scripts/build-cache-server.sh --test
+
       - name: Verify cache authorization and archive transfers
         working-directory: Prototypes/RunnerNetwork
         env:
