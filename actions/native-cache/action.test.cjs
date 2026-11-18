@@ -55,6 +55,7 @@ test('opt-in opens the disk and requests a save at the same endpoint', t => {
       assert.equal(options.method, 'POST')
       assert.equal(options.redirect, 'error')
       assert.equal(options.headers.Authorization, 'Bearer fixture-token')
+      if (process.env.REJECT_SAVE) return new Response(null, {status: 503})
       return Response.json({writable: process.env.WRITABLE === 'true'})
     }
   `)
@@ -71,5 +72,7 @@ test('opt-in opens the disk and requests a save at the same endpoint', t => {
   assert.equal(fs.readFileSync(env.GITHUB_STATE, 'utf8'), 'writable=true\n')
   env.EXPECTED = 'save'
   env.STATE_writable = 'true'
-  run('post.cjs')
+  assert.equal(run('post.cjs').toString(), '')
+  env.REJECT_SAVE = 'true'
+  assert.match(run('post.cjs').toString(), /::warning::.*save request/)
 })
