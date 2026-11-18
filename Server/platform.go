@@ -63,12 +63,26 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if recoverOnly {
 		return p, nil
 	}
+	// An offered lease has never reached registration. A Mac holding an old
+	// offer will get a rejection and poll again after reconnection.
+	droppedOffer := false
+	for name, l := range saved.Leases {
+		if l.Local != nil && l.Local.Phase == localOffered && !l.CleanupIntent {
+			delete(saved.Leases, name)
+			droppedOffer = true
+		}
+	}
+	if droppedOffer {
+		if err := store.save(saved); err != nil {
+			return nil, &journalWriteError{err}
+		}
+	}
 	worker.demandUnavailable = true
 	savedID, owner := saved.ScaleSetID, saved.Owner
 	// Session setup can overlap device requests; keep its SDK client independent.
 	sessionClient, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
 	if err != nil {
-		return nil, err
+		return nil, &sdkError{"initialize session client", err}
 	}
 	p.newSession = func(ctx context.Context) (listenerSession, error) {
 		if p.scaleSetID == 0 {

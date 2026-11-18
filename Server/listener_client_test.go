@@ -218,3 +218,20 @@ func TestColdSessionSetupDoesNotBlockIssuedDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOpeningQueueRetractsUnacceptedOfferBeforeRestoringCapacity(t *testing.T) {
+	c, _, store, req := localFixture(t)
+	path := store.root.Name()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := openPlatformCoordinator(t.Context(), c.state.Config, path, "unused", false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCoordinators(p)
+	saved, err := p.store.read()
+	if err != nil || saved.Leases[req.Runner] != nil {
+		t.Fatal("old offer held a slot", err)
+	}
+}

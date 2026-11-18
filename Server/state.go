@@ -126,7 +126,10 @@ func (s *stateStore) load(c config) (*state, error) {
 	}
 	if value.Config != c {
 		old := value.Config
-		if len(value.Leases) > 0 || old.Repository != c.Repository || old.Platform != c.Platform || old.DeviceID != c.DeviceID || old.validate() != nil || c.validate() != nil {
+		if old.Repository != c.Repository || old.Platform != c.Platform || old.DeviceID != c.DeviceID {
+			return nil, errors.New("state belongs to a different configuration; finish recovery with the original identity and use a fresh state directory for the new one")
+		}
+		if len(value.Leases) > 0 || old.validate() != nil || c.validate() != nil {
 			return nil, errors.New("state belongs to a different configuration; recover with its original configuration")
 		}
 		value.Config = c
