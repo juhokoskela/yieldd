@@ -214,6 +214,13 @@ final class MacOSVirtualizationBackend: NativeCacheBackend {
         guard let volumeID = lock.withLock({ guest.cacheVolumeID }) else {
             throw MacOSVirtualizationBackendError.cacheVolumeUnknown
         }
+        struct VolumeInfo: Decodable { let VolumeUUID: UUID; let MountPoint: String; let VolumeName: String }
+        let result = try guest.ssh.execute(["/usr/sbin/diskutil", "info", "-plist", "/Volumes/YielddCache"],
+                                           timeout: 10, outputCapture: .tail(maxBytes: 64 * 1024))
+        let mounted = try PropertyListDecoder().decode(VolumeInfo.self, from: result.stdout)
+        guard mounted.VolumeUUID == volumeID, mounted.MountPoint == "/Volumes/YielddCache", mounted.VolumeName == "YielddCache" else {
+            throw MacOSVirtualizationBackendError.cacheVolumeChanged
+        }
         try guest.ssh.execute(["/usr/sbin/diskutil", "unmount", volumeID.uuidString], timeout: 60, outputCapture: .tail(maxBytes: 4096))
         let completion = VirtualMachineCompletion<Void>()
         machine.detachNativeDisk(completion: completion.complete)
@@ -302,7 +309,7 @@ final class MacOSVirtualizationBackend: NativeCacheBackend {
 
 enum MacOSVirtualizationBackendError: Error, LocalizedError {
     case notReady(RunnerID)
-    case cacheVolumeUnknown
+    case cacheVolumeUnknown, cacheVolumeChanged
     case templateInsideCloneRoot
 
     var errorDescription: String? {
@@ -311,6 +318,8 @@ enum MacOSVirtualizationBackendError: Error, LocalizedError {
             "macOS runner \(id.value) is not ready."
         case .cacheVolumeUnknown:
             "The guest could not identify the mounted APFS cache volume."
+        case .cacheVolumeChanged:
+            "The APFS cache disk changed its name, mount point, or volume identity during the job."
         case .templateInsideCloneRoot:
             "Move the macOS template outside the managed runner clone directory before retrying. Subsequent recovery commands may delete templates stored there."
         }

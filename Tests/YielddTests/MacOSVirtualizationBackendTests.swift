@@ -149,30 +149,38 @@ func macOSBackendRefusesOccupiedCacheMountBeforeAttaching() throws {
     try backend.destroy(macOSBackendID)
 }
 
-@Test(arguments: [false, true])
-func macOSBackendDetachesCacheOnlyAfterGuestUnmount(unmountFails: Bool) throws {
+@Test(arguments: ["success", "unmount-error", "renamed", "different-volume", "moved"])
+func macOSBackendDetachesCacheOnlyAfterGuestUnmount(outcome: String) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
     let volumeID = UUID()
+    let info = ["VolumeUUID": (outcome == "different-volume" ? UUID() : volumeID).uuidString,
+                "MountPoint": outcome == "moved" ? "/Volumes/Elsewhere" : "/Volumes/YielddCache",
+                "VolumeName": outcome == "renamed" ? "Renamed" : "YielddCache"]
+    let plist = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()), .success(processResult()), .success(processResult()),
         .success(processResult(stdout: volumeID.uuidString + "\n")),
-        unmountFails ? .failure(TestFailure.cleanup) : .success(processResult())
+        .success(processResult(stdout: String(decoding: plist, as: UTF8.self))),
+        outcome == "unmount-error" ? .failure(TestFailure.cleanup) : .success(processResult())
     ])
     let backend = try makeBackend(fixture, executor: executor, makeMachine: { _, _, _ in machine })
     try backend.create(id: macOSBackendID, memory: .full)
     let image = fixture.rootURL.appendingPathComponent("cache.img")
     try backend.attachNativeCache(image: image, cold: false, on: macOSBackendID)
     #expect(machine.attachedNativeImage == image)
-    if unmountFails {
+    switch outcome {
+    case "unmount-error":
         #expect(throws: TestFailure.cleanup) { try backend.detachNativeCache(on: macOSBackendID) }
-        #expect(machine.nativeDetachCount == 0)
-    } else {
+    case "success":
         try backend.detachNativeCache(on: macOSBackendID)
-        #expect(machine.nativeDetachCount == 1)
+        #expect(executor.requests.last?.arguments.last == "'/usr/sbin/diskutil' 'unmount' '\(volumeID.uuidString)'")
+    default:
+        #expect(throws: MacOSVirtualizationBackendError.self) { try backend.detachNativeCache(on: macOSBackendID) }
+        #expect(executor.requests.last?.arguments.last == "'/usr/sbin/diskutil' 'info' '-plist' '/Volumes/YielddCache'")
     }
-    #expect(executor.requests.last?.arguments.last == "'/usr/sbin/diskutil' 'unmount' '\(volumeID.uuidString)'")
+    #expect(machine.nativeDetachCount == (outcome == "success" ? 1 : 0))
     try backend.destroy(macOSBackendID)
     #expect(machine.isStopped)
 }

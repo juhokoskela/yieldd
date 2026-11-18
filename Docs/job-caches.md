@@ -55,3 +55,20 @@ To share bytes across repositories, put their exact branch refs and numeric repo
 ```
 
 Both branches can then read and replace shared build state. A pull request that GitHub allows to read either base branch can also read that shared cache. For a `pull_request` run, writes stay in its repository’s merge-ref scope. A workflow that explicitly grants default-branch writes to another event, such as `pull_request_target`, can update shared state. See [GitHub's cache permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#cache-access-for-low-trust-workflow-triggers). Only group repositories whose workflows can be trusted with each other's cached files. Changing group membership starts a fresh shared namespace. Archive keys remain immutable within a scope, and archives and native disks use separate storage.
+
+## Reset a native cache
+
+If several jobs on the same platform fail to attach a saved native disk, check the agent log for the underlying mount error. A guest failure leaves the published disk available to other jobs. A local operator can start all native caches for the affected platform empty and keep the old disk images for inspection.
+
+1. For an installed agent, have the original enrollment arguments and device token ready. From the installed app, run `yieldd agent drain` and wait for it to finish, then run `yieldd agent uninstall`. Uninstall removes the enrollment and the Keychain token. Keep the coordinator available through cleanup. For foreground `connect`, stop submitting jobs, wait for active jobs and cleanup to finish, stop the process, and wait for it to exit. If cleanup or recovery is pending, finish it with the original store in place.
+2. Run `yieldd storage status` to verify the mounted guest volume. On that volume, rename the platform directory to a unique sibling. The directory names are `macOS` and `linux`. For example, for macOS:
+
+   ```sh
+   cd "<guest volume>/job-caches/native" || exit 1
+   mv macOS "macOS.quarantined-$(uuidgen)"
+   ```
+
+   The rename preserves the index and disk images together. The quarantined copies still count against the volume quota. Leave the archives, the other platform, and the agent's recovery records in place.
+3. For an installed agent, set `YIELDD_CLIENT_TOKEN` and run `yieldd agent install` from the same signed app with the original server, device ID, platforms, and template. Check `yieldd agent status`, then run `yieldd agent resume`. For foreground operation, restart the original `connect` command. Run a trusted job with the native cache action twice on this Mac to confirm a cold start followed by reuse.
+
+To undo the reset, repeat the drain and stop procedure, rename any newly created platform directory to another unique sibling, then move the original quarantined directory back to its exact platform name before restarting. Keep guest disk images on disk for inspection in a disposable guest.

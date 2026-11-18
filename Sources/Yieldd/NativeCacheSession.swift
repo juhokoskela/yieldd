@@ -81,7 +81,14 @@ final class NativeCacheSession {
                     // Either operation can allocate resources before throwing.
                     state = .discardOnly
                     let disk = try store.open(id, readable: request.grants.readScopes, writable: request.grants.writeScope)
-                    try backend.attachNativeCache(image: disk.url, cold: disk.isCold, on: id)
+                    do {
+                        try backend.attachNativeCache(image: disk.url, cold: disk.isCold, on: id)
+                    } catch {
+                        if !disk.isCold, !isCancellation(error) {
+                            response.error = "The \(backend.platform.rawValue) guest could not attach its saved native cache. If this keeps happening, see Docs/job-caches.md#reset-a-native-cache."
+                        }
+                        throw error
+                    }
                     state = .attached(request.grants, disk)
                 default:
                     throw NativeCacheSessionError.inconsistentGrant
@@ -97,8 +104,9 @@ final class NativeCacheSession {
                 }
             }
         } catch {
-            writeToStandardError("Native cache \(request.operation.rawValue) for \(id.value) failed: \(describeError(error))\n")
-            response.error = "The runner could not \(request.operation.rawValue) the native cache."
+            let detail = [describeError(error), response.error].compactMap { $0 }.joined(separator: " ")
+            writeToStandardError("Native cache \(request.operation.rawValue) for \(id.value) failed: \(detail)\n")
+            response.error = response.error ?? "The runner could not \(request.operation.rawValue) the native cache."
         }
         try writePrivateRunnerFile(JSONEncoder().encode(response), to: directory.appendingPathComponent("native-response"))
         lastRequest = request.id

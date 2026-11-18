@@ -66,6 +66,20 @@ struct NativeCacheSessionTests {
         #expect(try fixture.checkCold("yieldd-next"))
     }
 
+    @Test func failedWarmAttachmentPreservesSeedAndIdentifiesPlatformForRecovery() throws {
+        let fixture = try NativeSessionFixture()
+        defer { fixture.remove() }
+        let seedID = RunnerID(value: "yieldd-seed")
+        try fixture.store.publish(fixture.store.open(seedID, readable: [], writable: fixture.scope))
+        try fixture.store.discard(seedID)
+        fixture.backend.failAttach = true
+        let error = try #require(try fixture.request("open", write: nil).error)
+        #expect(error.contains("linux"))
+        #expect(error.contains("Docs/job-caches.md#reset-a-native-cache"))
+        try fixture.session.discard()
+        #expect(try !fixture.checkCold("yieldd-next"))
+    }
+
     @Test func mismatchedRepositoryOrChangedGrantCannotWrite() throws {
         let fixture = try NativeSessionFixture()
         defer { fixture.remove() }
