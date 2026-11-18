@@ -28,7 +28,7 @@ func main() {
 	log.SetOutput(io.Discard)
 	socket := flag.String("socket", "", "Datagram socket in a private, host-owned directory")
 	runner := flag.String("runner", "", "Host-issued runner identity for diagnostic summaries")
-	platform := flag.String("platform", "", "Runner platform for diagnostic summaries: linux or macos")
+	platform := flag.String("platform", "", "Runner platform (linux or macos), used for diagnostics and Linux cache disk export")
 	cacheSocket := flag.String("cache-socket", "", "Private archive service socket")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -149,7 +149,7 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 		defer func() { cancel(); server.Close(); listener.Close(); cache.client.CloseIdleConnections() }()
 	}
 	if cacheSocket != "" && counts.identity.Platform == "linux" {
-		disk, err := network.Listen("tcp", "192.168.127.1:7342")
+		disk, err := network.Listen("tcp", nativeDiskAddress)
 		if err != nil {
 			return err
 		}

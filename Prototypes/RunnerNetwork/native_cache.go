@@ -7,8 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -38,14 +38,8 @@ type nativeCacheResponse struct {
 func nativeCacheHandler(directory string, verify func(context.Context, string) (nativeCacheGrants, error)) http.Handler {
 	var active sync.Mutex
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		op := strings.TrimPrefix(r.URL.Path, "/yieldd/native/")
-		if r.Method != http.MethodPost || (op != "open" && op != "save") || r.URL.RawQuery != "" || r.ContentLength != 0 {
+		if r.ContentLength != 0 {
 			http.Error(w, "invalid native cache request", http.StatusBadRequest)
-			return
-		}
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || token == "" {
-			http.Error(w, "cache token required", http.StatusUnauthorized)
 			return
 		}
 		if !active.TryLock() {
@@ -55,12 +49,12 @@ func nativeCacheHandler(directory string, verify func(context.Context, string) (
 		defer active.Unlock()
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 		defer cancel()
-		grants, err := verify(ctx, token)
+		grants, err := verify(ctx, r.Header.Get("Authorization"))
 		if err != nil {
 			http.Error(w, "cache authorization failed", http.StatusForbidden)
 			return
 		}
-		request := nativeCacheRequest{ID: rand.Text(), Operation: op, Grants: grants}
+		request := nativeCacheRequest{ID: rand.Text(), Operation: path.Base(r.URL.Path), Grants: grants}
 		response, err := exchangeNativeCacheRequest(ctx, directory, request)
 		if err != nil {
 			http.Error(w, "native cache owner unavailable", http.StatusServiceUnavailable)

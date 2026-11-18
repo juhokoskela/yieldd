@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	cacheAddress     = gatewayIP + ":7341"
-	cacheRPC         = "/twirp/github.actions.results.api.v1.CacheService/"
-	artifactRPC      = "/twirp/github.actions.results.api.v1.ArtifactService/"
-	maxTransferPaths = 4096
+	cacheAddress      = gatewayIP + ":7341"
+	nativeDiskAddress = gatewayIP + ":7342"
+	cacheRPC          = "/twirp/github.actions.results.api.v1.CacheService/"
+	artifactRPC       = "/twirp/github.actions.results.api.v1.ArtifactService/"
+	maxTransferPaths  = 4096
 )
 
 type relayCache struct {
@@ -160,31 +161,24 @@ func (c *relayCache) rememberTransfer(resp *http.Response) error {
 }
 
 func (c *relayCache) matches(authorization string) bool {
-	token, ok := strings.CutPrefix(authorization, "Bearer ")
-	if !ok || token == "" {
-		return false
-	}
-	digest := sha256.Sum256([]byte(token))
+	digest := sha256.Sum256([]byte(authorization))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.bound && subtle.ConstantTimeCompare(digest[:], c.digest[:]) == 1
 }
 
 func (c *relayCache) bind(w http.ResponseWriter, r *http.Request) {
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	authorization := r.Header.Get("Authorization")
+	token, ok := strings.CutPrefix(authorization, "Bearer ")
 	if !ok || token == "" {
 		http.Error(w, "job authorization required", http.StatusUnauthorized)
 		return
 	}
-	digest := sha256.Sum256([]byte(token))
+	digest := sha256.Sum256([]byte(authorization))
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.bound {
-		if subtle.ConstantTimeCompare(c.digest[:], digest[:]) != 1 {
-			http.Error(w, "runner already bound", http.StatusConflict)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+	if c.bound && subtle.ConstantTimeCompare(c.digest[:], digest[:]) != 1 {
+		http.Error(w, "runner already bound", http.StatusConflict)
 		return
 	}
 	// Binding pins the credential delivered to this VM before workflow code runs.
@@ -194,13 +188,13 @@ func (c *relayCache) bind(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (c *relayCache) verify(ctx context.Context, token string) (nativeCacheGrants, error) {
+func (c *relayCache) verify(ctx context.Context, authorization string) (nativeCacheGrants, error) {
 	var grants nativeCacheGrants
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://cache/yieldd/verify", nil)
 	if err != nil {
 		return grants, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", authorization)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return grants, err

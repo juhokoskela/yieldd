@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,8 +21,8 @@ func TestNativeCacheExchangeUsesVerifiedScopesAndMatchingResponse(t *testing.T) 
 	req.Header.Set("Authorization", "Bearer test-token")
 	reply := httptest.NewRecorder()
 	goDone := make(chan struct{})
-	handler := nativeCacheHandler(dir, func(_ context.Context, token string) (nativeCacheGrants, error) {
-		if token != "test-token" {
+	handler := nativeCacheHandler(dir, func(_ context.Context, authorization string) (nativeCacheGrants, error) {
+		if authorization != "Bearer test-token" {
 			return nativeCacheGrants{}, errors.New("wrong token")
 		}
 		return nativeCacheGrants{RepositoryID: "42", ReadScopes: []string{"allowed"}}, nil
@@ -87,23 +88,31 @@ func TestNativeCacheRejectsUnverifiedRequests(t *testing.T) {
 	handler := nativeCacheHandler(dir, func(context.Context, string) (nativeCacheGrants, error) {
 		return nativeCacheGrants{}, errors.New("not authorized")
 	})
+	relay := &relayCache{native: handler}
+	bind := httptest.NewRequest(http.MethodPost, "/yieldd/bind", nil)
+	bind.Header.Set("Authorization", "Bearer bad")
+	relay.ServeHTTP(httptest.NewRecorder(), bind)
 	for _, test := range []struct {
 		method string
 		url    string
 		token  string
+		body   string
 		want   int
 	}{
-		{http.MethodPost, "/yieldd/native/save", "", http.StatusUnauthorized},
-		{http.MethodPost, "/yieldd/native/open", "bad", http.StatusForbidden},
-		{http.MethodPost, "/yieldd/native/open?scope=other", "bad", http.StatusBadRequest},
-		{http.MethodGet, "/yieldd/native/open", "bad", http.StatusBadRequest},
+		{http.MethodPost, "/yieldd/native/save", "", "", http.StatusUnauthorized},
+		{http.MethodPost, "/yieldd/native/open", "bad", "", http.StatusForbidden},
+		{http.MethodPost, "/yieldd/native/open?scope=other", "bad", "", http.StatusNotFound},
+		{http.MethodGet, "/yieldd/native/open", "bad", "", http.StatusNotFound},
+		{http.MethodPost, "/yieldd/native/open", "another", "", http.StatusUnauthorized},
+		{http.MethodPost, "/yieldd/native/delete", "bad", "", http.StatusNotFound},
+		{http.MethodPost, "/yieldd/native/open", "bad", "{}", http.StatusBadRequest},
 	} {
-		req := httptest.NewRequest(test.method, test.url, nil)
+		req := httptest.NewRequest(test.method, test.url, strings.NewReader(test.body))
 		if test.token != "" {
 			req.Header.Set("Authorization", "Bearer "+test.token)
 		}
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
+		relay.ServeHTTP(w, req)
 		if w.Code != test.want {
 			t.Errorf("%s %s: got %d, want %d", test.method, test.url, w.Code, test.want)
 		}
