@@ -309,19 +309,6 @@ for (const mode of ['idle', 'started', 'marker-removed', 'home-recreated']) {
     });
 }
 
-test('bootstrap workflow leaves execution limits to GitHub', async () => {
-    const workflow = await readFile(join(__dirname, '../../workflows/runner-bootstrap.yml'), 'utf8');
-    assert.doesNotMatch(workflow, /timeout-minutes:/u);
-});
-
-test('manual smoke routing matches its unique JIT label instead of the shared scale-set label', async () => {
-    const workflow = await readFile(join(__dirname, '../../workflows/runner-bootstrap-test.yml'), 'utf8');
-    const guide = await readFile(join(__dirname, '../../../Docs/runner-bootstrap-prototype.md'), 'utf8');
-    assert.match(workflow, /^\s+runs-on: \$\{\{ inputs\.runner-name \}\}$/mu);
-    assert.ok(guide.includes('-f "labels[]=$runner_name"'));
-    assert.doesNotMatch(guide, /-f ['"]labels\[\]=yieldd['"]/u);
-});
-
 test('cancellation escalates for a child ignoring INT and preserves its identity', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'yieldd-bootstrap-test-'));
     const controller = new AbortController();

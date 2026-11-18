@@ -208,6 +208,8 @@ If setup included `--macos-fallback-runner '"macos-26"'` or `--repository-routes
 
 Targeted recovery validates the full deployment inventory and reconciles only the named lease. Set `repository`, `platform`, and `runner` to the recorded values in both examples above. Use `--recover-all` only when intentionally cancelling and cleaning every queue. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. An empty queue can adopt new infrastructure, fallback, and local-only routing under its original identity. Finish outstanding leases using their recorded route first. Never delete an active lease to force a retry.
 
+The manual fixed-secret bootstrap experiment has been retired. For old manual runs, finish both workflows, reconcile the exact runner registration and then remove its `YIELDD_BOOTSTRAP_JIT` secret. Managed fallback continues to use the infrastructure repository workflow and a separate secret per assignment.
+
 ## Validation status
 
 Local tests exercise the upstream listener callback integration, encrypted HTTP credential delivery, dispatch identity, interrupted provisioning, exclusive state ownership, and cleanup failures. CI runs the Go race detector and vet. These checks do not establish live provider behavior for new configurations.
