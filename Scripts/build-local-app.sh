@@ -4,17 +4,24 @@ set -eu
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_directory=$(dirname -- "$script_directory")
-application="$repository_directory/.build/yieldd.app"
 executable="$repository_directory/.build/release/yieldd"
 entitlements="$repository_directory/Packaging/yieldd.entitlements"
 signing_identity=${YIELDD_SIGNING_IDENTITY:--}
 
 cd "$repository_directory"
+if [ "$signing_identity" != "-" ] && ! security find-identity -v -p codesigning |
+    awk '/"Apple Development:/ && $2 == toupper(ENVIRON["YIELDD_SIGNING_IDENTITY"]) { found = 1 } END { exit !found }'
+then
+    echo "No valid Apple Development identity matches YIELDD_SIGNING_IDENTITY. Check the fingerprint, private key, and WWDR G3 intermediate." >&2
+    exit 1
+fi
 swift build -c release
 bash Scripts/build-network-relay.sh
 plutil -lint Packaging/Info.plist Packaging/dev.yieldd.agent.plist "$entitlements" >/dev/null
 
-rm -rf "$application"
+staging=$(mktemp -d "$repository_directory/.build/.yieldd-package.XXXXXX")
+trap 'rm -rf "$staging"' EXIT
+application="$staging/yieldd.app"
 mkdir -p \
     "$application/Contents/MacOS" \
     "$application/Contents/Helpers" \
@@ -37,4 +44,16 @@ virtualization_entitlement=$(
 )
 [ "$virtualization_entitlement" = true ]
 
-echo "Built $application"
+destination="$repository_directory/.build/yieldd.app"
+swift - "$application" "$destination" <<'SWIFT'
+import Foundation
+let staged = URL(fileURLWithPath: CommandLine.arguments[1])
+let destination = URL(fileURLWithPath: CommandLine.arguments[2])
+do {
+    _ = try FileManager.default.replaceItemAt(destination, withItemAt: staged, options: .usingNewMetadataOnly)
+} catch {
+    fputs("Could not publish the verified yieldd.app: \(error.localizedDescription)\n", stderr)
+    exit(1)
+}
+SWIFT
+echo "Built $destination"
