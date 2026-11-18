@@ -13,8 +13,7 @@ struct NativeCacheStore {
         let bytes: Int64
     }
 
-    // This record is outside the guest's exchange directory. Only a stopped guest's
-    // original image can replace the generation the job saw when it started.
+    // Only the original image can replace the generation the job saw when it started.
     private struct Checkout: Codable {
         let writable: String?
         let previous: UUID?
@@ -69,7 +68,7 @@ struct NativeCacheStore {
     func jobDirectory(_ id: RunnerID) throws -> URL {
         try validate()
         let job = try jobPath(id)
-        for url in [directory, jobs, job, job.appendingPathComponent("exchange")] {
+        for url in [directory, jobs, job] {
             try privateDirectory(url)
         }
         return job
@@ -108,7 +107,7 @@ struct NativeCacheStore {
         }
         let checkout = Checkout(writable: writable, previous: previous, inode: info.st_ino, device: info.st_dev, size: info.st_size)
         try writePrivateRunnerFile(JSONEncoder().encode(checkout), to: record)
-        let image = job.appendingPathComponent("exchange/cache.img")
+        let image = job.appendingPathComponent("cache.img")
         guard renamex_np(staging.path, image.path, UInt32(RENAME_EXCL)) == 0 else { throw lastError() }
         return NativeCacheDisk(url: image, isCold: cold)
     }
@@ -133,7 +132,7 @@ struct NativeCacheStore {
         try withLock {
             var entries = try readIndex()
             guard entries[target]?.generation == checkout.previous else { return }
-            let image = job.appendingPathComponent("exchange/cache.img")
+            let image = job.appendingPathComponent("cache.img")
             let fd = Darwin.open(image.path, O_NOFOLLOW | O_NONBLOCK | O_RDONLY | O_CLOEXEC)
             guard fd >= 0 else { throw lastError() }
             defer { close(fd) }
