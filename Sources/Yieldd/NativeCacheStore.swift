@@ -64,8 +64,7 @@ struct NativeCacheStore {
         return jobs.appendingPathComponent(id.value)
     }
 
-    @discardableResult
-    func jobDirectory(_ id: RunnerID) throws -> URL {
+    private func jobDirectory(_ id: RunnerID) throws -> URL {
         try validate()
         let job = try jobPath(id)
         for url in [directory, jobs, job] {

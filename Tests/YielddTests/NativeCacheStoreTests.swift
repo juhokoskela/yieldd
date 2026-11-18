@@ -114,7 +114,9 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     defer { try? FileManager.default.removeItem(at: root) }
     let store = NativeCacheStore(root: root, platform: .linux)
     #expect(throws: JobCacheError.self) { try store.open(runner(), readable: ["../seed"], writable: nil) }
-    #expect(throws: RunnerLeaseError.self) { try store.jobDirectory(.init(value: "yieldd-../sibling")) }
+    #expect(throws: RunnerLeaseError.self) {
+        try store.open(.init(value: "yieldd-../sibling"), readable: [mainScope], writable: nil)
+    }
 }
 
 @Test func macOSColdDiskHasTheRequestedRawSizeAndCanBeCloned() throws {
