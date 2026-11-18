@@ -1,6 +1,6 @@
 # Server-client architecture
 
-This document records the direction for connected mode. The [Go coordinator prototype](Server/README.md) implements one-repository Scale Set demand and hosted provisioning. The first [connected Mac slice](Docs/connected-mac-prototype.md) adds one foreground Linux ARM64 client, expiring offers, and local-first selection, pending live acceptance. Multiple devices remain future work. Connected agents can run at login through the existing LaunchAgent. Standalone service and agent modes do not require a server.
+Unattended execution requires the coordinator. It listens for GitHub demand by repository and platform, prefers connected Macs, and provisions hosted fallback where configured. Each Mac can connect in the foreground or through its login agent. See the [coordinator runbook](Server/README.md) and [Mac setup guide](Docs/connected-mac-prototype.md).
 
 ## Responsibilities
 
