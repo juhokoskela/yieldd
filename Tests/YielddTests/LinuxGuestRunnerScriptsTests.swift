@@ -47,7 +47,7 @@ func linuxReservedRunnerUsesTheHookAndPreservesListenerResult() throws {
     #expect(try ProcessExecutor().execute(status).requireSuccess(for: status).stdoutText ==
             "{\"phase\":\"exited\",\"jobStarted\":true,\"exitStatus\":7}\n")
     let replay = try ProcessExecutor().execute(fixture.request("control", ["output"]))
-    #expect(replay.terminationStatus == 7)
+    #expect(replay.terminationStatus == 0)
     #expect(replay.stdoutText == "listener output\n")
     let outcomes: [Result<ProcessResult, any Error>] = [
         .success(processResult()),

@@ -91,9 +91,7 @@ worker() {
     [[ -n "$ACTIONS_RUNNER_INPUT_JITCONFIG" ]] || return 1
     export ACTIONS_RUNNER_INPUT_JITCONFIG
     rm "$state_directory/jit-config"
-    if [[ -x "$HOME/.yieldd-job-started.sh" ]]; then
-        export ACTIONS_RUNNER_HOOK_JOB_STARTED="$HOME/.yieldd-job-started.sh"
-    fi
+    export ACTIONS_RUNNER_HOOK_JOB_STARTED="$HOME/.yieldd-job-started.sh"
     set +e
     ./run.sh 2>&1 | capture_output
     pipeline_status=("${PIPESTATUS[@]}")
@@ -112,18 +110,15 @@ start_or_attach_locked() {
     local process_group
 
     if [[ -f "$status_file" ]]; then
-        printf 'complete\n'
-        return
+        return 0
     fi
 
     process_group="$(read_process_group 2>/dev/null || true)"
     if [[ -n "$process_group" ]] && process_group_is_running "$process_group"; then
-        printf '%s\n' "$process_group"
-        return
+        return 0
     fi
     if [[ -f "$status_file" ]]; then
-        printf 'complete\n'
-        return
+        return 0
     fi
     if [[ -n "$process_group" ]]; then
         echo "the previous listener stopped without recording an exit status" >&2
@@ -137,7 +132,6 @@ start_or_attach_locked() {
     process_group=$!
     set +m
     write_state "$process_group" "$process_group_file"
-    printf '%s\n' "$process_group"
 }
 
 ready() {
@@ -182,9 +176,8 @@ case "$1" in
         ready
         ;;
     output)
-        result="$(read_status)"
-        cat "$output_file"
-        exit "$result"
+        read_status >/dev/null
+        exec cat "$output_file"
         ;;
     start)
         mkdir -p "$state_directory"

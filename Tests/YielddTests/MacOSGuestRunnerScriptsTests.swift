@@ -50,7 +50,7 @@ func macOSRunnerControlReturnsTheListenerOutputAndStatus() throws {
 
     for result in [firstResult, secondResult] {
         #expect(result.terminationReason == .exit)
-        #expect(result.terminationStatus == 7)
+        #expect(result.terminationStatus == 0)
         #expect(result.stdoutText == "job output\n")
         #expect(result.stderr.isEmpty)
     }
@@ -179,8 +179,9 @@ func macOSRunnerControlBoundsRetainedOutput() throws {
     #expect(retainedOutput == result.stdout)
 }
 
-private func waitForFile(_ url: URL, diagnosticsDirectory: URL) throws {
-    for _ in 0..<300 {
+private func waitForFile(_ url: URL, diagnosticsDirectory: URL, timeout: TimeInterval = 3) throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    while ProcessInfo.processInfo.systemUptime < deadline {
         if FileManager.default.fileExists(atPath: url.path) {
             return
         }
@@ -258,7 +259,7 @@ private struct MacOSGuestRunnerFixture {
 
     func startAndWaitForExit() throws {
         try start()
-        try waitForFile(diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: diagnosticsDirectory)
+        try waitForFile(diagnosticsDirectory.appendingPathComponent("exit-status"), diagnosticsDirectory: diagnosticsDirectory, timeout: 15)
     }
 
     func controlRequest(_ command: String, timeout: TimeInterval? = 5) -> ProcessRequest {

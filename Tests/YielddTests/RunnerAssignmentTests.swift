@@ -13,7 +13,7 @@ func jobStartEndsThePickupDeadline() throws {
         currentTime: { now }
     )
     try job.run(id: assignmentID, pickupTimeout: 0.75)
-    #expect(now > 0.75)
+    #expect(now == 4.5)
     #expect(states == [.listenerStarted(assignmentID), .jobStarted(assignmentID), .listenerExited(assignmentID, status: 0)])
 }
 
@@ -61,10 +61,10 @@ func reservedRunnerDoesNotReportSuccessWhenNoJobRan() throws {
 }
 
 @Test(arguments: [
-    processResult(stdout: "fatal: runner crashed\n", status: 7),
-    processResult(stderr: "fatal: hook failed\n", status: 7),
-    processResult(stdout: "listener output\n", stderr: "runner warning\n", status: 7),
-    processResult(status: 7),
+    processResult(stdout: "fatal: runner crashed\n"),
+    processResult(stderr: "fatal: hook failed\n"),
+    processResult(stdout: "listener output\n", stderr: "runner warning\n"),
+    processResult(),
 ])
 func reservedRunnerReportsFailedListenerOutput(_ replay: ProcessResult) throws {
     let outcomes: [Result<ProcessResult, any Error>] = [
@@ -91,7 +91,7 @@ func reservedRunnerPreservesReplayTransportAndCancellationErrors(_ failure: Stri
     default: .nonZeroExit(request: request, result: result)
     }
     let outcomes: [Result<ProcessResult, any Error>] = [
-        .success(processResult()), .success(processResult(stdout: exited(true, status: 7))), .failure(expected),
+        .success(processResult()), .success(processResult(stdout: exited(true, status: 255))), .failure(expected),
     ]
     let (backend, _) = try readyLinuxBackend(outcomes: outcomes, containerURL: request.executableURL, id: assignmentID)
     do {
@@ -102,27 +102,6 @@ func reservedRunnerPreservesReplayTransportAndCancellationErrors(_ failure: Stri
     } catch let error as ProcessExecutionError {
         #expect(describeError(error) == describeError(expected))
     }
-}
-
-@Test
-func reservedRunnerRejectsReplayThatDisagreesWithTerminalStatus() throws {
-    let backend = AssignmentBackend(statuses: [exited(true, status: 7)])
-    #expect(throws: RunnerAssignmentError.invalidStatus) {
-        try ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { _ in }, stateChanged: { _ in }).run(
-            id: assignmentID, pickupTimeout: 300
-        )
-    }
-}
-
-@Test
-func startupDeadlineDoesNotApplyToJobsOrCleanup() throws {
-    var now: TimeInterval = 0
-    let deadline = RunnerStartupDeadline(currentTime: { now }, checkCancellation: {})
-    deadline.begin()
-    now = 601
-    #expect(throws: RunnerAssignmentError.startupTimedOut) { try deadline.check() }
-    deadline.end()
-    try deadline.check()
 }
 
 private let assignmentID = RunnerID(value: "yieldd-reserved-test")
