@@ -122,7 +122,7 @@ func TestDeferredTerminalCleanupStillRequiresMatchingIdentity(t *testing.T) {
 	}
 	bad := c.state.Leases[names[2]]
 	w.runs[bad.RunID].ID++
-	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 2 || !c.identityPaused() {
+	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 2 || !c.verificationPaused() {
 		t.Fatal("deferred cleanup hid an identity mismatch", n, err, c.paused)
 	}
 	saved, err := store.load(c.state.Config)
@@ -130,11 +130,11 @@ func TestDeferredTerminalCleanupStillRequiresMatchingIdentity(t *testing.T) {
 		t.Fatal("cleanup intent was missing or recorded for an unverified run", saved, err)
 	}
 	before := w.getCalls
-	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 1 || !c.identityPaused() || w.getCalls != before {
+	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || n != 1 || !c.verificationPaused() || w.getCalls != before {
 		t.Fatal("deferred cleanup repeated status reads or cleared the identity pause", n, err, c.paused)
 	}
-	if c.state.Leases[bad.Name] == nil || w.runners[bad.Name] == nil || !slices.Equal(c.identityRunners, []string{bad.Name}) || w.dispatched != 3 {
-		t.Fatal("unverified execution was cleaned up or replayed", c.identityRunners, w.dispatched)
+	if c.state.Leases[bad.Name] == nil || w.runners[bad.Name] == nil || !slices.Equal(c.unverifiedRunners, []string{bad.Name}) || w.dispatched != 3 {
+		t.Fatal("unverified execution was cleaned up or replayed", c.unverifiedRunners, w.dispatched)
 	}
 }
 

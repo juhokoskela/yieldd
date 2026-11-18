@@ -33,30 +33,30 @@ type bootstrapAPI interface {
 }
 
 const (
-	maximumAssignments        = 16
-	defaultMaxFallbackRunners = 1
-	identityMaximumRetryDelay = time.Minute
+	maximumAssignments            = 16
+	defaultMaxFallbackRunners     = 1
+	verificationMaximumRetryDelay = time.Minute
 )
 
 var bootstrapIdentityMismatch = errors.New("bootstrap run identity does not match its lease")
 
 // One event loop owns every assignment in a repository/platform queue.
 type coordinator struct {
-	state              *state
-	save               func(*state) error
-	runners            runnerAPI
-	bootstrap          bootstrapAPI
-	logger             *slog.Logger
-	device             *deviceQueue
-	reportedLocalHold  map[string]localPhase
-	refreshDemand      bool
-	demandUnavailable  bool
-	paused             error
-	identityRunners    []string
-	identityRetryAt    time.Time
-	identityRetryDelay time.Duration
-	maxFallbackRunners int
-	lastHostedCleanup  string
+	state                  *state
+	save                   func(*state) error
+	runners                runnerAPI
+	bootstrap              bootstrapAPI
+	logger                 *slog.Logger
+	device                 *deviceQueue
+	reportedLocalHold      map[string]localPhase
+	refreshDemand          bool
+	demandUnavailable      bool
+	paused                 error
+	unverifiedRunners      []string
+	verificationRetryAt    time.Time
+	verificationRetryDelay time.Duration
+	maxFallbackRunners     int
+	lastHostedCleanup      string
 }
 
 type assignment struct {
@@ -75,8 +75,8 @@ func isJournalWrite(err error) bool {
 	return errors.As(err, &journal)
 }
 
-func (c *coordinator) identityPaused() bool {
-	return errors.Is(c.paused, bootstrapIdentityMismatch) && retryableBootstrapVerification(c.paused)
+func (c *coordinator) verificationPaused() bool {
+	return retryableBootstrapVerification(c.paused)
 }
 
 func (c *coordinator) fallbackFull() bool {
@@ -215,26 +215,24 @@ func (c *coordinator) reconcile(ctx context.Context, recoverOnly bool) (bool, er
 }
 
 func (c *coordinator) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
-	identityPaused := c.identityPaused()
-	retryDue := identityPaused && !time.Now().Before(c.identityRetryAt)
-	previousRunners := c.identityRunners
+	verificationPaused := c.verificationPaused()
+	retryDue := verificationPaused && !time.Now().Before(c.verificationRetryAt)
+	previousRunners := c.unverifiedRunners
 	err := c.reconcileAndProvision(ctx, count)
-	if ctx.Err() != nil && !isJournalWrite(err) {
+	if ctx.Err() == context.Canceled && !isJournalWrite(err) {
 		err = ctx.Err()
 	}
-	retryable := c.paused == nil || identityPaused
+	retryable := c.paused == nil || verificationPaused
 	switch {
-	case retryable && (identityPaused || errors.Is(err, bootstrapIdentityMismatch)) && retryableBootstrapVerification(err):
-		if !identityPaused || retryDue {
-			c.identityRetryDelay = min(max(cleanupRetryDelay, c.identityRetryDelay*2), identityMaximumRetryDelay)
-			c.identityRetryAt = time.Now().Add(c.identityRetryDelay)
+	case retryable && retryableBootstrapVerification(err):
+		if !verificationPaused || retryDue {
+			c.verificationRetryDelay = min(max(cleanupRetryDelay, c.verificationRetryDelay*2), verificationMaximumRetryDelay)
+			c.verificationRetryAt = time.Now().Add(c.verificationRetryDelay)
 		}
-		if !identityPaused || !slices.Equal(previousRunners, c.identityRunners) || retryDue && c.identityRetryDelay == identityMaximumRetryDelay {
-			c.logger.Warn("Bootstrap identity unverified; provisioning paused for automatic retry", "runners", c.identityRunners, "retry_delay", c.identityRetryDelay, "error", err)
+		if !verificationPaused || !slices.Equal(previousRunners, c.unverifiedRunners) || retryDue && c.verificationRetryDelay == verificationMaximumRetryDelay {
+			c.logger.Warn("Bootstrap status unverified; provisioning paused for automatic retry", "runners", c.unverifiedRunners, "retry_delay", c.verificationRetryDelay, "error", err)
 		}
-		if errors.Is(err, bootstrapIdentityMismatch) {
-			c.paused = err
-		}
+		c.paused = err
 	case err != nil && !isJournalWrite(err) && !onlyCancellation(err) && c.hasIssuedLocal():
 		// Stop provisioning, not renewal or completion of already issued siblings.
 		if retryable {
@@ -269,8 +267,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	hostedCleanupAttempted, hostedCleanupCompleted := false, false
 	hostedProvisioned := false
 	verificationPending := false
-	retryLater := c.identityPaused() && time.Now().Before(c.identityRetryAt)
-	var identityRunners []string
+	retryLater := c.verificationPaused() && time.Now().Before(c.verificationRetryAt)
+	var unverifiedRunners []string
 	var failures []error
 	var surplus map[string]bool
 	if !c.demandUnavailable {
@@ -279,6 +277,20 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	var runs map[string]*bootstrapRunResult
 	if !retryLater {
 		runs = c.lookupBootstrapRuns(ctx)
+		if ctx.Err() == context.DeadlineExceeded {
+			// The reads used the full callback budget. Preserve their errors
+			// without starting any writes on the expired context.
+			for _, name := range c.names() {
+				if result := runs[name]; result != nil && result.err != nil {
+					unverifiedRunners = append(unverifiedRunners, name)
+					failures = append(failures, statusReadError(result.err))
+				}
+			}
+			if len(failures) > 0 {
+				c.unverifiedRunners = unverifiedRunners
+				return errors.Join(failures...)
+			}
+		}
 	}
 	// Verify dispatched identities before any sibling can resume provisioning.
 	names := c.names()
@@ -303,8 +315,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		local := l.Local
 		if retryLater && l.DispatchIntent && !l.CleanupIntent {
 			verificationPending = true
-			if slices.Contains(c.identityRunners, name) {
-				identityRunners = append(identityRunners, name)
+			if slices.Contains(c.unverifiedRunners, name) {
+				unverifiedRunners = append(unverifiedRunners, name)
 			}
 			continue
 		}
@@ -321,10 +333,10 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			hostedCleanupAttempted, hostedCleanupCompleted = true, done
 			c.lastHostedCleanup = name
 		}
-		provisioningPaused = provisioningPaused || errors.Is(err, bootstrapIdentityMismatch)
+		provisioningPaused = provisioningPaused || retryableBootstrapVerification(err)
 		hostedProvisioned = hostedProvisioned || (!l.DispatchIntent && a.lease != nil && a.lease.DispatchIntent)
-		if errors.Is(err, bootstrapIdentityMismatch) || (transientFailure(err) && slices.Contains(c.identityRunners, name)) {
-			identityRunners = append(identityRunners, name)
+		if retryableBootstrapVerification(err) {
+			unverifiedRunners = append(unverifiedRunners, name)
 		}
 		if err != nil && !isJournalWrite(err) && a.lease != nil && a.lease.Local != nil && a.lease.CleanupIntent && transientFailure(err) {
 			c.logger.Warn("Local cleanup retained for retry", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
@@ -336,7 +348,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 				return errors.Join(failures...)
 			}
 			if ctx.Err() != nil {
-				return ctx.Err()
+				c.unverifiedRunners = unverifiedRunners
+				return errors.Join(failures...)
 			}
 			if onlyCancellation(err) {
 				return err
@@ -351,17 +364,17 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if hostedCleanupCompleted && c.nextHostedCleanup() != nil {
 		c.device.redrive(c.state.Owner)
 	}
-	c.identityRunners = identityRunners
+	c.unverifiedRunners = unverifiedRunners
 	if err := errors.Join(failures...); err != nil {
 		return err
 	}
 	if verificationPending {
 		return c.paused
 	}
-	if c.identityPaused() {
+	if c.verificationPaused() {
 		c.paused = nil
-		c.identityRetryAt, c.identityRetryDelay = time.Time{}, 0
-		c.logger.Info("Bootstrap identities verified; provisioning resumed")
+		c.verificationRetryAt, c.verificationRetryDelay = time.Time{}, 0
+		c.logger.Info("Bootstrap status verified; provisioning resumed")
 	}
 	if c.paused != nil {
 		if c.hasIssuedLocal() {
@@ -589,7 +602,7 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 	if l.RunID == 0 {
 		run, err = a.bootstrap.findRun(ctx, l)
 		if err != nil {
-			return false, err
+			return false, statusReadError(err)
 		}
 		if run == nil {
 			return false, fmt.Errorf("dispatch for %s is still unconfirmed; intent retained, retry reconciliation later without redispatching", l.Name)
@@ -605,7 +618,7 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 			return a.recoverMissingRun(ctx, recoverOnly)
 		}
 		if err != nil {
-			return false, err
+			return false, statusReadError(err)
 		}
 		if run == nil || run.ID != l.RunID {
 			return false, identityMismatch(l, run)

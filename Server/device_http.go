@@ -46,8 +46,8 @@ func (s *coordinatorLoop) run() error {
 
 		var deadline time.Time
 		retryPending := false
-		if s.worker.identityPaused() {
-			deadline = s.worker.identityRetryAt
+		if s.worker.verificationPaused() {
+			deadline = s.worker.verificationRetryAt
 		}
 		for _, l := range s.worker.state.Leases {
 			if l.CleanupIntent {

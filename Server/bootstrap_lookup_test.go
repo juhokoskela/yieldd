@@ -74,7 +74,7 @@ func TestRestartIdentityMismatchBlocksPendingSiblingProvisioning(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := len(w.events)
-				if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || !c.identityPaused() {
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), 3); err != nil || !c.verificationPaused() {
 					t.Fatal("restart did not retain the unverified identity", err, c.paused)
 				}
 				for _, event := range w.events[before:] {
@@ -130,7 +130,7 @@ func TestInitialMixedIdentityAndTransientFailuresRetry(t *testing.T) {
 						}
 						return w.getRun(ctx, id)
 					}}
-					if _, err := c.HandleDesiredRunnerCount(t.Context(), count); err != nil || !c.identityPaused() {
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), count); err != nil || !c.verificationPaused() {
 						t.Fatal("initial mixed failures stopped automatic identity recovery", err, c.paused)
 					}
 					c.bootstrap = w

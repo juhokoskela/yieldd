@@ -79,8 +79,8 @@ func TestIdentityRetryBackoffCapsAndResetsWithoutBlockingDeviceCalls(t *testing.
 		lookups += 3
 		assertLookups()
 		if err := loop.invoke(t.Context(), func(context.Context) error {
-			if c.paused != nil || c.identityRetryDelay != 0 || !c.identityRetryAt.IsZero() {
-				return fmt.Errorf("successful verification did not reset backoff: %v, %s", c.paused, c.identityRetryDelay)
+			if c.paused != nil || c.verificationRetryDelay != 0 || !c.verificationRetryAt.IsZero() {
+				return fmt.Errorf("successful verification did not reset backoff: %v, %s", c.paused, c.verificationRetryDelay)
 			}
 			for _, run := range w.runs {
 				run.ID++
@@ -117,13 +117,13 @@ func TestIdentityRetryReportsChangedRunnersAndPersistentFailures(t *testing.T) {
 		for _, run := range w.runs {
 			run.ID++
 		}
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || !slices.Equal(c.identityRunners, names) {
-			t.Fatal("affected runners not tracked", err, c.identityRunners)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || !slices.Equal(c.unverifiedRunners, names) {
+			t.Fatal("affected runners not tracked", err, c.unverifiedRunners)
 		}
 		w.runs[c.state.Leases[names[0]].RunID].ID--
 		time.Sleep(5 * time.Second)
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || !slices.Equal(c.identityRunners, names[1:]) {
-			t.Fatal("verified sibling remained in the affected set", err, c.identityRunners)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || !slices.Equal(c.unverifiedRunners, names[1:]) {
+			t.Fatal("verified sibling remained in the affected set", err, c.unverifiedRunners)
 		}
 		warnings := strings.Count(logs.String(), "level=WARN")
 		if warnings != 2 || !strings.Contains(logs.String(), "runners=["+names[1]+"]") {

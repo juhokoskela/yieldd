@@ -60,12 +60,12 @@ func TestIdentityPauseSurvivesTransientVerificationFailures(t *testing.T) {
 						t.Fatal(err)
 					}
 					w.run.ID++
-					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !c.identityPaused() {
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !c.verificationPaused() {
 						t.Fatal("identity pause missing", err, c.paused)
 					}
 					time.Sleep(5 * time.Second)
 					w.getErr = failure
-					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !c.identityPaused() {
+					if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || !c.verificationPaused() {
 						t.Fatal("transient failure ended identity recovery", err, c.paused)
 					}
 					w.getErr = nil
@@ -77,6 +77,41 @@ func TestIdentityPauseSurvivesTransientVerificationFailures(t *testing.T) {
 				})
 			})
 		}
+	}
+}
+
+func TestFirstStatusOutagePausesOnlyUntilVerification(t *testing.T) {
+	for _, slots := range []int{0, 1} {
+		t.Run(fmt.Sprintf("local=%d", slots), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c, w, _ := concurrentFixture(t, slots)
+				var issued deviceRequest
+				if slots != 0 {
+					issued = issueLocal(t, c, 0, 1)
+				}
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil {
+					t.Fatal(err)
+				}
+				w.getErr = &apiError{502}
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+2); err != nil || !c.verificationPaused() {
+					t.Fatal("initial 502 stopped the queue", err, c.paused)
+				}
+				w.getErr = nil
+				before := w.getCalls
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || w.getCalls != before {
+					t.Fatal("callback bypassed retry deadline", err)
+				}
+				if slots != 0 {
+					if renewal, err := c.renewDevice(t.Context(), issued); err != nil || !renewal.Continue {
+						t.Fatal("local sibling lost authorization", renewal, err)
+					}
+				}
+				time.Sleep(cleanupRetryDelay)
+				if _, err := c.HandleDesiredRunnerCount(t.Context(), slots+1); err != nil || c.paused != nil || w.dispatched != 1 {
+					t.Fatal("status recovery changed execution", err, c.paused, w.dispatched)
+				}
+			})
+		})
 	}
 }
 
@@ -92,26 +127,20 @@ func (deadlineBootstrap) getRun(ctx context.Context, _ int64) (*workflowRun, err
 	return nil, ctx.Err()
 }
 
-func TestIdentityRetrySurvivesItsCallDeadline(t *testing.T) {
+func TestInitialStatusReadSurvivesItsCallDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c, w, _ := newFixture(t)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 			t.Fatal(err)
 		}
-		w.run.ID++
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || !c.identityPaused() {
-			t.Fatal(err, c.paused)
-		}
-		time.Sleep(5 * time.Second)
 		c.bootstrap = deadlineBootstrap{w}
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		if _, err := c.HandleDesiredRunnerCount(ctx, 1); err != nil || !c.identityPaused() {
+		if _, err := c.HandleDesiredRunnerCount(ctx, 1); err != nil || !c.verificationPaused() {
 			t.Fatal("call deadline ended automatic verification", err, c.paused)
 		}
 		c.bootstrap = w
-		w.run.ID--
-		time.Sleep(10 * time.Second)
+		time.Sleep(cleanupRetryDelay)
 		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || c.paused != nil || w.dispatched != 1 {
 			t.Fatal("verification could not recover after its deadline", err, c.paused)
 		}
@@ -135,7 +164,7 @@ func TestShutdownDuringIdentityRetryReturnsCancellation(t *testing.T) {
 		for _, run := range w.runs {
 			run.ID++
 		}
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || !c.identityPaused() {
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || !c.verificationPaused() {
 			t.Fatal("identity retry was not pending", err, c.paused)
 		}
 		pause := c.paused

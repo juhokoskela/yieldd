@@ -75,9 +75,10 @@ func TestVerificationRetryClassifiesEveryCause(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"identity", fmt.Errorf("runner: %w", bootstrapIdentityMismatch), true},
-		{"identity and transient", errors.Join(bootstrapIdentityMismatch, &apiError{502}), true},
-		{"rate limited", &apiError{429}, true},
-		{"network wrapper", &url.Error{Err: io.ErrClosedPipe}, true},
+		{"identity and transient", errors.Join(bootstrapIdentityMismatch, statusReadError(&apiError{502})), true},
+		{"rate limited read", statusReadError(&apiError{429}), true},
+		{"failed write alongside a mismatch", errors.Join(bootstrapIdentityMismatch, &apiError{502}), false},
+		{"network wrapper", statusReadError(&url.Error{Err: io.ErrClosedPipe}), true},
 		{"permanent sibling", errors.Join(bootstrapIdentityMismatch, &apiError{403}), false},
 		{"cancelled", errors.Join(bootstrapIdentityMismatch, context.Canceled), false},
 		{"journal timeout", &journalWriteError{context.DeadlineExceeded}, false},
