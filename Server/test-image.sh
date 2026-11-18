@@ -33,7 +33,7 @@ for attempt in 1 2; do
         --fallback-runner '"ubuntu-24.04"' --macos-fallback-runner '"macos-26"' \
         --repository-routes "$routes" \
         --max-fallback-runners "$attempt" \
-        --state-dir /var/lib/yieldd --recover)"
+        --state-dir /var/lib/yieldd --recover-all)"
     containers+=("$instance")
     docker start --attach "$instance"
     [[ "$(docker inspect --format '{{.State.ExitCode}}' "$instance")" == 0 ]] || exit 1

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -25,7 +26,8 @@ func main() {
 func run() error {
 	var cfg config
 	var directory, clientListen, macOSFallback, repositories, localOnly, repositoryRoutes string
-	var recoverOnly, allowNonLoopbackClientListen bool
+	var recoverAll, allowNonLoopbackClientListen bool
+	var recoverTarget string
 	var maxFallbackRunners int
 	flag.StringVar(&repositories, "repositories", "", "Comma-separated application repositories (OWNER/REPOSITORY)")
 	flag.StringVar(&localOnly, "local-only-repositories", "", "Repositories that wait for local capacity and never dispatch fallback")
@@ -35,11 +37,22 @@ func run() error {
 	flag.StringVar(&repositoryRoutes, "repository-routes", "", "JSON array of per-repository infrastructure and Linux fallback overrides")
 	flag.IntVar(&maxFallbackRunners, "max-fallback-runners", defaultMaxFallbackRunners, fmt.Sprintf("Maximum active hosted bootstraps per repository/platform queue (1-%d)", maximumAssignments))
 	flag.StringVar(&directory, "state-dir", "", "Absolute private state directory")
-	flag.BoolVar(&recoverOnly, "recover", false, "Clean up recorded assignments and exit without provisioning")
+	flag.Func("recover", "Recover one exact OWNER/REPOSITORY/PLATFORM/RUNNER", func(target string) error {
+		if target == "" || recoverTarget != "" {
+			return errors.New("provide exactly one recovery target")
+		}
+		recoverTarget = target
+		return nil
+	})
+	flag.BoolVar(&recoverAll, "recover-all", false, "Cancel and clean up every recorded assignment in this deployment")
 	flag.StringVar(&cfg.DeviceID, "device-id", "", "UUID of the connected Apple Silicon Mac")
 	flag.StringVar(&clientListen, "client-listen", "", "HTTP address behind an HTTPS proxy; use loopback on the host or 0.0.0.0 inside the Compose container")
 	flag.BoolVar(&allowNonLoopbackClientListen, "allow-non-loopback-client-listen", false, "Allow cleartext device HTTP on an unspecified IP inside a container with a loopback-only published port")
 	flag.Parse()
+	recoverOnly := recoverAll || recoverTarget != ""
+	if recoverAll && recoverTarget != "" {
+		return errors.New("choose one of --recover and --recover-all")
+	}
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
@@ -105,6 +118,9 @@ func run() error {
 		} else {
 			mux.Handle("/", handler)
 		}
+	}
+	if recoverTarget != "" {
+		return recoverAssignment(ctx, workers, recoverTarget)
 	}
 	if deviceListener != nil {
 		if !deviceListener.Addr().(*net.TCPAddr).IP.IsLoopback() {
@@ -173,4 +189,33 @@ func drainDeviceHTTP(server *http.Server) error {
 		_ = server.Close()
 	}
 	return err
+}
+
+func recoverAssignment(ctx context.Context, workers []*platformCoordinator, target string) error {
+	split := strings.LastIndexByte(target, '/')
+	if split < 0 || !runnerNamePattern.MatchString(target[split+1:]) {
+		return errors.New("--recover requires OWNER/REPOSITORY/PLATFORM/RUNNER")
+	}
+	queue, runner := target[:split], target[split+1:]
+	for _, p := range workers {
+		c := p.loop.worker
+		if queue != c.state.Config.Repository+"/"+c.state.Config.platform() {
+			continue
+		}
+		a := c.assigned(runner)
+		if a.lease == nil {
+			return errors.New("no such assignment in the selected queue")
+		}
+		c.logger.Info("Recovering selected assignment", "runner", runner, "registration", a.lease.RunnerID, "dispatch_intent", a.lease.DispatchIntent, "workflow_run", a.lease.RunID, "cleanup_intent", a.lease.CleanupIntent)
+		for {
+			done, err := a.reconcile(ctx, true)
+			if err != nil || done {
+				return err
+			}
+			if err := waitForRetry(ctx, cleanupRetryDelay); err != nil {
+				return err
+			}
+		}
+	}
+	return errors.New("recovery target does not identify a configured queue")
 }

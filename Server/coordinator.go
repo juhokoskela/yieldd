@@ -515,10 +515,10 @@ func (a *assignment) prepare(ctx context.Context) error {
 	}
 	l := a.lease
 	if l.RunnerID == 0 {
-		return errors.New("registration outcome is unknown; run with --recover before provisioning again")
+		return fmt.Errorf("registration outcome is unknown; run with --recover %s/%s/%s before provisioning again", a.state.Config.Repository, a.state.Config.platform(), l.Name)
 	}
 	if l.JIT == "" {
-		return errors.New("JIT configuration is missing; run with --recover")
+		return fmt.Errorf("JIT configuration is missing; run with --recover %s/%s/%s", a.state.Config.Repository, a.state.Config.platform(), l.Name)
 	}
 	if err := a.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
 		return fmt.Errorf("store bootstrap credential: %w", err)

@@ -130,7 +130,7 @@ Compose restarts the coordinator unless explicitly stopped and allows 90 seconds
 docker compose --env-file /etc/yieldd/coordinator.env stop coordinator
 ```
 
-For explicit recovery, stop the service first, load the same configuration into your shell, then run a one-off container against the same volume:
+For explicit recovery, record the exact repository (owner/name), platform (linux or macos), and runner name from the journal. Drain local assignments before stopping the service if their renewals need to continue. Stop the service, load the same configuration into your shell, then run a one-off container against the same volume:
 
 ```sh
 set -a
@@ -145,7 +145,7 @@ docker compose --env-file /etc/yieldd/coordinator.env run --rm coordinator \
   --repository-routes "${YIELDD_REPOSITORY_ROUTES:-}" \
   --device-id "$YIELDD_DEVICE_ID" \
   --state-dir /var/lib/yieldd \
-  --recover
+  --recover "$repository/$platform/$runner"
 ```
 
 As with native execution, `--recover` cannot bypass an issued local assignment awaiting guest destruction. Include both fallback arguments when both platforms are enabled. Start the Mac client to resolve local obligations.
@@ -191,7 +191,7 @@ A secret-deletion 404 does not clear the lease by itself. Cleanup verifies that 
 
 Likewise, a runner-status 404 requires a successful runner listing from the application repository before cleanup can treat the runner as absent. A failed access check cannot establish that the runner is idle.
 
-To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with `--recover`:
+To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with the exact `--recover "$repository/$platform/$runner"` target:
 
 ```sh
 go run . \
@@ -201,12 +201,12 @@ go run . \
   --fallback-runner '"ubuntu-24.04"' \
   --device-id "$YIELDD_DEVICE_ID" \
   --state-dir /absolute/private/yieldd-state \
-  --recover
+  --recover "$repository/$platform/$runner"
 ```
 
 If setup included `--macos-fallback-runner '"macos-26"'` or `--repository-routes`, include the same values in this recovery command too. Keep the complete repository list, local-only policy, device ID, fallback targets, and state directory unchanged. `--client-listen` is not needed during recovery.
 
-Recovery visits every configured queue independently. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. Changing a queue's configuration requires recovering its old state with the original arguments and choosing a fresh queue directory. Never delete an active lease to force a retry.
+Targeted recovery validates the full deployment inventory and reconciles only the named lease. Set `repository`, `platform`, and `runner` to the recorded values in both examples above. Use `--recover-all` only when intentionally cancelling and cleaning every queue. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. An empty queue can adopt new infrastructure, fallback, and local-only routing under its original identity. Finish outstanding leases using their recorded route first. Never delete an active lease to force a retry.
 
 ## Validation status
 

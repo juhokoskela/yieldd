@@ -148,3 +148,38 @@ func TestCoordinatorShutdownIgnoresOnlyCancellationOutsideRecovery(t *testing.T)
 		}
 	}
 }
+
+func TestTargetedRecoveryLeavesOtherQueueAlone(t *testing.T) {
+	first, _, _, req := localFixture(t)
+	sibling, world, _ := multipleFallbackFixture(t, 1)
+	sibling.device.pollNow(0)
+	if _, err := sibling.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	other := requestFor(sibling.device.pollNow(0))
+	// A second lease in the selected queue must never enter reconciliation.
+	name := "yieldd-bootstrap-00000000-0000-0000-0000-000000000001"
+	healthy := &assignment{coordinator: sibling}
+	if err := healthy.replace(&lease{Name: name, Created: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := healthy.register(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := healthy.prepare(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	sibling.state.Config.Repository = "example/yieldd-bootstrap-sibling"
+	workers := []*platformCoordinator{{loop: newCoordinatorLoop(t.Context(), first)}, {loop: newCoordinatorLoop(t.Context(), sibling)}}
+	for _, target := range []string{"", "wrong/queue/linux/" + req.Runner, sibling.state.Config.Repository + "/linux/" + req.Runner} {
+		if err := recoverAssignment(t.Context(), workers, target); err == nil {
+			t.Fatalf("accepted %q", target)
+		}
+	}
+	if err := recoverAssignment(t.Context(), workers, sibling.state.Config.Repository+"/linux/"+other.Runner); err != nil {
+		t.Fatal(err)
+	}
+	if sibling.assigned(other.Runner).lease != nil || first.assigned(req.Runner).lease == nil || sibling.assigned(name).lease == nil || world.getCalls != 0 {
+		t.Fatal("wrong recovery scope")
+	}
+}
