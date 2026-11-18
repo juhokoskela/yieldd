@@ -173,7 +173,10 @@ func TestArchiveRouting(t *testing.T) {
 	rpc(writer, "CreateCacheEntry", reader, 401)
 	up := urlField(rpc(writer, "CreateCacheEntry", primary, 200), "signed_upload_url")
 	request(writer, "PUT", up.RequestURI(), "", "local bytes", 201)
-	rpc(writer, "FinalizeCacheEntryUpload", primary, 200)
+	request(writer, "POST", cacheRPC+"FinalizeCacheEntryUpload", primary,
+		`{"key":"subprocess-cache-test","version":"v1","size_bytes":"11"}`, 200)
+	otherWriter := token("456", "refs/heads/master", 3)
+	rpc(newGuest(otherWriter), "CreateCacheEntry", otherWriter, 409)
 	shared := newGuest(reader)
 	down := urlField(rpc(shared, "GetCacheEntryDownloadURL", reader, 200), "signed_download_url")
 	if got := request(shared, "GET", down.RequestURI(), "", "", 200); string(got) != "local bytes" {
