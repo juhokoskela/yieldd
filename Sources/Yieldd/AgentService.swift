@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 import ServiceManagement
 
@@ -38,7 +39,7 @@ func disableAgent(service: LocalAgentService) async throws {
     }
 }
 
-func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {
+func localAgentService(bundle: Bundle = .main, refreshRegistration: Bool = false) throws -> LocalAgentService {
     let plistURL = bundle.bundleURL
         .appendingPathComponent("Contents/Library/LaunchAgents", isDirectory: true)
         .appendingPathComponent(agentPlistName, isDirectory: false)
@@ -47,6 +48,10 @@ func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {
         throw AgentError.notPackaged
     }
 
+    if refreshRegistration {
+        let status = LSRegisterURL(bundle.bundleURL as CFURL, true)
+        guard status == noErr else { throw AgentError.bundleRegistration(status) }
+    }
     let service = SMAppService.agent(plistName: agentPlistName)
     return LocalAgentService(
         status: { service.status },
@@ -89,6 +94,7 @@ private func isMissingService(_ error: any Error) -> Bool {
 
 enum AgentError: Error, Equatable, LocalizedError {
     case notPackaged
+    case bundleRegistration(OSStatus)
     case connectedConfigurationRequired
     case configurationChanged
     case serviceNotFound
@@ -100,6 +106,8 @@ enum AgentError: Error, Equatable, LocalizedError {
             "Run the installer to enroll this Mac."
         case .notPackaged:
             "Local agent commands must run from the packaged yieldd application."
+        case let .bundleRegistration(status):
+            "Launch Services could not register the installed yieldd app (OSStatus \(status))."
         case .configurationChanged:
             "The local agent is already configured differently. Uninstall it before changing its configuration."
         case .serviceNotFound:

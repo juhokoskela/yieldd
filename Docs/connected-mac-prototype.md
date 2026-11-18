@@ -85,7 +85,17 @@ The proxy must forward all of `/v1/`, including `/v1/macos/`. Workflows need onl
 
 ## Connected agent at login
 
-After validating foreground execution, install the connected agent from the repository root:
+The installed app and network relay use the same Apple Development identity. The signing Mac needs the certificate, its private key and a trusted WWDR G3 intermediate. List valid identities and copy the 40-character fingerprint beside the Apple Development identity you intend to use. [Apple's WWDR intermediate certificates](https://developer.apple.com/help/account/certificates/wwdr-intermediate-certificates/)
+
+```sh
+security find-identity -v -p codesigning
+export YIELDD_SIGNING_IDENTITY='<40-character fingerprint>'
+Scripts/build-local-app.sh
+```
+
+This builds and verifies `.build/yieldd.app` without installing it. Standalone builds default to ad-hoc signing for CI and foreground tests. The installer requires the fingerprint and checks the signatures of both staged executables before preflight.
+
+After validating foreground execution, install from the same shell:
 
 ```sh
 Scripts/install-local-agent.sh \
@@ -96,6 +106,8 @@ Scripts/install-local-agent.sh \
 Supply `YIELDD_CLIENT_TOKEN` in the installer's environment for first enrollment. Installation saves it as a non-synchronizing generic password in the login Keychain, separate from the private `connected-agent.json` configuration. The agent reads the token without prompting; a locked or inaccessible keychain stops startup and retains recovery records. macOS may require Keychain access approval during setup. No GitHub CLI or GitHub token is needed on the Mac. Device enrollment and token rotation remain manual on the coordinator.
 
 To upgrade, run `agent drain` and then `agent uninstall` from the installed app. Keep the coordinator and original credentials available until both commands succeed. Move the unregistered bundle out of `~/Applications/yieldd.app`, then run the installer with the enrollment token. If either command fails, keep the bundle, credentials, and journals, and finish recovery before replacing anything. Use the previous release to finish any standalone cleanup.
+
+When preparing a new installable release, increase `CFBundleVersion` in `Packaging/Info.plist` above the previous installed build, including any locally versioned build. Reuse the signing identity across upgrades. Enrollment refreshes Launch Services at the final bundle path before registering the login item.
 
 If initial enrollment stops after the installer copies the signed app, inspect its `agent status` and retry its `agent install` with the same arguments and token. A saved pause survives reinstall. Check readiness and resume when ready to accept jobs.
 

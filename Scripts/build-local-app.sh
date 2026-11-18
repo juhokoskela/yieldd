@@ -7,6 +7,7 @@ repository_directory=$(dirname -- "$script_directory")
 application="$repository_directory/.build/yieldd.app"
 executable="$repository_directory/.build/release/yieldd"
 entitlements="$repository_directory/Packaging/yieldd.entitlements"
+signing_identity=${YIELDD_SIGNING_IDENTITY:--}
 
 cd "$repository_directory"
 swift build -c release
@@ -22,10 +23,10 @@ cp Packaging/Info.plist "$application/Contents/Info.plist"
 cp Packaging/dev.yieldd.agent.plist "$application/Contents/Library/LaunchAgents/"
 cp "$executable" "$application/Contents/MacOS/yieldd"
 cp .build/yieldd-network-relay "$application/Contents/Helpers/"
-codesign --force --sign - --identifier dev.yieldd.network-relay \
+codesign --force --sign "$signing_identity" --identifier dev.yieldd.network-relay \
     "$application/Contents/Helpers/yieldd-network-relay"
 
-codesign --force --sign - --identifier dev.yieldd \
+codesign --force --sign "$signing_identity" --identifier dev.yieldd \
     --entitlements "$entitlements" \
     "$application"
 codesign --verify --strict "$application"

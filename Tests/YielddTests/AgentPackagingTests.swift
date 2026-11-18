@@ -69,6 +69,29 @@ func installerRefusesAnExistingAppBeforePreflightOrImageBuild() throws {
     #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
 }
 
+@Test(arguments: ["", "-", "Apple Development", "1234"])
+func installerRequiresACertificateFingerprint(identity: String) throws {
+    let fixture = try InstallerFixture(preflightResult: "macos")
+    defer { fixture.remove() }
+    let result = try fixture.run(arguments: fixture.arguments, identity: identity)
+    #expect(result.terminationStatus != 0)
+    #expect(result.stderrText.contains("YIELDD_SIGNING_IDENTITY"))
+    #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
+}
+
+@Test
+func installerRejectsAnIncorrectlySignedStagedRelayBeforePreflight() throws {
+    let fixture = try InstallerFixture(preflightResult: "linux")
+    defer { fixture.remove() }
+    let result = try fixture.run(arguments: fixture.arguments, rejectRelay: true)
+    #expect(result.terminationStatus != 0)
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
+    #expect(events.contains("dev.yieldd.network-relay"))
+    #expect(!events.contains("new:agent"))
+    #expect(!events.contains("container:"))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.applicationsURL.path).isEmpty)
+}
+
 @Test
 func failedEnrollmentKeepsTheInstalledBundleForRecovery() throws {
     let fixture = try InstallerFixture(preflightResult: "macos", enrollmentFails: true)
@@ -138,7 +161,8 @@ private struct InstallerFixture {
         """)
     }
 
-    func run(arguments: [String], interruptBuild: Bool = false) throws -> ProcessResult {
+    func run(arguments: [String], interruptBuild: Bool = false, identity: String = String(repeating: "A", count: 40),
+             rejectRelay: Bool = false) throws -> ProcessResult {
         let original = try String(contentsOf: repositoryRoot.appendingPathComponent("Scripts/install-local-agent.sh"), encoding: .utf8)
         let scriptDirectoryAssignment = #"script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"#
         let applicationsDirectoryAssignment = #"applications_directory="${HOME:?}/Applications""#
@@ -146,7 +170,11 @@ private struct InstallerFixture {
         try #require(original.contains(scriptDirectoryAssignment))
         try #require(original.contains(applicationsDirectoryAssignment))
         let script = """
-        codesign() { echo codesign >> \(quote(logURL.path)); }
+        export YIELDD_SIGNING_IDENTITY=\(quote(identity))
+        codesign() {
+            printf 'codesign:%s\\n' "$*" >> \(quote(logURL.path))
+            case "$*" in *"/Contents/Helpers/yieldd-network-relay") \(rejectRelay ? "return 1" : ":") ;; esac
+        }
         container() {
             printf 'container:%s\\n' "$*" >> \(quote(logURL.path))
             if [ "$1" = build ] && \(interruptBuild ? "true" : "false"); then kill -TERM "$$"; fi

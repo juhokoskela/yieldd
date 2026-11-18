@@ -211,7 +211,7 @@ struct AgentInstallCommand: ParsableCommand {
         let store = ConnectedAgentStore(directory: directory)
         let token = ProcessInfo.processInfo.environment["YIELDD_CLIENT_TOKEN"] ?? ""
         try ConnectedHTTPClient.validateToken(token)
-        let service = try localAgentService()
+        let service = try localAgentService(refreshRegistration: !preflightOnly)
         if preflightOnly {
             guard service.status() == .notRegistered, try store.load() == nil else { throw AgentError.configurationChanged }
             try withRunnerOwnership(in: directory, connected: true) { try validateEnrollment(configuration, leases: $0) }

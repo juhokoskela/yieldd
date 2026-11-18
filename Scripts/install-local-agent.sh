@@ -43,9 +43,20 @@ if [ -e "$installed_application" ]; then
     exit 1
 fi
 
+is_certificate_fingerprint() {
+    case "$1" in *[!0-9A-Fa-f]*) return 1 ;; esac
+    [ "${#1}" -eq 40 ]
+}
+if ! is_certificate_fingerprint "${YIELDD_SIGNING_IDENTITY-}"; then
+    echo "Set YIELDD_SIGNING_IDENTITY to the Apple Development certificate fingerprint from 'security find-identity -v -p codesigning'." >&2
+    exit 1
+fi
+
 "$script_directory/build-local-app.sh"
 ditto "$source_application" "$staged"
-codesign --verify --strict "$staged"
+signer="anchor apple generic and certificate leaf = H\"$YIELDD_SIGNING_IDENTITY\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
+codesign --verify --strict -R="identifier \"dev.yieldd\" and $signer" "$staged"
+codesign --verify --strict -R="identifier \"dev.yieldd.network-relay\" and $signer" "$staged/Contents/Helpers/yieldd-network-relay"
 platform=$("$staged/Contents/MacOS/yieldd" agent install --preflight-only "$@")
 case "$platform" in
     linux)
