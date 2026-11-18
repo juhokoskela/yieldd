@@ -487,18 +487,30 @@ func (c *coordinator) lookupBootstrapRuns(ctx context.Context) map[string]*boots
 	return runs
 }
 
-func (a *assignment) register(ctx context.Context) error {
+func (a *assignment) generateRegistration(ctx context.Context) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
 	l := a.lease
 	generated, err := a.runners.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: l.Name, WorkFolder: "_work"}, a.state.ScaleSetID)
 	if err != nil {
-		return fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
+		return nil, fmt.Errorf("registration outcome requires recovery for %s: %w", l.Name, &sdkError{"register runner", err})
 	}
 	if generated == nil || generated.Runner == nil || generated.Runner.ID <= 0 || generated.Runner.Name != l.Name || generated.Runner.RunnerScaleSetID != a.state.ScaleSetID || generated.EncodedJITConfig == "" {
-		return errors.New("invalid JIT response; provisioning intent retained for recovery")
+		return nil, errors.New("invalid JIT response; provisioning intent retained for recovery")
 	}
-	next := *l
+	return generated, nil
+}
+
+func (a *assignment) register(ctx context.Context) error {
+	generated, err := a.generateRegistration(ctx)
+	if err != nil {
+		return err
+	}
+	next := *a.lease
 	next.RunnerID, next.JIT = generated.Runner.ID, generated.EncodedJITConfig
 	return a.replace(&next)
+}
+
+func (a *assignment) recoveryTarget() string {
+	return a.state.Config.Repository + "/" + a.state.Config.platform() + "/" + a.lease.Name
 }
 
 func (a *assignment) prepare(ctx context.Context) error {
@@ -507,10 +519,10 @@ func (a *assignment) prepare(ctx context.Context) error {
 	}
 	l := a.lease
 	if l.RunnerID == 0 {
-		return errors.New("registration outcome is unknown; run with --recover before provisioning again")
+		return fmt.Errorf("registration outcome is unknown; run with --recover %s before provisioning again", a.recoveryTarget())
 	}
 	if l.JIT == "" {
-		return errors.New("JIT configuration is missing; run with --recover")
+		return fmt.Errorf("JIT configuration is missing; run with --recover %s", a.recoveryTarget())
 	}
 	if err := a.bootstrap.putSecret(ctx, l.secretName(), l.JIT); err != nil {
 		return fmt.Errorf("store bootstrap credential: %w", err)
@@ -536,7 +548,7 @@ func (a *assignment) prepare(ctx context.Context) error {
 			return errors.Join(err, a.beginCleanup(""))
 		}
 		if dispatchRejected(err) {
-			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover to clean up: %w", err), a.beginCleanup("rejected"))
+			return errors.Join(fmt.Errorf("bootstrap dispatch rejected; restart or use --recover %s to clean up: %w", a.recoveryTarget(), err), a.beginCleanup("rejected"))
 		}
 		return fmt.Errorf("dispatch outcome is uncertain; restart to reconcile, not redispatch: %w", err)
 	}
@@ -643,7 +655,7 @@ func (a *assignment) recoverMissingRun(ctx context.Context, recoverOnly bool) (b
 		return false, &sdkError{"check runner for missing workflow", err}
 	}
 	if runner != nil {
-		return false, errors.New("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover")
+		return false, fmt.Errorf("workflow is unavailable but its runner is still registered; restore workflow access or confirm termination and remove the registration before retrying --recover %s", a.recoveryTarget())
 	}
 	if err := a.beginCleanup("unknown"); err != nil {
 		return false, err
@@ -718,7 +730,7 @@ func (a *assignment) cleanup(ctx context.Context) error {
 		return err
 	}
 	delete(a.reportedLocalHold, l.Name)
-	if l.RunnerID != 0 || l.DispatchIntent || (l.Local != nil && l.Local.Phase == localIssued) {
+	if runner != nil || l.RunnerID != 0 || l.DispatchIntent || (l.Local != nil && l.Local.Phase == localIssued) {
 		a.refreshDemand = true
 	}
 	return nil

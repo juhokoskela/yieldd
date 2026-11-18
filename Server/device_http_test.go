@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -195,6 +196,63 @@ func TestLongPollTimeoutAndWakeup(t *testing.T) {
 					t.Fatal(got.Code)
 				}
 			})
+		})
+	}
+}
+
+func TestDeviceJournalErrorAfterPublicationStopsQueue(t *testing.T) {
+	for _, phase := range []localPhase{localAccepted, localIssued} {
+		t.Run(string(phase), func(t *testing.T) {
+			c, _, store, req := localFixture(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			loop := newCoordinatorLoop(ctx, c)
+			token := strings.Repeat("x", 32)
+			h := deviceHandlerFor(t, loop, token)
+			failure := errors.New("directory sync failed after rename")
+			c.save = func(s *state) error {
+				if err := store.save(s); err != nil {
+					return err
+				}
+				if s.Leases[req.Runner].Local.Phase == phase {
+					return failure
+				}
+				return nil
+			}
+			done := make(chan error, 1)
+			go func() { done <- loop.run() }()
+			body, _ := json.Marshal(req)
+			r := httptest.NewRequest("POST", "/v1/accept", bytes.NewReader(body)).WithContext(ctx)
+			r.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 503 {
+				t.Fatal(w.Code)
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, failure) {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("queue continued after uncertain publication")
+			}
+			saved, err := store.load(c.state.Config)
+			if err != nil || saved.Leases[req.Runner].Local.Phase != phase {
+				t.Fatal(saved, err)
+			}
+			if phase == localIssued {
+				if saved.Leases[req.Runner].RunnerID == 0 || strings.Contains(w.Body.String(), "private-jit") {
+					t.Fatal("issued obligation was lost or credentials disclosed")
+				}
+				c.state, c.save = saved, store.save
+				if done, err := c.reconcile(ctx, true); done || err == nil {
+					t.Fatal("restart released issued runner", err)
+				}
+				if err := c.completeDevice(ctx, req); err != nil {
+					t.Fatal(err)
+				}
+			}
 		})
 	}
 }

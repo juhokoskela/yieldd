@@ -116,11 +116,30 @@ func openStore(path string) (*stateStore, error) {
 func (s *stateStore) Close() error { return errors.Join(s.lock.Close(), s.root.Close()) }
 
 func (s *stateStore) load(c config) (*state, error) {
-	file, err := s.root.Open("state.json")
+	value, err := s.read()
 	if errors.Is(err, os.ErrNotExist) {
 		value := &state{Config: c, Owner: uuid.NewString()}
 		return value, s.save(value)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if value.Config != c {
+		old := value.Config
+		if old.Repository != c.Repository || old.Platform != c.Platform || old.DeviceID != c.DeviceID {
+			return nil, errors.New("state belongs to a different configuration; finish recovery with the original identity and use a fresh state directory for the new one")
+		}
+		if len(value.Leases) > 0 || old.validate() != nil || c.validate() != nil {
+			return nil, errors.New("state belongs to a different configuration; recover with its original configuration")
+		}
+		value.Config = c
+		return value, s.save(value)
+	}
+	return value, nil
+}
+
+func (s *stateStore) read() (*state, error) {
+	file, err := s.root.Open("state.json")
 	if err != nil {
 		return nil, err
 	}
@@ -152,9 +171,6 @@ func (s *stateStore) load(c config) (*state, error) {
 	if envelope.PreviousLease != nil {
 		return nil, previousVersionState
 	}
-	if value.Config != c {
-		return nil, errors.New("state belongs to a different configuration; recover with its original configuration and use a separate state directory for the new configuration")
-	}
 	if _, err := uuid.Parse(value.Owner); err != nil {
 		return nil, errors.New("invalid state owner")
 	}
@@ -169,13 +185,13 @@ func (s *stateStore) load(c config) (*state, error) {
 		if l == nil || name != l.Name {
 			return nil, errors.New("invalid assignment identity")
 		}
-		if c.LocalOnly && l.Local == nil {
+		if value.Config.LocalOnly && l.Local == nil {
 			return nil, errors.New("local-only queue contains a fallback lease")
 		}
 		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0) || (l.Conclusion != "" && !l.CleanupIntent) || ((l.DispatchIntent || l.CleanupIntent) && l.JIT != "") {
 			return nil, errors.New("invalid provisioning lease")
 		}
-		if err := l.validateLocal(c.DeviceID); err != nil {
+		if err := l.validateLocal(value.Config.DeviceID); err != nil {
 			return nil, err
 		}
 		if l.Local != nil {

@@ -51,9 +51,9 @@ For example, include `SPLCompanyOy/LibreChat` in `--repositories` and add:
 
 Use trusted workloads and private repositories. The outer bootstrap and nested job share an operating-system account; neither the private HOME nor the reduced environment is a security sandbox. Repository access to the infrastructure workflow and secrets must be restricted accordingly.
 
-The state directory is created with mode `0700`; existing permissive directories are rejected. Each queue stores its identity and runner-keyed assignment map at `queues/owner/repository/linux/state.json` or `queues/owner/repository/macos/state.json`, using lowercase repository names. Reordering the repository list does not change those identities. Files are atomically replaced with mode `0600` and synced to disk. They temporarily contain JIT credentials until delivery or encrypted upload succeeds. Keep the directory private, outside version control, on persistent local storage. A deployment-wide ownership lock excludes another process using that root; queue locks also protect individual journals. The locks do not coordinate separate hosts or different state directories.
+The state directory is created with mode `0700`; existing permissive directories are rejected. Each queue stores its identity and runner-keyed assignment map at `queues/owner/repository/linux/state.json` or `queues/owner/repository/macos/state.json`, using lowercase repository names. Reordering the repository list does not change those identities. Files are atomically replaced with mode `0600` and synced to disk. Hosted leases temporarily retain JIT credentials until encrypted upload. Local issuance records a runner ID and possible delivery before replying. Its new credentials stay in process memory. Keep the directory private, outside version control, on persistent local storage. A deployment-wide ownership lock excludes another process using that root; queue locks also protect individual journals. The locks do not coordinate separate hosts or different state directories.
 
-Startup refuses to omit any saved queue. Before removing a repository or platform, finish its work, stop the Mac and coordinator, run recovery with the original configuration, then archive that queue's directory. Changing a queue's infrastructure repository, fallback, or local-only policy also requires completed recovery and a fresh queue directory. Routing overrides do not redirect old credentials, dispatches, or cleanup to a different repository. Changing `--device-id` changes every queue's configuration, so recover all queues with the old device ID before choosing a fresh state directory. Never remove a journal to bypass an unresolved assignment.
+Startup refuses to omit any saved queue. Before removing a repository or platform, finish its work, stop the Mac and coordinator, run recovery with the original configuration, then archive that queue's directory. An empty queue can adopt a new route in place. To change the device ID, drain every queue sharing the state directory with its original device, keep the recovered directory, and start with a fresh state directory for the new identity. With any outstanding lease, keep its original configuration until cleanup is complete.
 
 ## Container deployment on Linux
 
@@ -130,7 +130,7 @@ Compose restarts the coordinator unless explicitly stopped and allows 90 seconds
 docker compose --env-file /etc/yieldd/coordinator.env stop coordinator
 ```
 
-For explicit recovery, stop the service first, load the same configuration into your shell, then run a one-off container against the same volume:
+For explicit recovery, record the exact repository (owner/name), platform (linux or macos), and runner name from the journal. Drain local assignments before stopping the service if their renewals need to continue. Stop the service, load the same configuration into your shell, then run a one-off container against the same volume:
 
 ```sh
 set -a
@@ -145,7 +145,7 @@ docker compose --env-file /etc/yieldd/coordinator.env run --rm coordinator \
   --repository-routes "${YIELDD_REPOSITORY_ROUTES:-}" \
   --device-id "$YIELDD_DEVICE_ID" \
   --state-dir /var/lib/yieldd \
-  --recover
+  --recover "$repository/$platform/$runner"
 ```
 
 As with native execution, `--recover` cannot bypass an issued local assignment awaiting guest destruction. Include both fallback arguments when both platforms are enabled. Start the Mac client to resolve local obligations.
@@ -173,7 +173,7 @@ After an accepted or ambiguous dispatch, the coordinator waits for terminal work
 
 Demand-listener failures reconnect with backoff from five seconds up to one minute. Retries continue until shutdown, including authentication, permissions, and unavailable scale-set failures. Persistent warnings require an operator to check GitHub access and configuration; the coordinator does not replace a saved scale-set identity. While listening is interrupted, the queue rejects unissued acceptance and suspends new offers and hosted provisioning until fresh session statistics arrive. Unissued assignments can be cleaned up; issued runners retain their slots and can still renew and complete. Reconnection keeps the same queue identity and does not replay registration or dispatch requests. SDK response bodies stay out of logs.
 
-Provisioning or bootstrap failures pause new work in the affected repository/platform queue for operator attention. If that queue has already issued local runners, their renewal and completion requests continue until they finish; unused offers are cleaned up. Afterward the queue stops. Journal-write failures stop the queue immediately because its persisted state may be uncertain. Other repository/platform queues keep serving. Unresolved assignments retain their journals and worker slots. Restart with the same configuration to reconcile, or use explicit recovery when required. Startup configuration, journal-validation, and session-creation failures still abort startup. Local cleanup with durable intent retries recognized transient failures after five seconds without needing another demand message or Mac request. It does not rerun the application workflow. A missing registration response requires explicit recovery. Confirmed dispatch rejections (HTTP 400, 401, 403, 404, 422, or 429) enter cleanup without searching for a nonexistent workflow. Timeouts, server errors, and malformed success responses remain ambiguous. If discovery finds no matching run, that queue stops with the intent retained; retry reconciliation later without redispatching. If GitHub never exposes a matching run, even recovery retains that obligation: investigate the dispatch before making any manual state change.
+Provisioning or bootstrap failures pause new work in the affected repository/platform queue for operator attention. If that queue has already issued local runners, their renewal and completion requests continue until they finish; unused offers are cleaned up. Afterward the queue stops. Journal-write failures stop the queue immediately because its persisted state may be uncertain. Other repository/platform queues keep serving. Unresolved assignments retain their journals and worker slots. Restart with the same configuration to reconcile, or use explicit recovery when required. Configuration and journal-validation failures abort startup. Each queue retries session setup independently while the device endpoint serves issued runners. When a Mac still holds an issued slot, cold startup defers hosted cleanup until the first demand observation or the last issued slot is released. Local cleanup with durable intent retries recognized transient failures after five seconds without needing another demand message or Mac request. It does not rerun the application workflow. A missing registration response requires explicit recovery. Confirmed dispatch rejections (HTTP 400, 401, 403, 404, 422, or 429) enter cleanup without searching for a nonexistent workflow. Timeouts, server errors, and malformed success responses remain ambiguous. If discovery finds no matching run, that queue stops with the intent retained; retry reconciliation later without redispatching. If GitHub never exposes a matching run, even recovery retains that obligation: investigate the dispatch before making any manual state change.
 
 A saved workflow ID identifies its bootstrap within the configured infrastructure repository. The coordinator saves that ID from the dispatch response or after verifying a discovered run's generated title and positive ID. Saved-run lookups also require the `runner-bootstrap.yml` workflow path. Once the ID is saved, reconciliation and recovery use that exact ID even if GitHub has not rendered the title. This allows terminal `startup_failure` runs with generic titles to enter normal cleanup and retain their failure conclusions. If no ID was saved and GitHub returns a generic title, discovery cannot identify the run; the dispatch remains unconfirmed and its intent is retained for operator investigation.
 
@@ -191,7 +191,7 @@ A secret-deletion 404 does not clear the lease by itself. Cleanup verifies that 
 
 Likewise, a runner-status 404 requires a successful runner listing from the application repository before cleanup can treat the runner as absent. A failed access check cannot establish that the runner is idle.
 
-To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with `--recover`:
+To cancel and clean up a recorded bootstrap without provisioning another, stop the normal coordinator and repeat its arguments with the exact `--recover "$repository/$platform/$runner"` target:
 
 ```sh
 go run . \
@@ -201,12 +201,12 @@ go run . \
   --fallback-runner '"ubuntu-24.04"' \
   --device-id "$YIELDD_DEVICE_ID" \
   --state-dir /absolute/private/yieldd-state \
-  --recover
+  --recover "$repository/$platform/$runner"
 ```
 
 If setup included `--macos-fallback-runner '"macos-26"'` or `--repository-routes`, include the same values in this recovery command too. Keep the complete repository list, local-only policy, device ID, fallback targets, and state directory unchanged. `--client-listen` is not needed during recovery.
 
-Recovery visits every configured queue independently. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. Changing a queue's configuration requires recovering its old state with the original arguments and choosing a fresh queue directory. Never delete an active lease to force a retry.
+Targeted recovery validates the full deployment inventory and reconciles only the named lease. Set `repository`, `platform`, and `runner` to the recorded values in both examples above. Use `--recover-all` only when intentionally cancelling and cleaning every queue. It does not delete scale sets or cancel original application workflows, and refuses to remove a busy or mismatched runner. An empty queue can adopt new infrastructure, fallback, and local-only routing under its original identity. Finish outstanding leases using their recorded route first. Never delete an active lease to force a retry.
 
 ## Validation status
 

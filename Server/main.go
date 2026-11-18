@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -25,7 +26,8 @@ func main() {
 func run() error {
 	var cfg config
 	var directory, clientListen, macOSFallback, repositories, localOnly, repositoryRoutes string
-	var recoverOnly, allowNonLoopbackClientListen bool
+	var recoverAll, allowNonLoopbackClientListen bool
+	var recoverTarget string
 	var maxFallbackRunners int
 	flag.StringVar(&repositories, "repositories", "", "Comma-separated application repositories (OWNER/REPOSITORY)")
 	flag.StringVar(&localOnly, "local-only-repositories", "", "Repositories that wait for local capacity and never dispatch fallback")
@@ -35,11 +37,22 @@ func run() error {
 	flag.StringVar(&repositoryRoutes, "repository-routes", "", "JSON array of per-repository infrastructure and Linux fallback overrides")
 	flag.IntVar(&maxFallbackRunners, "max-fallback-runners", defaultMaxFallbackRunners, fmt.Sprintf("Maximum active hosted bootstraps per repository/platform queue (1-%d)", maximumAssignments))
 	flag.StringVar(&directory, "state-dir", "", "Absolute private state directory")
-	flag.BoolVar(&recoverOnly, "recover", false, "Clean up recorded assignments and exit without provisioning")
+	flag.Func("recover", "Recover one exact OWNER/REPOSITORY/PLATFORM/RUNNER", func(target string) error {
+		if target == "" || recoverTarget != "" {
+			return errors.New("provide exactly one recovery target")
+		}
+		recoverTarget = target
+		return nil
+	})
+	flag.BoolVar(&recoverAll, "recover-all", false, "Cancel and clean up every recorded assignment in this deployment")
 	flag.StringVar(&cfg.DeviceID, "device-id", "", "UUID of the connected Apple Silicon Mac")
 	flag.StringVar(&clientListen, "client-listen", "", "HTTP address behind an HTTPS proxy; use loopback on the host or 0.0.0.0 inside the Compose container")
 	flag.BoolVar(&allowNonLoopbackClientListen, "allow-non-loopback-client-listen", false, "Allow cleartext device HTTP on an unspecified IP inside a container with a loopback-only published port")
 	flag.Parse()
+	recoverOnly := recoverAll || recoverTarget != ""
+	if recoverAll && recoverTarget != "" {
+		return errors.New("choose one of --recover and --recover-all")
+	}
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
@@ -67,6 +80,9 @@ func run() error {
 		return err
 	}
 	defer root.Close()
+	if recoverTarget != "" {
+		return recoverAssignment(ctx, directory, configs, recoverTarget, token)
+	}
 	deviceToken := os.Getenv("YIELDD_CLIENT_TOKEN")
 	var deviceListener net.Listener
 	if clientListen != "" && !recoverOnly {
@@ -173,4 +189,68 @@ func drainDeviceHTTP(server *http.Server) error {
 		_ = server.Close()
 	}
 	return err
+}
+
+func recoverAssignment(ctx context.Context, directory string, configs []config, target, token string) error {
+	split := strings.LastIndexByte(target, '/')
+	if split < 0 || !runnerNamePattern.MatchString(target[split+1:]) {
+		return errors.New("--recover requires OWNER/REPOSITORY/PLATFORM/RUNNER")
+	}
+	queue, runner := target[:split], target[split+1:]
+	for _, cfg := range configs {
+		if !strings.EqualFold(queue, cfg.Repository+"/"+cfg.platform()) {
+			continue
+		}
+		path := filepath.Join(directory, queueDirectory(cfg))
+		if _, err := os.Stat(filepath.Join(path, "state.json")); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return errors.New("no such assignment in the selected queue")
+			}
+			return err
+		}
+		store, err := openStore(path)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		saved, err := store.read()
+		if err != nil {
+			return err
+		}
+		l := saved.Leases[runner]
+		if l == nil {
+			return errors.New("no such assignment in the selected queue")
+		}
+		if saved.Config != cfg {
+			return errors.New("recover with the original queue configuration")
+		}
+		c, err := newQueueWorker(saved, store, token, 0)
+		if err != nil {
+			return err
+		}
+		c.device = newDeviceQueue(nil)
+		return c.assigned(runner).recover(ctx)
+	}
+	return errors.New("recovery target does not identify a configured queue")
+}
+
+func (a *assignment) recover(ctx context.Context) error {
+	l := a.lease
+	a.logger.Info("Recovering selected assignment", "runner", l.Name, "registration", l.RunnerID, "dispatch_intent", l.DispatchIntent, "workflow_run", l.RunID, "cleanup_intent", l.CleanupIntent)
+	return recoverUntilDone(ctx, func() (bool, error) { return a.reconcile(ctx, true) })
+}
+
+func recoverUntilDone(ctx context.Context, attempt func() (bool, error)) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		done, err := attempt()
+		if err != nil || done {
+			return err
+		}
+		if err := waitForRetry(ctx, cleanupRetryDelay); err != nil {
+			return err
+		}
+	}
 }

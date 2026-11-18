@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -146,5 +148,74 @@ func TestCoordinatorShutdownIgnoresOnlyCancellationOutsideRecovery(t *testing.T)
 		if !errors.Is(err, failure) || errors.Is(err, context.Canceled) != recoverOnly || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal("incorrect shutdown result", recoverOnly, err)
 		}
+	}
+}
+
+func TestTargetedRecoveryLeavesOtherQueueAlone(t *testing.T) {
+	first, _, _, req := localFixture(t)
+	sibling, world, _ := multipleFallbackFixture(t, 1)
+	sibling.device.pollNow(0)
+	if _, err := sibling.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	other := requestFor(sibling.device.pollNow(0))
+	// A second lease in the selected queue must never enter reconciliation.
+	name := "yieldd-bootstrap-00000000-0000-0000-0000-000000000001"
+	healthy := &assignment{coordinator: sibling}
+	if err := healthy.replace(&lease{Name: name, Created: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := healthy.register(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := healthy.prepare(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	sibling.state.Config.Repository = "example/yieldd-bootstrap-sibling"
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := sibling.assigned(other.Runner).recover(ctx); !errors.Is(err, context.Canceled) || sibling.assigned(other.Runner).lease.CleanupIntent {
+		t.Fatal("canceled recovery changed the target", err)
+	}
+	if err := sibling.assigned(other.Runner).recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if sibling.assigned(other.Runner).lease != nil || first.assigned(req.Runner).lease == nil || sibling.assigned(name).lease == nil || world.getCalls != 0 {
+		t.Fatal("wrong recovery scope")
+	}
+}
+
+func TestTargetedRecoveryCannotInitializeOrRewriteQueues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig
+	path := filepath.Join(dir, queueDirectory(cfg))
+	store, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.load(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(path, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Fallback = "\"changed\""
+	other := cfg
+	other.Repository = "example/missing"
+	for _, queue := range []string{cfg.Repository, other.Repository, "wrong/queue"} {
+		if err := recoverAssignment(t.Context(), dir, []config{cfg, other}, queue+"/linux/"+fixtureRunner, "unused"); err == nil {
+			t.Fatal("accepted nonexistent target", queue)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(path, "state.json"))
+	if err != nil || string(after) != string(data) {
+		t.Fatal("recovery changed route", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, queueDirectory(other))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("recovery created queue", err)
 	}
 }
