@@ -8,10 +8,17 @@ protocol NativeCacheBackend: RunnerBackend {
 // The slot worker reads verified cache requests from its relay’s private directory.
 final class NativeCacheSession {
     private struct Grants: Decodable, Equatable {
-        let repository_id: String
+        let repositoryID: String
         let repository: String?
-        let read_scopes: [String]
-        let write_scope: String?
+        let readScopes: [String]
+        let writeScope: String?
+
+        enum CodingKeys: String, CodingKey {
+            case repositoryID = "repository_id"
+            case repository
+            case readScopes = "read_scopes"
+            case writeScope = "write_scope"
+        }
     }
     private struct Request: Decodable {
         enum Operation: String, Decodable { case open, save }
@@ -62,7 +69,7 @@ final class NativeCacheSession {
         guard request.id != lastRequest else { return }
         var response = Response(id: request.id)
         do {
-            guard !request.grants.repository_id.isEmpty,
+            guard !request.grants.repositoryID.isEmpty,
                   request.grants.repository.map({ $0.caseInsensitiveCompare(repository) == .orderedSame }) ?? true
             else { throw NativeCacheSessionError.inconsistentGrant }
             switch request.operation {
@@ -73,18 +80,18 @@ final class NativeCacheSession {
                 case .fresh:
                     // Either operation can allocate resources before throwing.
                     state = .opening
-                    let disk = try store.open(id, readable: request.grants.read_scopes, writable: request.grants.write_scope)
+                    let disk = try store.open(id, readable: request.grants.readScopes, writable: request.grants.writeScope)
                     try backend.attachNativeCache(image: disk.url, cold: disk.isCold, on: id)
                     state = .attached(request.grants, disk)
                 default:
                     throw NativeCacheSessionError.inconsistentGrant
                 }
-                response.writable = request.grants.write_scope != nil
+                response.writable = request.grants.writeScope != nil
             case .save:
                 switch state {
                 case let .attached(grants, disk), let .saveRequested(grants, disk):
                     guard grants == request.grants else { throw NativeCacheSessionError.inconsistentGrant }
-                    if grants.write_scope != nil { state = .saveRequested(grants, disk) }
+                    if grants.writeScope != nil { state = .saveRequested(grants, disk) }
                 default:
                     throw NativeCacheSessionError.inconsistentGrant
                 }
