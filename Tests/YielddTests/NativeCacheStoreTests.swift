@@ -182,10 +182,7 @@ func replacedGuestDiskCannotBecomeASeed(change: String) throws {
     try store.discard(first)
     let area = root.appendingPathComponent(RunnerPlatform.linux.rawValue)
     let index = area.appendingPathComponent("index.json")
-    // A store created before eviction tracking still serves its existing generations.
-    let encoded = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
-    let before = try JSONSerialization.data(withJSONObject: try #require(encoded["seeds"]))
-    try writePrivateRunnerFile(before, to: index)
+    let before = try Data(contentsOf: index)
     let orphan = area.appendingPathComponent("seeds/\(UUID().uuidString).img")
     try Data().write(to: orphan)
     let second = runner()

@@ -60,15 +60,6 @@ struct NativeCacheStore {
         }
     }
 
-    static func recover(in directory: URL, platform: RunnerPlatform, id: RunnerID) throws {
-        guard let storage = try RunnerStorage.load(in: directory) else { return }
-        let path = storage.volumeURL.appendingPathComponent("job-caches/native")
-        // Validate the mounted volume before treating absence as a successful cleanup.
-        _ = try storage.validate(stateDirectory: directory)
-        try storage.validatePath(path)
-        try Self(root: path, platform: platform).discard(id)
-    }
-
     private func jobPath(_ id: RunnerID) throws -> URL {
         guard id.isValid else { throw RunnerLeaseError.invalidRunnerID(path: jobs.path) }
         return jobs.appendingPathComponent(id.value)
@@ -213,12 +204,7 @@ struct NativeCacheStore {
 
     private func readIndex() throws -> Index {
         guard let data = try readPrivateRunnerFile(index, maximumBytes: 64 * 1024) else { return Index() }
-        let decoder = JSONDecoder()
-        do {
-            return try decoder.decode(Index.self, from: data)
-        } catch DecodingError.keyNotFound(let key, _) where key.stringValue == "seeds" {
-            return try Index(seeds: decoder.decode([String: Seed].self, from: data))
-        }
+        return try JSONDecoder().decode(Index.self, from: data)
     }
 
     private func reapSeeds(keeping generations: Set<UUID>) throws {

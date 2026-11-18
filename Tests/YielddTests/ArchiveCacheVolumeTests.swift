@@ -85,6 +85,21 @@ import Testing
     #expect(!FileManager.default.fileExists(atPath: store.directory.path))
 }
 
+@Test func standaloneRecoveryIdentifiesArchiveStorageFailure() throws {
+    let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try RunnerNetworkDirectories.createPrivateDirectory(state)
+    defer { try? FileManager.default.removeItem(at: state) }
+    try writePrivateRunnerFile(Data("invalid".utf8), to: state.appendingPathComponent("storage.json"))
+    do {
+        try removeUnleasedRunnerFiles(in: state, makeCloneStore: { kind in
+            MacOSRunnerCloneStore(rootURL: state.appendingPathComponent(kind.rawValue))
+        })
+        Issue.record("Recovery succeeded with unreadable archive storage configuration")
+    } catch let RunnerSessionError.cleanupFailed(failures) {
+        #expect(failures.map(\.step) == [.archiveCache])
+    }
+}
+
 private func fillArchiveVolume(_ file: URL, bytes: Int) throws -> Int {
     let fd = open(file.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o600)
     guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }

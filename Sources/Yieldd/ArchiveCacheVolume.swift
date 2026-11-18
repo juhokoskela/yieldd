@@ -19,9 +19,6 @@ struct ArchiveCacheVolume {
     func open() throws -> Store {
         let manager = FileManager.default
         let contents = Set(try manager.contentsOfDirectory(atPath: directory.path))
-        guard !contents.contains(".data") else {
-            throw VolumeError.unboundedStore(directory.path)
-        }
         if contents.contains("creating.sparseimage") {
             // The owner lock is inherited by hdiutil. Recovery cannot race an old create.
             guard unlink(directory.appendingPathComponent("creating.sparseimage").path) == 0 else {
@@ -122,12 +119,11 @@ struct ArchiveCacheVolume {
     }
 
     private enum VolumeError: LocalizedError {
-        case insufficientSpace, wrongImage, unboundedStore(String)
+        case insufficientSpace, wrongImage
         var errorDescription: String? {
             switch self {
             case .insufficientSpace: "Runner storage needs more free space to create the archive disk."
             case .wrongImage: "The archive disk or its private mount point does not match the configured store."
-            case let .unboundedStore(path): "Move the existing archive store at \(path) aside before enabling the bounded cache."
             }
         }
     }
