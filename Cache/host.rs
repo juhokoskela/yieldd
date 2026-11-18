@@ -53,6 +53,7 @@ impl Policy {
             hash.update(b"yieldd/shared/v1\0");
             for member in &group {
                 if member.repository_id.is_empty()
+                    || member.repository_id.starts_with('0')
                     || !member.repository_id.bytes().all(|b| b.is_ascii_digit())
                     || !member.reference.starts_with("refs/heads/")
                     || member.reference.len() == "refs/heads/".len()
@@ -194,6 +195,7 @@ mod tests {
             r#"{"trusted_group":[]}"#,
             r#"{"trustedGroups":[[]]}"#,
             r#"{"trustedGroups":[[{"repositoryID":"repo","ref":"refs/heads/main"}]]}"#,
+            r#"{"trustedGroups":[[{"repositoryID":"0123","ref":"refs/heads/main"}]]}"#,
             r#"{"trustedGroups":[[{"repositoryID":"1","ref":"refs/pull/1/merge"}]]}"#,
             r#"{"trustedGroups":[[{"repositoryID":"1","ref":"refs/heads/"}]]}"#,
             r#"{"trustedGroups":[[{"repositoryID":"1","ref":"refs/heads/main","all":true}]]}"#,
