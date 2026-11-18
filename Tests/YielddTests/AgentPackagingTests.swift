@@ -57,13 +57,26 @@ func installerRefusesAnExistingAppBeforePreflightOrImageBuild() throws {
     #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
 }
 
+@Test
+func failedEnrollmentKeepsTheInstalledBundleForRecovery() throws {
+    let fixture = try InstallerFixture(preflightResult: "macos", enrollmentFails: true)
+    defer { fixture.remove() }
+    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    let executable = fixture.applicationsURL.appendingPathComponent("yieldd.app/Contents/MacOS/yieldd")
+    #expect(FileManager.default.isExecutableFile(atPath: executable.path))
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
+    #expect(events.contains("new:agent install --server"))
+    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    #expect(try String(contentsOf: fixture.logURL, encoding: .utf8) == events)
+}
+
 @Test(arguments: [false, true])
 func agentPreflightBinaryRejectsMissingStorageBeforeReturningInstallerToken(linux: Bool) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let bin = fixture.rootURL.appendingPathComponent("bin")
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-    for name in linux ? ["gh", "container"] : ["gh"] {
+    for name in linux ? ["container"] : [] {
         let executable = bin.appendingPathComponent(name)
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
@@ -101,7 +114,7 @@ private struct InstallerFixture {
     var oldMarker: URL { applicationsURL.appendingPathComponent("yieldd.app/old-marker") }
 
     let arguments = ["--server", "https://example.test", "--device-id", "01234567-89ab-4def-8123-456789abcdef"]
-    init(preflightResult: String) throws {
+    init(preflightResult: String, enrollmentFails: Bool = false) throws {
         try executable("Scripts/build-local-app.sh", script: "echo build >> \(quote(logURL.path))")
         try executable(".build/yieldd.app/Contents/MacOS/yieldd", script: """
         printf 'new:%s\\n' "$*" >> \(quote(logURL.path))
@@ -109,6 +122,7 @@ private struct InstallerFixture {
             \(preflightResult == "failure" ? "exit 2" : "echo \(preflightResult)")
             exit 0
         fi
+        exit \(enrollmentFails ? 1 : 0)
         """)
     }
 
