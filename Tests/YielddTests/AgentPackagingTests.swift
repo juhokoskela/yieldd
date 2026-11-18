@@ -68,6 +68,20 @@ func localAgentInstallerPreflightsBeforeReplacingAndBuildsOnlyForLinux(result: S
     #expect(remaining == ["yieldd.app"])
 }
 
+@Test
+func localAgentInstallerSupportsConnectedConfiguration() throws {
+    let fixture = try InstallerFixture(preflightResult: "macos")
+    defer { fixture.remove() }
+    let arguments = ["--connected", "--server", "https://coordinator.example", "--device-id", "01234567-89ab-4def-8123-456789abcdef",
+                     "--platform", "macos", "--macos-template", "/template.bundle"]
+    let result = try fixture.run(arguments: arguments)
+    #expect(result.terminationStatus == 0)
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
+    #expect(events.contains("new:agent install-connected --preflight-only"))
+    #expect(events.contains("old:agent uninstall"))
+    #expect(events.contains("new:agent install-connected --server"))
+}
+
 @Test(arguments: [false, true])
 func agentPreflightBinaryRejectsMissingStorageBeforeReturningInstallerToken(linux: Bool) throws {
     let fixture = try ProbeBundleFixture()

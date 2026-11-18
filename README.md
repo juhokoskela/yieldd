@@ -177,6 +177,8 @@ Runner sessions prevent automatic idle system sleep from memory admission throug
 
 ## Local agent
 
+For coordinator-managed runners, use the [connected agent setup](Docs/connected-mac-prototype.md#connected-agent-at-login). The instructions below configure standalone repository slots. Both modes share one LaunchAgent.
+
 The local agent runs the same runner pool at login without keeping a terminal open. For Linux slots, run `yieldd doctor` and start the container system once before installation so Apple Container can install any required kernel components. For macOS slots, validate the template with `machine-test` first.
 
 Install one or more runner slots from the repository root:

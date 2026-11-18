@@ -6,7 +6,7 @@ This prototype offers Linux ARM64 containers, macOS ARM64 VMs, or both from one 
 
 macOS workers are capped at two, matching the standalone service and [Apple's standard macOS virtualization allowance](https://www.apple.com/legal/sla/docs/macOSTahoe.pdf). Shut down the template and other macOS VMs before running two guests. Linux workers are capped at 16. These are worker limits, not guarantees of available host CPU, disk, or memory.
 
-All repositories share these local workers. Each repository/platform queue can hold up to 16 assignments. The coordinator's `--max-fallback-runners` setting limits active hosted bootstraps per queue, defaulting to one; Compose exposes it as `YIELDD_MAX_FALLBACK_RUNNERS`. Additional demand waits when neither local capacity nor another fallback slot is available. Local-only repositories never dispatch fallback. This is not yet a multi-device scheduler or installed connected agent. Workloads using fallback must support its architecture as well as local ARM64.
+All repositories share these local workers. Each repository/platform queue can hold up to 16 assignments. The coordinator's `--max-fallback-runners` setting limits active hosted bootstraps per queue, defaulting to one; Compose exposes it as `YIELDD_MAX_FALLBACK_RUNNERS`. Additional demand waits when neither local capacity nor another fallback slot is available. Local-only repositories never dispatch fallback. This is not yet a multi-device scheduler. Workloads using fallback must support its architecture as well as local ARM64.
 
 ## Setup
 
@@ -51,7 +51,7 @@ Stop any standalone runner command or installed local agent first. `connect` use
   --device-id "$YIELDD_DEVICE_ID"
 ```
 
-For a different coordinator host, replace the server with its HTTPS origin. `connect` needs the device token, but no GitHub token or `gh` executable. The [pinned Container build](linux-runner-network.md) is required for Linux execution or recovery, not a macOS-only client. Broad GitHub credentials stay on the coordinator. The Mac client remains a foreground process; the coordinator can run in the foreground or through the Linux Compose deployment.
+For a different coordinator host, replace the server with its HTTPS origin. `connect` needs the device token, but no GitHub token or `gh` executable. The [pinned Container build](linux-runner-network.md) is required for Linux execution or recovery, not a macOS-only client. Broad GitHub credentials stay on the coordinator. The Mac client can run in the foreground or as the installed connected agent below; the coordinator can run in the foreground or through the Linux Compose deployment.
 
 While accepting and executing an assignment, and during its cleanup attempt, `connect` prevents automatic idle system sleep. It releases that assertion when the attempt returns, including on failure or cancellation. Recovery acquires it again while cleaning up a recorded assignment. Idle polling and retry backoff do not keep the Mac awake. The display can sleep; closing the lid, explicitly choosing Sleep, and critical-battery shutdown are not prevented.
 
@@ -82,6 +82,22 @@ On the Mac, offer both platforms through one process:
 For macOS only, omit `--platform linux`. With no platform flags, the existing command remains Linux-only. The macOS template path must be absolute and outside the managed clone directory. Workers poll independently without reserving memory. When simultaneous offers exceed the budget, only workers that acquire reservations can accept. A worker that loses admission immediately declines its offer, so the coordinator can reconcile without waiting five seconds. Declined or expired offers use fallback if the queue is below its configured hosted limit; otherwise they return to waiting. Local-only offers always return to waiting. A host with enough memory can execute several jobs from the same platform and repository, or mix platforms and repositories.
 
 The proxy must forward all of `/v1/`, including `/v1/macos/`. Workflows need only `runs-on: yieldd-macos`; no workflow-side routing action is needed.
+
+## Connected agent at login
+
+After validating foreground execution, install the connected agent from the repository root:
+
+```sh
+Scripts/install-local-agent.sh --connected \
+  --server https://yieldd.example.com --device-id "$YIELDD_DEVICE_ID" \
+  --platform linux --platform macos --macos-template /absolute/path/VM.bundle
+```
+
+Supply `YIELDD_CLIENT_TOKEN` in the installer's environment. Installation saves it as a non-synchronizing generic password in the login Keychain, separate from the private `connected-agent.json` configuration. The agent reads the token without prompting; a locked or inaccessible keychain stops startup and retains recovery records. macOS may require Keychain access approval during setup. No GitHub CLI or GitHub token is needed on the Mac. Device enrollment and token rotation remain manual on the coordinator.
+
+The installer preflights tools, storage, capacity, and template files, builds the Linux image when needed, and recovers the previous installation before replacing it. Connected and standalone agents share one LaunchAgent and ownership lock. Uninstall the current configuration before switching modes or changing credentials. Do not move an enabled app bundle.
+
+Use `yieldd agent status` from the installed app to inspect registration and configuration, and `yieldd agent uninstall` to disable it and recover outstanding assignments. Configuration and the Keychain token remain if recovery fails. The agent uses unified logging under subsystem `dev.yieldd`, category `agent`, and has the same 50-second shutdown budget as the standalone agent. Foreground `connect` remains available for diagnostics.
 
 ## Delivery and recovery
 

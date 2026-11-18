@@ -43,97 +43,109 @@ struct ConnectCommand: ParsableCommand {
         let serverURL = try ConnectedHTTPClient.serverURL(server)
         let token = ProcessInfo.processInfo.environment["YIELDD_CLIENT_TOKEN"] ?? ""
         if confirmRegistrationRemoved == nil { try ConnectedHTTPClient.validateToken(token) }
-        try MacOSVirtualMachineLifecycle.requireSupportedHost()
-        let platforms = platforms
-        let template = macosTemplate.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() }
-        let deviceID = deviceID
-        let confirmation = confirmRegistrationRemoved
+        let stop = try RunnerPoolStop.monitoringSignals()
         do {
-            try withRunnerOwnership(connected: true) { leaseStore in
-                guard try leaseStore.load().isEmpty else {
-                    throw ValidationError("Run recover to clean up standalone runner leases before connecting.")
-                }
-                if let template {
-                    try RunnerStorage.required(in: leaseStore.directory).validateTemplateLocation(template)
-                }
-                let stop = try RunnerPoolStop.monitoringSignals()
-                let directory = leaseStore.directory
-                // Recover every persisted platform, even if it is no longer enabled.
-                // macOS recovery removes abandoned clones without requiring the template.
-                try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
-                                              token: token, confirmation: confirmation, stop: stop)
-                if confirmation != nil {
-                    print("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
-                    return
-                }
-                try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
-                let storage = try RunnerStorage.required(in: directory)
-                try storage.validate(stateDirectory: directory)
-                try RunnerNetwork.requireRelay()
-                let memory = RunnerMemoryAdmission()
-                for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
-                if let template {
-                    try storage.validateMacOS(template: template, clones: storage.clonesURL)
-                    try MacOSVirtualizationBackend.validateTemplate(at: template)
-                    try VirtualizationEntitlement.requireCurrentProcess()
-                }
-                let backends = try platforms.map { platform -> RunnerSlotBackend in
-                    switch platform {
-                    case .linux:
-                        let container = try ExecutableLocator().locate("container")
-                        try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check))
-                        try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check), stateDirectory: directory).start()
-                        try storage.validateContainer(containerExecutable: container)
-                        return .linux(containerURL: container)
-                    case .macOS:
-                        guard let template else { throw RunnerServiceConfigurationError.templatePairRequired }
-                        return .macOS(templateURL: template)
-                    }
-                }
-                let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
-                    print("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
-                }
-                try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
-                    let platform = worker.backend.platform
-                    let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
-                                                     platform: platform, slot: worker.slot, checkCancellation: stop.check)
-                    let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
-                    let executor = ProcessExecutor(checkCancellation: authorization.check)
-                    let backend: any RunnerBackend
-                    switch worker.backend {
-                    case let .linux(containerURL):
-                        backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
-                            stateDirectory: directory,
-                            checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
-                            dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
-                    case let .macOS(templateURL):
-                        backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
-                            cloneRootURL: RunnerStorage.cloneRoot(in: directory),
-                            executor: executor, checkCancellation: authorization.check, wait: stop.wait)
-                    }
-                    let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
-                        server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
-                        authorization: authorization, wait: stop.wait,
-                        stateChanged: { reportRunnerServiceState($0, platform: platform, output: .terminal) })
-                    try runConnectedClient(checkCancellation: stop.check, recover: {
-                        try runner.recover()
-                        print("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
-                    }, acquire: {
-                        try memory.tryAcquire(reserving: platform.memoryReservationBytes)
-                    }, release: memory.release, poll: client.poll, decline: client.decline, run: { offer, allocation, release in
-                        print("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
-                        try runner.run(offer, memory: allocation, releaseCapacity: release)
-                    }, wait: stop.wait, retrying: { error in
-                        print("Retrying \(platform.rawValue) slot \(worker.slot) in five seconds: \(describeError(error))")
-                    }, available: {
-                        memory.isAvailable(reserving: platform.memoryReservationBytes)
-                    }, blocked: {
-                        print("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
-                    })
-                }
-            }
+            try runConnectedService(server: serverURL, deviceID: deviceID, token: token,
+                platforms: platforms, template: macosTemplate.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() },
+                confirmation: confirmRegistrationRemoved, stop: stop)
         } catch where isCancellation(error) {
             print("Stopped. Any unfinished connected assignment remains recorded for recovery.")
+        }
+    }
+}
+
+func runConnectedService(
+    server serverURL: URL, deviceID: String, token: String, platforms: [RunnerPlatform], template: URL?,
+    confirmation: String? = nil, stop: RunnerPoolStop, stateDirectory: URL? = nil,
+    resolveContainer: () throws -> URL = { try ExecutableLocator().locate("container") },
+    output: RunnerServiceOutput = .terminal
+) throws {
+    try MacOSVirtualMachineLifecycle.requireSupportedHost()
+    try withRunnerOwnership(in: stateDirectory, connected: true) { leaseStore in
+        if let installed = try ConnectedAgentStore(directory: leaseStore.directory).load() {
+            try installed.requireIdentity(server: serverURL, deviceID: deviceID)
+        }
+        guard try leaseStore.load().isEmpty else {
+            throw ValidationError("Run recover to clean up standalone runner leases before connecting.")
+        }
+        if let template {
+            try RunnerStorage.required(in: leaseStore.directory).validateTemplateLocation(template)
+        }
+        let directory = leaseStore.directory
+        // Recover every persisted platform, even if it is no longer enabled.
+        // macOS recovery removes abandoned clones without requiring the template.
+        try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
+                                      token: token, confirmation: confirmation, stop: stop,
+                                      resolveContainer: resolveContainer, output: output)
+        if confirmation != nil {
+            output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
+            return
+        }
+        try removeUnleasedRunnerFiles(in: directory, keeping: [], checkCancellation: stop.check)
+        let storage = try RunnerStorage.required(in: directory)
+        try storage.validate(stateDirectory: directory)
+        try RunnerNetwork.requireRelay()
+        let memory = RunnerMemoryAdmission()
+        for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
+        if let template {
+            try storage.validateMacOS(template: template, clones: storage.clonesURL)
+            try MacOSVirtualizationBackend.validateTemplate(at: template)
+            try VirtualizationEntitlement.requireCurrentProcess()
+        }
+        let backends = try platforms.map { platform -> RunnerSlotBackend in
+            switch platform {
+            case .linux:
+                let container = try resolveContainer()
+                try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline))
+                try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline), stateDirectory: directory).start()
+                try storage.validateContainer(containerExecutable: container)
+                return .linux(containerURL: container)
+            case .macOS:
+                guard let template else { throw RunnerServiceConfigurationError.templatePairRequired }
+                return .macOS(templateURL: template)
+            }
+        }
+        let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
+            output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
+        }
+        try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
+            let platform = worker.backend.platform
+            let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
+                                             platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+            let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
+            let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
+            let backend: any RunnerBackend
+            switch worker.backend {
+            case let .linux(containerURL):
+                backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
+                    stateDirectory: directory,
+                    checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
+                    dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
+            case let .macOS(templateURL):
+                backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
+                    cloneRootURL: RunnerStorage.cloneRoot(in: directory),
+                    executor: executor, checkCancellation: authorization.check, wait: stop.wait,
+                    maximumExecutionDeadline: stop.executionDeadline)
+            }
+            let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
+                server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
+                authorization: authorization, wait: stop.wait,
+                stateChanged: { reportRunnerServiceState($0, platform: platform, output: output) })
+            try runConnectedClient(checkCancellation: stop.check, recover: {
+                try runner.recover()
+                output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
+            }, acquire: {
+                try memory.tryAcquire(reserving: platform.memoryReservationBytes)
+            }, release: memory.release, poll: client.poll, decline: client.decline, run: { offer, allocation, release in
+                output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
+                try runner.run(offer, memory: allocation, releaseCapacity: release)
+            }, wait: stop.wait, retrying: { error in
+                output.info("Retrying \(platform.rawValue) slot \(worker.slot) in five seconds: \(describeError(error))")
+            }, available: {
+                memory.isAvailable(reserving: platform.memoryReservationBytes)
+            }, blocked: {
+                output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
+            })
         }
     }
 }
