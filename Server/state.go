@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -184,7 +185,18 @@ func (s *stateStore) load(c config) (*state, error) {
 	}
 	if value.Config != c {
 		old := value.Config
-		if len(value.Leases) > 0 || old.Repository != c.Repository || old.Platform != c.Platform || old.DeviceID != c.DeviceID || old.validate() != nil || c.validate() != nil {
+		if old.Repository != c.Repository || old.Platform != c.Platform || old.DeviceID != c.DeviceID || old.validate() != nil || c.validate() != nil {
+			return nil, errors.New("state belongs to a different configuration; recover with its original configuration")
+		}
+		if !old.LocalOnly && !c.LocalOnly {
+			savedLabels, _ := fallbackLabels(old.Fallback)
+			requestedLabels, _ := fallbackLabels(c.Fallback)
+			old.Fallback = c.Fallback
+			if old == c && slices.Equal(savedLabels, requestedLabels) {
+				return &value, nil
+			}
+		}
+		if len(value.Leases) > 0 {
 			return nil, errors.New("state belongs to a different configuration; recover with its original configuration")
 		}
 		value.Config = c

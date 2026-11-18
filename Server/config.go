@@ -59,12 +59,9 @@ func (c config) validate() error {
 		}
 		return nil
 	}
-	var label string
-	var labels []string
-	if json.Unmarshal([]byte(c.Fallback), &label) == nil {
-		labels = []string{label}
-	} else if json.Unmarshal([]byte(c.Fallback), &labels) != nil {
-		return errors.New("fallback must be a JSON label string or array")
+	labels, err := fallbackLabels(c.Fallback)
+	if err != nil {
+		return err
 	}
 	if len(labels) == 0 {
 		return errors.New("fallback must contain at least one label")
@@ -75,4 +72,15 @@ func (c config) validate() error {
 		}
 	}
 	return nil
+}
+
+func fallbackLabels(value string) ([]string, error) {
+	var label string
+	var labels []string
+	if json.Unmarshal([]byte(value), &label) == nil {
+		labels = []string{label}
+	} else if json.Unmarshal([]byte(value), &labels) != nil {
+		return nil, errors.New("fallback must be a JSON label string or array")
+	}
+	return labels, nil
 }
