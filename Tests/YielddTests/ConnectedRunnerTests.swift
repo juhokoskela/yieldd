@@ -25,7 +25,7 @@ func connectedRunnerDestroysGuestAfterOfflineGraceDespiteGuestStatus(started: Bo
     var now: TimeInterval = 0
     var acknowledged = false
     var stopped = false
-    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() },
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() },
         complete: { _ in acknowledged = true }, wait: { _ in now += 300 },
         renew: { _, _ in throw ConnectedRunnerError.transport }, currentTime: { now })
     runner.stateChanged = { if case .executionStopped = $0 { stopped = true } }
@@ -264,7 +264,7 @@ func connectedRunnerContainsFailureOnlyAfterJobStartAndConfirmedCleanup(_ kind: 
     }
     var events: [RunnerSessionState] = []
     var releases = 0
-    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ throws in
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ throws in
         #expect(backend.destroyed && releases == 1)
         #expect(try fixture.store.load() != nil)
     }, wait: { #expect($0 == 0.5) })
@@ -344,6 +344,7 @@ func connectedGuestFailureWaitsForAcknowledgementBeforePollingAnotherAssignment(
             }, wait: { #expect($0 == 5) }, retrying: { _ in retries += 1 })
     }
     #expect(polls == 3 && backend.creates == 2 && releases == 2 && acknowledgements == 4 && retries == 1)
+    #expect(backend.destroys == 2)
     #expect(try fixture.store.load() == nil)
 }
 
@@ -529,7 +530,7 @@ func connectedAuthorizationFailureTakesPrecedenceOverCancelledGuestCommand(_ exp
     backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
     var now: TimeInterval = 0
     var events: [RunnerSessionState] = []
-    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in },
         wait: { #expect($0 == 0.5) }, renew: { _, _ in now == 0 }, currentTime: { now })
     runner.stateChanged = { events.append($0) }
     let authorization = runner.authorization
@@ -835,7 +836,7 @@ func connectedStartupFailureIsReportedBeforeCleanupRetries() throws {
     backend.statusFailure = failure
     var events: [String] = []
     var acknowledgements = 0
-    var runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
+    let runner = fixture.runner(backend: backend, accept: { _ in try connectedJIT() }, complete: { _ in
         events.append("complete")
         acknowledgements += 1
         if acknowledgements < 3 { throw ConnectedRunnerError.http(503, request: "POST /v1/complete (linux ARM64 slot 0)") }
@@ -896,7 +897,7 @@ func connectedCapacityReportFollowsActualRelease() throws {
     defer { fixture.remove() }
     var released = false
     var reported = false
-    var runner = fixture.runner(backend: ConnectedBackend(), accept: { _ in try connectedJIT() }, complete: { _ in })
+    let runner = fixture.runner(backend: ConnectedBackend(), accept: { _ in try connectedJIT() }, complete: { _ in })
     runner.stateChanged = { state in
         if state == .capacityReleased(RunnerID(value: connectedOffer.runner)) { #expect(released); reported = true }
     }
@@ -1300,7 +1301,8 @@ private final class ConnectedBackend: RunnerBackend {
     var platform = RunnerPlatform.linux
     let failure: Failure?
     var creates = 0
-    var destroyed = false
+    var destroys = 0
+    var destroyed: Bool { destroys > 0 }
     var configuration: [String] = []
     var payload: Data?
     var onOperation: () throws -> Void = {}
@@ -1345,6 +1347,6 @@ private final class ConnectedBackend: RunnerBackend {
     func destroy(_ id: RunnerID) throws {
         try onOperation()
         if failure == .destroy { throw TestFailure.machineCleanup }
-        destroyed = true
+        destroys += 1
     }
 }

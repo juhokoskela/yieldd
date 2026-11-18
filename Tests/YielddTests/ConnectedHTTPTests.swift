@@ -315,32 +315,41 @@ func connectedHTTPReportsLastContactAndFailureWithoutResponseBodies(status: Int)
     #expect(!failures.joined().contains("private-jit"))
 }
 
-@Test
-func startupRecoveryReportsCompletedWorkersAndTheRemainingRetry() throws {
+@Test(arguments: [0, 1])
+func startupRecoveryReportsCompletedWorkersAndTheRemainingRetry(failedSlot: Int) throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("recovery-status-\(UUID().uuidString)")
     _ = try AgentConfigurationStore(directory: directory)
     defer { try? FileManager.default.removeItem(at: directory) }
     let control = ConnectedAgentControl(directory: directory)
     let stop = RunnerPoolStop()
     let server = try ConnectedHTTPFixture(respond: { request in
-        let status = request.contains(#""slot":0"#) ? 200 : 503
+        let status = request.contains("\"slot\":\(failedSlot)") ? 503 : 200
         return "HTTP/1.1 \(status) Response\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     })
     defer { server.close() }
     let client = server.client
+    let clones = testCloneStores(in: directory)(.runners)
+    var bundles: [URL] = []
     for slot in 0..<2 {
         let offer = try ConnectedOffer(owner: client.deviceID,
             runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())", repository: "owner/repo", platform: "macos", architecture: "arm64", slot: slot)
+        let bundle = try clones.bundleURL(for: RunnerID(value: offer.runner))
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        bundles.append(bundle)
         try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: slot)
             .save(ConnectedLease(server: client.server.absoluteString, deviceID: client.deviceID, offer: offer))
     }
+    let recordedBundles = bundles
     let output = RunnerServiceOutput(info: { _ in
+        #expect(recordedBundles.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
         let snapshot = control.snapshot
         #expect(snapshot.phase == .recovering && !snapshot.ready)
-        #expect(snapshot.activeAssignments == 1)
-        #expect(snapshot.workers.first { $0.slot == 0 }?.runner == nil)
-        #expect(snapshot.workers.first { $0.slot == 0 }?.lastContactAt != nil)
-        #expect(snapshot.workers.first { $0.slot == 1 }?.connection == .retrying)
+        #expect(snapshot.activeAssignments == 2 - failedSlot)
+        if failedSlot == 1 {
+            #expect(snapshot.workers.first { $0.slot == 0 }?.runner == nil)
+            #expect(snapshot.workers.first { $0.slot == 0 }?.lastContactAt != nil)
+        }
+        #expect(snapshot.workers.first { $0.slot == failedSlot }?.connection == .retrying)
         #expect(snapshot.lastError?.message.contains("503") == true)
         stop.request()
     }, warning: { _ in }, error: { _ in })
@@ -348,6 +357,6 @@ func startupRecoveryReportsCompletedWorkersAndTheRemainingRetry() throws {
         try recoverConnectedPlatforms(directory: directory, server: client.server, deviceID: client.deviceID, token: client.token,
             confirmation: nil, stop: stop, makeCloneStore: testCloneStores(in: directory), output: output, control: control)
     }
-    #expect(try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 0).load() == nil)
+    #expect(try (ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 0).load() == nil) == (failedSlot == 1))
     #expect(try ConnectedRunnerStore(directory: directory, platform: .macOS, slot: 1).load() != nil)
 }
