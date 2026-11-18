@@ -1,33 +1,49 @@
-name: Disposable guest cache acceptance
+name: Verify cache publication after final GitHub verdict
 on:
   push:
-    branches: [test/cache-local-accept-20261118]
+    branches: [test/cache-verified-publication-20261118]
 permissions:
   contents: read
 jobs:
-  macos-seed:
-    uses: ./.github/workflows/cache-local-trial.yml
-    with:
-      runner-label: yieldd-cache-proof-70c06d077868-macos-seed
-      phase: seed
-      platform: macos
-  macos-restore:
-    needs: macos-seed
-    uses: ./.github/workflows/cache-local-trial.yml
-    with:
-      runner-label: yieldd-cache-proof-70c06d077868-macos-restore
-      phase: restore
-      platform: macos
   linux-seed:
     uses: ./.github/workflows/cache-local-trial.yml
     with:
-      runner-label: yieldd-cache-proof-70c06d077868-linux-seed
+      runner-label: yieldd-cache-proof-5141c5c13d06-linux-seed
       phase: seed
       platform: linux
-  linux-restore:
+  linux-late-failure:
     needs: linux-seed
     uses: ./.github/workflows/cache-local-trial.yml
     with:
-      runner-label: yieldd-cache-proof-70c06d077868-linux-restore
+      runner-label: yieldd-cache-proof-5141c5c13d06-linux-late-failure
+      phase: late-failure
+      platform: linux
+  linux-restore:
+    needs: linux-late-failure
+    if: always() && needs.linux-late-failure.result == 'failure'
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-5141c5c13d06-linux-restore
       phase: restore
       platform: linux
+  macos-seed:
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-5141c5c13d06-macos-seed
+      phase: seed
+      platform: macos
+  macos-late-failure:
+    needs: macos-seed
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-5141c5c13d06-macos-late-failure
+      phase: late-failure
+      platform: macos
+  macos-restore:
+    needs: macos-late-failure
+    if: always() && needs.macos-late-failure.result == 'failure'
+    uses: ./.github/workflows/cache-local-trial.yml
+    with:
+      runner-label: yieldd-cache-proof-5141c5c13d06-macos-restore
+      phase: restore
+      platform: macos

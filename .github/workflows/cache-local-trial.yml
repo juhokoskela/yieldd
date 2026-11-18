@@ -38,6 +38,8 @@ jobs:
         with:
           path: ~/.yieldd-proof-archive
           key: yieldd-accept-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.platform }}
+      - uses: ./actions/late-failure
+        if: inputs.phase == 'late-failure'
       - uses: ./actions/native-cache
         id: native
       - name: Check cache contents
@@ -66,7 +68,7 @@ jobs:
             printf '%s\n' "$expected" > "$gomod/yieldd-proof"
             printf '%s\n' "$expected" > "$gobuild/yieldd-proof"
             printf '%s\n' "$expected" > "$NATIVE_PATH/marker"
-            dd if=/dev/urandom of="$NATIVE_PATH/native-payload" bs=65536 count=8 2>/dev/null
+            dd if=/dev/urandom of="$NATIVE_PATH/native-payload" bs=65536 count=512 2>/dev/null
             cp "$NATIVE_PATH/native-payload" "$archive/payload"
           else
             test "$ARCHIVE_HIT" = true && test "$GO_HIT" = true
@@ -74,6 +76,10 @@ jobs:
               test "$(cat "$file")" = "$expected"
             done
             cmp "$archive/payload" "$NATIVE_PATH/native-payload"
+          fi
+          if [[ "$PHASE" == late-failure ]]; then
+            printf 'mutated prior to deliberate post failure\n' > "$NATIVE_PATH/marker"
+            printf 'MUTATION\n' >> "$NATIVE_PATH/native-payload"
           fi
           {
             printf 'marker=%s\nplatform=%s\nphase=%s\nrunner=%s\n' "$expected" "$PLATFORM" "$PHASE" "$RUNNER_NAME"

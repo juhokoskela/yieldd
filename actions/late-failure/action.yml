@@ -1,0 +1,7 @@
+name: Fail after native cache save intent
+description: Exercise the final GitHub verdict before publication
+runs:
+  using: node24
+  main: setup.cjs
+  post: fail.cjs
+  post-if: always()
