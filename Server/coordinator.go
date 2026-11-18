@@ -196,7 +196,7 @@ func (a *assignment) replace(nextLease *lease) error {
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, false); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, nil); err != nil {
 		return err
 	}
 	c.logger.Info("Job started", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID)
@@ -204,7 +204,7 @@ func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStart
 }
 
 func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, true); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, &job.Result); err != nil {
 		return err
 	}
 	c.logger.Info("Job completed", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID, "result", job.Result)

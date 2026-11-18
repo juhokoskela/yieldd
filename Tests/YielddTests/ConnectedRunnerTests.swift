@@ -378,7 +378,7 @@ func connectedGuestTimeoutDoesNotCancelHealthySibling() throws {
             deviceID: offer.owner, accept: { accepted in
                 try connectedJIT(settings: ["AgentName": accepted.runner, "WorkFolder": "_work", "Ephemeral": true])
             }, complete: { _ in #expect(backend.destroyed) },
-            authorization: .init(renew: { _, _ in true }, checkCancellation: stop.check),
+            authorization: .init(renew: { _, _ in .active }, checkCancellation: stop.check),
             wait: { #expect($0 == 2); try stop.check() })
         var polled = false
         do {
@@ -585,7 +585,7 @@ func standaloneCommandsCannotBypassConnectedRecovery() throws {
     }
     let wrongIdentity = ConnectedRunner(backend: ConnectedBackend(), store: fixture.store, server: "https://another.example/",
         deviceID: connectedOffer.owner, accept: { _ in "" }, complete: { _ in Issue.record("Wrong coordinator") },
-        authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
+        authorization: .init(renew: { _, _ in .active }, checkCancellation: {}), wait: { _ in })
     #expect(throws: ConnectedRunnerError.identityChanged) { try wrongIdentity.recover() }
 }
 
@@ -783,7 +783,7 @@ func connectedRunnerReleasesCapacityWhenJournalPublicationFails() throws {
     let runner = ConnectedRunner(backend: backend, store: store, server: "https://example.com/",
         deviceID: connectedOffer.owner, accept: { _ in throw TestFailure.unexpectedBackendCall },
         complete: { _ in Issue.record("Journal publication failed before acceptance") },
-        authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
+        authorization: .init(renew: { _, _ in .active }, checkCancellation: {}), wait: { _ in })
     var releases = 0
     #expect(throws: TestFailure.runnerJob) {
         try runner.run(connectedOffer, memory: .full, releaseCapacity: { releases += 1 })
@@ -928,7 +928,7 @@ func connectedPlatformsExecuteJITAndRetainIndependentJournals(_ platform: Runner
             #expect(backend.destroyed)
             #expect(accepted.runnerPlatform == platform)
             acknowledged = true
-        }, authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
+        }, authorization: .init(renew: { _, _ in .active }, checkCancellation: {}), wait: { _ in })
     try runner.run(offer, memory: .full)
     #expect(backend.creates == 1 && acknowledged)
     #expect(backend.configuration == ["yieldd-configure-runner", "--jit"])
@@ -1128,7 +1128,7 @@ func connectedWorkersOverlapWithinSharedMemoryAndKeepIndependentJournals(_ platf
             }, complete: { completed in
                 #expect(backend.destroyed)
                 #expect(completed == offer)
-            }, authorization: .init(renew: { _, _ in true }, checkCancellation: {}), wait: { _ in })
+            }, authorization: .init(renew: { _, _ in .active }, checkCancellation: {}), wait: { _ in })
         var polled = false
         do {
             try runConnectedClient(checkCancellation: {}, recover: { try runner.recover() }, acquire: {
@@ -1280,12 +1280,58 @@ private struct ConnectedFixture {
                 currentTime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) -> ConnectedRunner {
         ConnectedRunner(backend: backend, store: store, server: "https://example.com/", deviceID: connectedOffer.owner,
                         accept: accept, complete: complete,
-                        authorization: .init(renew: renew, checkCancellation: check, currentTime: currentTime),
+                        authorization: .init(renew: { offer, check in try renew(offer, check) ? .active : .revoked }, checkCancellation: check, currentTime: currentTime),
                         wait: wait, currentTime: currentTime)
     }
 }
 
-private final class ConnectedBackend: RunnerBackend {
+@Test(arguments: [ExecutionRenewal.jobSucceeded, .revoked], [true, false])
+func connectedNativeCachePublicationUsesFinalJobResult(_ result: ExecutionRenewal, resultBeforeExit: Bool) throws {
+    let fixture = try ConnectedFixture()
+    defer { fixture.remove() }
+    let id = RunnerID(value: connectedOffer.runner)
+    let directories = try RunnerNetworkDirectories(stateDirectory: fixture.directory)
+    let control = try directories.create(for: id)
+    defer { try? FileManager.default.removeItem(at: directories.rootURL) }
+    let cache = NativeCacheStore(root: fixture.directory.appendingPathComponent("caches"), platform: .linux, diskBytes: 4096)
+    let scope = String(repeating: "a", count: 64)
+    func request(_ operation: String) throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "id": operation, "operation": operation, "grants": [
+                "repository_id": "1", "repository": connectedOffer.repository, "read_scopes": [scope], "write_scope": scope
+            ]
+        ])
+        try writePrivateRunnerFile(data, to: control.appendingPathComponent("native-request"))
+    }
+    let backend = ConnectedBackend()
+    backend.statuses.insert(#"{"phase":"listening","jobStarted":true}"#, at: 0)
+    backend.onStatus = { if backend.statusPolls == 1 { try request("open") } }
+    var now: TimeInterval = 0
+    var saveSent = false
+    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in saveSent ? result : .active },
+        checkCancellation: {}, currentTime: { now })
+    let runner = ConnectedRunner(backend: backend, store: fixture.store, server: "https://example.com/",
+        deviceID: connectedOffer.owner, accept: { _ in try connectedJIT() },
+        complete: { _ in #expect(backend.destroyed) }, authorization: authorization, wait: { _ in
+            if !saveSent {
+                try request("save")
+                saveSent = true
+            } else if resultBeforeExit {
+                now = 31
+            }
+        }, nativeCache: cache, currentTime: { now })
+    try runner.run(connectedOffer, memory: .full)
+    #expect(backend.destroyed)
+    #expect(try fixture.store.load() == nil)
+    let next = RunnerID(value: "yieldd-next-job")
+    #expect(try cache.open(next, readable: [scope], writable: nil).isCold == (result == .revoked))
+    try cache.finish(next, publish: false)
+}
+
+private final class ConnectedBackend: NativeCacheBackend {
+    func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws {}
+    func detachNativeCache(on id: RunnerID) throws {}
+
     enum Failure { case configure, run, destroy }
     var platform = RunnerPlatform.linux
     let failure: Failure?
@@ -1312,7 +1358,7 @@ private final class ConnectedBackend: RunnerBackend {
     func exec(_ arguments: [String], standardInput: Data?, timeout: TimeInterval?, outputCapture: ProcessOutputCapture,
               as user: RunnerGuestUser, on id: RunnerID) throws -> ProcessResult {
         try onOperation()
-        if arguments.last == "--protocol-version" { return processResult(stdout: "2\n") }
+        if arguments.contains("--protocol-version") { return processResult(stdout: arguments.contains("--local-cache") ? "3\n" : "2\n") }
         if arguments.first == "yieldd-configure-runner" {
             configuration = arguments
             payload = standardInput

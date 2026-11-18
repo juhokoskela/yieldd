@@ -71,7 +71,7 @@ final class ConnectedRunner {
         do {
             try authorization.check()
             let jit = try accept(offer)
-            authorization.start(offer)
+            authorization.start(offer, pendingNativeSave: { cache?.saveRequested == true })
             try validateConnectedJIT(jit, runner: offer.runner)
             try authorization.check()
             try cache?.prepare()
@@ -91,9 +91,10 @@ final class ConnectedRunner {
                                       self.stateChanged(state)
                                   }, currentTime: currentTime)
                 .run(id: id, pickupTimeout: 5 * 60, handleNativeCache: cache.map { $0.handleRequest })
-            authorization.stopRenewing()
-            publishCache = cache?.detachForPublication() == true
-            if publishCache { try authorization.check() }
+            if let cache, cache.saveRequested, try authorization.confirmNativeSave(wait: wait) {
+                publishCache = cache.detachForPublication()
+                try authorization.check()
+            }
         } catch {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation

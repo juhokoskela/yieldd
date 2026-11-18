@@ -73,13 +73,18 @@ final class ConnectedHTTPClient {
         _ = try request("decline", offer: offer, checkCancellation: checkCancellation)
     }
 
-    func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> Bool {
-        struct Authorization: Decodable { let `continue`: Bool }
+    func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> ExecutionRenewal {
+        struct Authorization: Decodable {
+            let `continue`: Bool
+            let job_succeeded: Bool?
+        }
         let (_, data) = try request("renew", offer: offer, checkCancellation: {
             try self.checkCancellation()
             try checkDeadline()
         })
-        return try JSONDecoder().decode(Authorization.self, from: data).continue
+        let authorization = try JSONDecoder().decode(Authorization.self, from: data)
+        if authorization.continue { return .active }
+        return authorization.job_succeeded == true ? .jobSucceeded : .revoked
     }
 
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {

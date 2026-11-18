@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type localLease struct {
 	Expires      time.Time  `json:"expires"`
 	JobStarted   bool       `json:"job_started,omitempty"`
 	JobCompleted bool       `json:"job_completed,omitempty"`
+	JobSucceeded bool       `json:"job_succeeded,omitempty"`
 }
 
 func (l *localLease) expired() bool {
@@ -156,7 +158,8 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 }
 
 type deviceAuthorization struct {
-	Continue bool `json:"continue"`
+	Continue     bool `json:"continue"`
+	JobSucceeded bool `json:"job_succeeded,omitempty"`
 }
 
 func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
@@ -170,8 +173,11 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	if l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.Local.Phase != localIssued {
 		return &deviceAuthorization{}, nil
 	}
-	if l.CleanupIntent || l.Local.JobCompleted {
+	if l.CleanupIntent {
 		return &deviceAuthorization{}, nil
+	}
+	if l.Local.JobCompleted {
+		return &deviceAuthorization{JobSucceeded: l.Local.JobSucceeded}, nil
 	}
 	busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, l.RunnerID)
 	if err != nil {
@@ -195,14 +201,17 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	return &deviceAuthorization{Continue: !l.Local.expired()}, nil
 }
 
-func (a *assignment) recordLocalJob(id int, completed bool) error {
+func (a *assignment) recordLocalJob(id int, result *string) error {
 	l := a.lease
 	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.RunnerID != id {
 		return nil
 	}
 	next := *l.Local
 	next.JobStarted = true
-	next.JobCompleted = next.JobCompleted || completed
+	if result != nil && !next.JobCompleted {
+		next.JobCompleted = true
+		next.JobSucceeded = strings.EqualFold(*result, "succeeded") || strings.EqualFold(*result, "success")
+	}
 	if next == *l.Local {
 		return nil
 	}

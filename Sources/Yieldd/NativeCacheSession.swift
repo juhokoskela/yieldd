@@ -108,6 +108,11 @@ final class NativeCacheSession {
         lastRequest = request.id
     }
 
+    var saveRequested: Bool {
+        if case .saveRequested = state { return true }
+        return false
+    }
+
     // The post action only records intent. Disk flush runs after the GitHub listener exits.
     func detachForPublication() -> Bool {
         guard case .saveRequested = state else { return false }

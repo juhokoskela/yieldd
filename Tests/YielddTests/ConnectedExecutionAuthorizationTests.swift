@@ -13,7 +13,7 @@ func executionAuthorizationRenewsForLongJobsWithoutATotalDeadline() throws {
         #expect(offer == authorizationOffer)
         try check()
         renewals += 1
-        return true
+        return .active
     }, checkCancellation: {}, currentTime: { now })
     authorization.start(authorizationOffer)
     for _ in 0..<2_880 {
@@ -45,7 +45,7 @@ func executionAuthorizationChecksDeadlineDuringRenewalAndDoesNotRevive() throws 
         now = 300
         try check()
         Issue.record("Expired request must be cancelled")
-        return true
+        return .active
     }, checkCancellation: {}, currentTime: { now })
     authorization.start(authorizationOffer)
     #expect(throws: ConnectedExecutionError.expired) { try authorization.check() }
@@ -59,7 +59,7 @@ func executionAuthorizationAnchorsGraceBeforeNetworkDelay() throws {
     var requests = 0
     let authorization = ConnectedExecutionAuthorization(renew: { _, _ in
         requests += 1
-        if requests == 1 { now = 250; return true }
+        if requests == 1 { now = 250; return .active }
         throw ConnectedRunnerError.transport
     }, checkCancellation: {}, currentTime: { now })
     authorization.start(authorizationOffer)
@@ -73,7 +73,7 @@ func executionAuthorizationAnchorsGraceBeforeNetworkDelay() throws {
 @Test
 func executionAuthorizationRevocationLatchesUntilCleanupAndNextAssignment() throws {
     var permitted = false
-    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in permitted }, checkCancellation: {})
+    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in permitted ? .active : .revoked }, checkCancellation: {})
     authorization.start(authorizationOffer)
     #expect(throws: ConnectedExecutionError.revoked) { try authorization.check() }
     permitted = true
@@ -116,18 +116,44 @@ func executionAuthorizationInterruptsAHostOwnedProcessWhileGuestCommandIsStuck()
     #expect(authorization.failure == .expired)
 }
 
-@Test
-func cleanupHonorsLastDeadlineWithoutRenewingCompletedJob() throws {
+@Test(arguments: [true, false])
+func nativeCacheWaitsForGitHubSuccessBeforeOrAfterListenerExit(successBeforeExit: Bool) throws {
     var now: TimeInterval = 0
     var renewals = 0
-    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in renewals += 1; return true },
-                                                      checkCancellation: {}, currentTime: { now })
-    authorization.start(authorizationOffer)
-    try authorization.check()
-    authorization.stopRenewing()
-    now = 60
-    try authorization.check()
-    #expect(renewals == 1)
+    let authorization = ConnectedExecutionAuthorization(renew: { _, check in
+        try check()
+        renewals += 1
+        return renewals == 2 ? .jobSucceeded : .active
+    }, checkCancellation: {}, currentTime: { now })
+    authorization.start(authorizationOffer, pendingNativeSave: { true })
+    if successBeforeExit {
+        try authorization.check()
+        now = 30
+        try authorization.check()
+    }
+    #expect(try authorization.confirmNativeSave { now += $0 })
+    #expect(renewals == 2)
     now = ConnectedExecutionAuthorization.offlineGrace
     #expect(throws: ConnectedExecutionError.expired) { try authorization.check() }
+}
+
+@Test
+func nativeCacheRejectsRevocationAndBoundsMissingCompletion() throws {
+    var now: TimeInterval = 0
+    let revoked = ConnectedExecutionAuthorization(renew: { _, _ in .revoked }, checkCancellation: {})
+    revoked.start(authorizationOffer, pendingNativeSave: { true })
+    #expect(try !revoked.confirmNativeSave { _ in Issue.record("unexpected retry") })
+
+    let offline = ConnectedExecutionAuthorization(renew: { _, _ in throw ConnectedRunnerError.transport },
+        checkCancellation: {}, currentTime: { now })
+    offline.start(authorizationOffer, pendingNativeSave: { true })
+    #expect(try !offline.confirmNativeSave { now += $0 })
+    #expect(now == 30)
+}
+
+@Test
+func successfulCompletionDoesNotExtendGuestExecutionWithoutPendingSave() throws {
+    let authorization = ConnectedExecutionAuthorization(renew: { _, _ in .jobSucceeded }, checkCancellation: {})
+    authorization.start(authorizationOffer)
+    #expect(throws: ConnectedExecutionError.revoked) { try authorization.check() }
 }
