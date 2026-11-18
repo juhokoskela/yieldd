@@ -1,0 +1,82 @@
+name: Verify immutable archive and native cleanup
+on:
+  push:
+    branches: [test/cache-immutable-20261118]
+permissions:
+  contents: read
+jobs:
+  seed:
+    runs-on: yieldd-cache-proof-35b097e1af43-linux-seed
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: ./actions/native-cache
+      - name: Create independent archive and native markers
+        shell: bash
+        run: |
+          set -eu
+          mountpoint -q "$YIELDD_CACHE_PATH"
+          mkdir proof-archive
+          printf 'seed-%s\n' "$GITHUB_RUN_ID" > proof-archive/value
+          cp proof-archive/value "$YIELDD_CACHE_PATH/value"
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: proof-archive
+          key: yieldd-immutable-${{ github.run_id }}
+      - name: Verify original bytes
+        shell: bash
+        run: |
+          set -eu
+          test "$(cat proof-archive/value)" = "seed-$GITHUB_RUN_ID"
+          cmp proof-archive/value "$YIELDD_CACHE_PATH/value"
+          cp proof-archive/value "$RUNNER_TEMP/proof.txt"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: provenance-seed
+          path: ${{ runner.temp }}/proof.txt
+          if-no-files-found: error
+          retention-days: 3
+  restore:
+    needs: seed
+    runs-on: yieldd-cache-proof-35b097e1af43-linux-restore
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: ./actions/native-cache
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: proof-archive
+          key: yieldd-immutable-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Check both seed markers
+        shell: bash
+        run: |
+          set -eu
+          mountpoint -q "$YIELDD_CACHE_PATH"
+          test "$(cat proof-archive/value)" = "seed-$GITHUB_RUN_ID"
+          cmp proof-archive/value "$YIELDD_CACHE_PATH/value"
+      - uses: ./actions/probe-cache-identity
+      - name: Remove guest's restored copy before second restore
+        run: rm proof-archive/value
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: proof-archive
+          key: yieldd-immutable-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Verify original bytes
+        shell: bash
+        run: |
+          set -eu
+          test "$(cat proof-archive/value)" = "seed-$GITHUB_RUN_ID"
+          cmp proof-archive/value "$YIELDD_CACHE_PATH/value"
+          cp proof-archive/value "$RUNNER_TEMP/proof.txt"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: provenance-restore
+          path: ${{ runner.temp }}/proof.txt
+          if-no-files-found: error
+          retention-days: 3
