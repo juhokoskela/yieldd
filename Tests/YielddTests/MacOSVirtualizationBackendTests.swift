@@ -132,13 +132,32 @@ func macOSBackendRevokedRelayCannotExposeCacheDisk() throws {
     try backend.destroy(macOSBackendID)
 }
 
+@Test
+func macOSBackendRefusesOccupiedCacheMountBeforeAttaching() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let machine = ProbeVirtualMachine()
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult()), .success(processResult()),
+                                                       .success(processResult(status: 1))])
+    let backend = try makeBackend(fixture, executor: executor, makeMachine: { _, _, _ in machine })
+    try backend.create(id: macOSBackendID, memory: .full)
+    #expect(throws: ProcessExecutionError.self) {
+        try backend.attachNativeCache(image: fixture.rootURL.appendingPathComponent("cache.img"), cold: false, on: macOSBackendID)
+    }
+    #expect(machine.attachedNativeImage == nil)
+    #expect(executor.requests.last?.arguments.last?.contains("-e /Volumes/YielddCache || -L /Volumes/YielddCache") == true)
+    try backend.destroy(macOSBackendID)
+}
+
 @Test(arguments: [false, true])
 func macOSBackendDetachesCacheOnlyAfterGuestUnmount(unmountFails: Bool) throws {
     let fixture = try ProbeBundleFixture()
     defer { fixture.remove() }
     let machine = ProbeVirtualMachine()
+    let volumeID = UUID()
     let executor = RecordingProcessExecutor(outcomes: [
         .success(processResult()), .success(processResult()), .success(processResult()),
+        .success(processResult(stdout: volumeID.uuidString + "\n")),
         unmountFails ? .failure(TestFailure.cleanup) : .success(processResult())
     ])
     let backend = try makeBackend(fixture, executor: executor, makeMachine: { _, _, _ in machine })
@@ -153,7 +172,7 @@ func macOSBackendDetachesCacheOnlyAfterGuestUnmount(unmountFails: Bool) throws {
         try backend.detachNativeCache(on: macOSBackendID)
         #expect(machine.nativeDetachCount == 1)
     }
-    #expect(executor.requests.last?.arguments.last == "'/usr/sbin/diskutil' 'unmount' '/Volumes/YielddCache'")
+    #expect(executor.requests.last?.arguments.last == "'/usr/sbin/diskutil' 'unmount' '\(volumeID.uuidString)'")
     try backend.destroy(macOSBackendID)
     #expect(machine.isStopped)
 }
