@@ -167,7 +167,7 @@ func TestNativeDiskSingleAuthorizedExport(t *testing.T) {
 }
 
 func TestNativeDiskDiscardsFailedTransmission(t *testing.T) {
-	for _, name := range []string{"truncated", "out-of-bounds", "overflow", "oversized", "cancel"} {
+	for _, name := range []string{"eof", "truncated", "sealed-truncated-header", "sealed-truncated-payload", "out-of-bounds", "overflow", "oversized", "cancel"} {
 		t.Run(name, func(t *testing.T) {
 			f := newNativeDiskFixture(t)
 			f.bind(t)
@@ -175,8 +175,18 @@ func TestNativeDiskDiscardsFailedTransmission(t *testing.T) {
 			nbdClientHeader(t, conn)
 			nbdClientOption(t, conn, nbdOptExport, nil)
 			nbdReadBytes(t, conn, 10)
+			if name == "sealed-truncated-header" || name == "sealed-truncated-payload" {
+				if err := os.WriteFile(filepath.Join(f.directory, "native-disk-seal"), []byte("seal"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			switch name {
-			case "truncated":
+			case "eof":
+				conn.Close()
+			case "sealed-truncated-header":
+				nbdWriteBinary(t, conn, nbdRequest)
+				conn.Close()
+			case "truncated", "sealed-truncated-payload":
 				nbdClientRequest(t, conn, nbdWrite, 0, 0, 512)
 				nbdWriteBinary(t, conn, []byte("partial"))
 				conn.Close()
@@ -224,5 +234,25 @@ func TestNativeDiskRequiresPrivateRegularFiles(t *testing.T) {
 	}
 	if _, _, err := openNativeDiskFile(f.image, os.O_RDWR, 4096); err == nil {
 		t.Fatal("accepted shared disk")
+	}
+}
+
+func TestNativeDiskCleanEOFWithHostSeal(t *testing.T) {
+	f := newNativeDiskFixture(t)
+	f.bind(t)
+	conn := f.dial(t)
+	nbdClientHeader(t, conn)
+	nbdClientOption(t, conn, nbdOptExport, nil)
+	nbdReadBytes(t, conn, 10)
+	if err := os.WriteFile(filepath.Join(f.directory, "native-disk-seal"), []byte("seal"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if err := <-f.done; err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(f.directory, "native-disk-closed"))
+	if err != nil || string(got) != "closed" {
+		t.Fatalf("sealed EOF not acknowledged: %q %v", got, err)
 	}
 }

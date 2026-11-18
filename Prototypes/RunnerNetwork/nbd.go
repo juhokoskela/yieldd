@@ -104,7 +104,7 @@ func nativeDiskConnection(conn net.Conn, directory string) (bool, error) {
 	selected, err := negotiateNativeDisk(conn, uint64(size))
 	if selected && err == nil {
 		if err = conn.SetDeadline(time.Time{}); err == nil {
-			err = transmitNativeDisk(conn, disk, uint64(size))
+			err = transmitNativeDisk(conn, disk, uint64(size), directory)
 		}
 	}
 	return selected, errors.Join(err, disk.Close())
@@ -209,7 +209,7 @@ func negotiateNativeDisk(conn net.Conn, size uint64) (bool, error) {
 	}
 }
 
-func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64) error {
+func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64, directory string) error {
 	var req struct {
 		Magic          uint32
 		Flags, Command uint16
@@ -219,6 +219,11 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64) error {
 	buf := make([]byte, 128<<10)
 	for {
 		if err := binary.Read(conn, nbdOrder, &req); err != nil {
+			// nbdfuse can close its TCP connection without sending NBD_CMD_DISC.
+			// Only a host-confirmed guest unmount permits EOF between full requests.
+			if err == io.EOF && nativeDiskSealed(directory) {
+				return disk.Sync()
+			}
 			return err
 		}
 		if req.Magic != nbdRequest || req.Length > nbdMaxRequest {
@@ -276,4 +281,14 @@ func transmitNativeDisk(conn net.Conn, disk *os.File, size uint64) error {
 			}
 		}
 	}
+}
+
+func nativeDiskSealed(directory string) bool {
+	file, _, err := openNativeDiskFile(filepath.Join(directory, "native-disk-seal"), os.O_RDONLY, 4)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 5))
+	return err == nil && string(data) == "seal"
 }
