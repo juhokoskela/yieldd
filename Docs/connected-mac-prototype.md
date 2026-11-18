@@ -85,15 +85,16 @@ The proxy must forward all of `/v1/`, including `/v1/macos/`. Workflows need onl
 
 ## Connected agent at login
 
-The installed app and network relay use the same Apple Development identity. The signing Mac needs the certificate, its private key and a trusted WWDR G3 intermediate. List valid identities and copy the 40-character fingerprint beside the Apple Development identity you intend to use. [Apple's WWDR intermediate certificates](https://developer.apple.com/help/account/certificates/wwdr-intermediate-certificates/)
+The installed app and network relay use the same Apple Development identity. The signing Mac needs the certificate, its private key and a trusted WWDR G3 intermediate. [Apple's WWDR intermediate certificates](https://developer.apple.com/help/account/certificates/wwdr-intermediate-certificates/)
+
+List valid identities and export the 40-character fingerprint beside your Apple Development identity.
 
 ```sh
 security find-identity -v -p codesigning
 export YIELDD_SIGNING_IDENTITY='<40-character fingerprint>'
-Scripts/build-local-app.sh
 ```
 
-This builds and verifies `.build/yieldd.app` without installing it. Standalone builds default to ad-hoc signing for CI and foreground tests. The installer requires the fingerprint and checks the signatures of both staged executables before preflight.
+For a staging check before taking a worker offline, run `Scripts/build-local-app.sh` from this shell. It signs and verifies `.build/yieldd.app`. Standalone builds default to ad-hoc signing when the variable is unset. The installer requires the fingerprint and checks both staged signatures before preflight.
 
 After validating foreground execution, install from the same shell:
 

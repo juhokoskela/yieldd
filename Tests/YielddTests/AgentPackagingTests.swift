@@ -69,7 +69,7 @@ func installerRefusesAnExistingAppBeforePreflightOrImageBuild() throws {
     #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
 }
 
-@Test(arguments: ["", "-", "Apple Development", "1234"])
+@Test(arguments: ["", "-", "Apple Development", "1234", String(repeating: "G", count: 40)])
 func installerRequiresACertificateFingerprint(identity: String) throws {
     let fixture = try InstallerFixture(preflightResult: "macos")
     defer { fixture.remove() }
@@ -79,16 +79,19 @@ func installerRequiresACertificateFingerprint(identity: String) throws {
     #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
 }
 
-@Test
-func installerRejectsAnIncorrectlySignedStagedRelayBeforePreflight() throws {
-    let fixture = try InstallerFixture(preflightResult: "linux")
+@Test(arguments: ["yieldd.app", "yieldd-network-relay"])
+func installerChecksTheSelectedCertificateBeforePreflight(artifact: String) throws {
+    let fixture = try InstallerFixture(preflightResult: "macos")
     defer { fixture.remove() }
-    let result = try fixture.run(arguments: fixture.arguments, rejectRelay: true)
+    let fingerprint = "0123456789abcdef0123456789abcdef01234567"
+    let result = try fixture.run(arguments: fixture.arguments, identity: fingerprint, rejectSignatureOf: artifact)
     #expect(result.terminationStatus != 0)
     let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
-    #expect(events.contains("dev.yieldd.network-relay"))
+    let verification = try #require(events.split(separator: "\n").last)
+    #expect(verification.hasPrefix("codesign:"))
+    #expect(verification.hasSuffix("/\(artifact)"))
+    #expect(verification.contains("certificate leaf = H\"\(fingerprint)\""))
     #expect(!events.contains("new:agent"))
-    #expect(!events.contains("container:"))
     #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.applicationsURL.path).isEmpty)
 }
 
@@ -162,7 +165,7 @@ private struct InstallerFixture {
     }
 
     func run(arguments: [String], interruptBuild: Bool = false, identity: String = String(repeating: "A", count: 40),
-             rejectRelay: Bool = false) throws -> ProcessResult {
+             rejectSignatureOf artifact: String? = nil) throws -> ProcessResult {
         let original = try String(contentsOf: repositoryRoot.appendingPathComponent("Scripts/install-local-agent.sh"), encoding: .utf8)
         let scriptDirectoryAssignment = #"script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"#
         let applicationsDirectoryAssignment = #"applications_directory="${HOME:?}/Applications""#
@@ -173,7 +176,7 @@ private struct InstallerFixture {
         export YIELDD_SIGNING_IDENTITY=\(quote(identity))
         codesign() {
             printf 'codesign:%s\\n' "$*" >> \(quote(logURL.path))
-            case "$*" in *"/Contents/Helpers/yieldd-network-relay") \(rejectRelay ? "return 1" : ":") ;; esac
+            case "$*" in */\(quote(artifact ?? ""))) return 1 ;; esac
         }
         container() {
             printf 'container:%s\\n' "$*" >> \(quote(logURL.path))
