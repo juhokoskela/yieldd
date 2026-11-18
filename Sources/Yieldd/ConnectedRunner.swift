@@ -125,8 +125,9 @@ final class ConnectedRunner {
             do { publish = try authorization.confirmNativeSave(wait: wait) }
             catch { failure = error }
         }
-        if (sealed || cache?.saveRequested == true) && !authorization.jobSucceeded {
-            writeToStandardError("Discarding native cache for \(id.value) because GitHub job success was not confirmed.\n")
+        if !publish, sealed || (cache?.saveRequested == true && failure != nil) {
+            let reason = failure.map(describeError) ?? "GitHub job success was not confirmed."
+            writeToStandardError("Discarding native cache for \(id.value): \(reason)\n")
         }
         if let cache {
             if publish { cache.publishAfterDestruction() }

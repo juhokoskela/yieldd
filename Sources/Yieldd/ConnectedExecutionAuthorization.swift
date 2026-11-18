@@ -18,7 +18,7 @@ final class ConnectedExecutionAuthorization {
     private var deadline: TimeInterval = 0
     private var listenerExitDeadline = TimeInterval.infinity
     private var pendingNativeSave: () -> Bool = { false }
-    private(set) var jobSucceeded = false
+    private var jobSucceeded = false
     private var nextRenewal: TimeInterval = 0
     private(set) var failure: ConnectedExecutionError?
 
