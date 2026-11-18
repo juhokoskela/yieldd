@@ -32,7 +32,7 @@ func reservedRunnerObservesAJobThatFinishesBetweenPolls() throws {
         id: assignmentID, pickupTimeout: 300, executionTimeout: 10
     )
     #expect(states.contains(.jobStarted(assignmentID)))
-    #expect(backend.commands.last == ["yieldd-runner-control", "run"])
+    #expect(backend.commands == [["yieldd-runner-control", "start"], ["yieldd-runner-control", "status"]])
 }
 
 @Test(arguments: [false, true])

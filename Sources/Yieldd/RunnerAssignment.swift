@@ -51,6 +51,10 @@ struct ReservedRunnerJob {
             }
             if let exitStatus = status.exitStatus {
                 stateChanged(.listenerExited(id, status: exitStatus))
+                if exitStatus == 0 {
+                    guard jobStarted else { throw RunnerAssignmentError.exitedWithoutJob }
+                    return
+                }
                 let replay: ProcessResult
                 do {
                     replay = try backend.exec(
@@ -62,14 +66,10 @@ struct ReservedRunnerJob {
                     replay = result
                 }
                 guard replay.terminationStatus == exitStatus else { throw RunnerAssignmentError.invalidStatus }
-                guard exitStatus == 0 else {
-                    let output = [replay.stdoutText, replay.stderrText]
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }.joined(separator: "\n")
-                    throw RunnerAssignmentError.listenerFailed(exitStatus, output: output)
-                }
-                guard jobStarted else { throw RunnerAssignmentError.exitedWithoutJob }
-                return
+                let output = [replay.stdoutText, replay.stderrText]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }.joined(separator: "\n")
+                throw RunnerAssignmentError.listenerFailed(exitStatus, output: output)
             }
             if !status.jobStarted && jobStarted { throw RunnerAssignmentError.invalidStatus }
             try wait(min(0.5, max(0, deadline - currentTime())))
