@@ -297,3 +297,31 @@ func TestRepositoryRouteChangeCannotRedirectPersistedCleanup(t *testing.T) {
 		t.Fatal("original cleanup identity changed", reloaded, err)
 	}
 }
+
+func TestEmptyQueueAdoptsRoutingAndKeepsIdentity(t *testing.T) {
+	c, _, store, request := localFixture(t)
+	if err := c.completeDevice(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.load(c.state.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := c.state.Config
+	next.Fallback = `"other-provider"`
+	s, err := store.load(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Owner != old.Owner || s.ScaleSetID != old.ScaleSetID || s.Config != next {
+		t.Fatal(s)
+	}
+	s, err = store.load(next)
+	if err != nil || s.Owner != old.Owner {
+		t.Fatal(s, err)
+	}
+	c.state = s
+	if err := c.completeDevice(t.Context(), request); err != nil {
+		t.Fatalf("old acknowledgement after route change: %v", err)
+	}
+}
