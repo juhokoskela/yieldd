@@ -6,7 +6,7 @@ For a build directory that is expensive to archive, a workflow can request a pri
 
 ## Enable caching
 
-1. Drain the agent. Upgrade the signed application and the patched Container installation for Linux. Rebuild the Linux guest image and update the macOS template with the matching yieldd guest helpers and Actions runner. The Linux Dockerfile builds the worker. Follow [Prepare a macOS runner template](macos-template.md) for the macOS worker.
+1. Drain the agent. Upgrade the coordinator first so it can confirm the final job result. An older coordinator can serve jobs, but every native save will be discarded. Upgrade the signed application. Linux uses the existing yieldd Container build. Rebuild the Linux guest image and update the macOS template with the matching yieldd guest helpers and Actions runner. The Linux Dockerfile builds the worker. Follow [Prepare a macOS runner template](macos-template.md) for the macOS worker.
 2. Create `~/Library/Application Support/yieldd/job-caches.json` with mode `0600`. Use the state directory passed to yieldd if it differs. The following policy keeps each repository separate.
 
    ```json
