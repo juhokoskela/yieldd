@@ -52,7 +52,7 @@ final class ConnectedExecutionAuthorization {
         var retryDelay: TimeInterval = 2
         func checkResultDeadline() throws {
             try checkDeadline()
-            if currentTime() >= until { throw CompletionWaitExpired() }
+            if currentTime() >= until { throw CancellationError() }
         }
         while !jobSucceeded {
             do {
@@ -64,7 +64,9 @@ final class ConnectedExecutionAuthorization {
                 case .unavailable: return false
                 case .pending: break
                 }
-            } catch is CompletionWaitExpired {
+            } catch is CancellationError {
+                try checkDeadline()
+                guard currentTime() >= until else { throw CancellationError() }
                 return false
             } catch where isTransientConnectedFailure(error) {
                 // The listener can exit before its completion event reaches the coordinator.
@@ -79,8 +81,6 @@ final class ConnectedExecutionAuthorization {
         try checkDeadline()
         return true
     }
-
-    private struct CompletionWaitExpired: Error {}
 
     func stop() { offer = nil; failure = nil; pendingNativeSave = { false } }
 

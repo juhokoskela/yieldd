@@ -76,7 +76,12 @@ final class ConnectedHTTPClient {
     func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> ExecutionRenewal {
         struct Authorization: Decodable {
             let `continue`: Bool
-            let job_succeeded: Bool?
+            let jobSucceeded: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case `continue`
+                case jobSucceeded = "job_succeeded"
+            }
         }
         let (_, data) = try request("renew", offer: offer, checkCancellation: {
             try self.checkCancellation()
@@ -84,7 +89,7 @@ final class ConnectedHTTPClient {
         })
         let authorization = try JSONDecoder().decode(Authorization.self, from: data)
         if authorization.continue { return .active }
-        return authorization.job_succeeded == true ? .jobSucceeded : .revoked
+        return authorization.jobSucceeded == true ? .jobSucceeded : .revoked
     }
 
     func jobResult(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> FinalJobResult {
@@ -107,7 +112,8 @@ final class ConnectedHTTPClient {
             connectionChanged(.connected, nil)
             return result
         } catch {
-            if (error as? ConnectedRunnerError)?.httpStatus == 410 {
+            let status = (error as? ConnectedRunnerError)?.httpStatus
+            if status == 410 || (action == "job-result" && status == 404) {
                 connectionChanged(.connected, nil)
             } else if !isCancellation(error) {
                 connectionChanged(isTransientConnectedFailure(error) ? .retrying : .failed, describeError(error))

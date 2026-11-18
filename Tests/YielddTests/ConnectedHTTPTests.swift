@@ -175,6 +175,23 @@ func connectedFinalResultUsesDedicatedEndpoint(_ result: FinalJobResult) throws 
     #expect(server.request.contains("POST /v1/job-result HTTP/1.1"))
 }
 
+@Test
+func unavailableFinalResultAndLocalDeadlinePreserveConnectionStatus() throws {
+    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    defer { server.close() }
+    let original = server.client
+    var states: [AgentConnectionState] = []
+    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID, token: original.token,
+        checkCancellation: {}, connectionChanged: { state, _ in states.append(state) })
+    let offer = try ConnectedOffer(owner: client.deviceID, runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
+        repository: "owner/repo", platform: "linux", architecture: "arm64")
+    #expect(try client.jobResult(offer, checkDeadline: {}) == .unavailable)
+    #expect(throws: CancellationError.self) {
+        try client.jobResult(offer, checkDeadline: { throw CancellationError() })
+    }
+    #expect(states == [.connected])
+}
+
 @Test(arguments: [RunnerPlatform.linux, .macOS], [0, 2, 15])
 func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatform, slot: Int) throws {
     let body = #"{"jit":"fixture","continue":true}"#
