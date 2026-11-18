@@ -19,12 +19,13 @@ final class RunnerNetworkRelay: @unchecked Sendable {
         executableURL: URL,
         directory: URL,
         identity: (runner: String, platform: String)? = nil,
+        cacheSocket: URL? = nil,
         startupTimeout: TimeInterval = 5,
         checkCancellation: () throws -> Void = {}
     ) throws -> RunnerNetworkRelay {
         precondition(startupTimeout.isFinite && startupTimeout > 0)
         try checkCancellation()
-        let relay = try RunnerNetworkRelay(executableURL: executableURL, directory: directory, identity: identity)
+        let relay = try RunnerNetworkRelay(executableURL: executableURL, directory: directory, identity: identity, cacheSocket: cacheSocket)
         do {
             try relay.lock.withLock {
                 try relay.launch(timeout: startupTimeout, checkCancellation: checkCancellation)
@@ -38,7 +39,7 @@ final class RunnerNetworkRelay: @unchecked Sendable {
         }
     }
 
-    private init(executableURL: URL, directory: URL, identity: (runner: String, platform: String)?) throws {
+    private init(executableURL: URL, directory: URL, identity: (runner: String, platform: String)?, cacheSocket: URL?) throws {
         let path = directory.path
         guard path.utf8.count + "/n.ssh".utf8.count < 104 else {
             throw RunnerNetworkRelayError.socketPathTooLong
@@ -55,6 +56,7 @@ final class RunnerNetworkRelay: @unchecked Sendable {
         if let identity {
             arguments += ["--runner", identity.runner, "--platform", identity.platform.lowercased()]
         }
+        if let cacheSocket { arguments += ["--cache-socket", cacheSocket.path] }
         process.arguments = arguments
         process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
         process.standardInput = lifetime

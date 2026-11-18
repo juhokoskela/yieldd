@@ -1,0 +1,119 @@
+import Darwin
+import Foundation
+
+// One SQLite store per enrolled Mac. Workers share the helper and each give their VM
+// its own authenticated route. No archive endpoint is bound to a host TCP interface.
+final class ArchiveCacheService: @unchecked Sendable {
+    let socketURL: URL
+    private let storage: RunnerStorage
+    private let stateDirectory: URL
+    private let policy: String
+    private let lock = NSLock()
+    private var child: Process?
+    private var lifetime: Pipe?
+
+    private init(storage: RunnerStorage, stateDirectory: URL, policy: Data) throws {
+        self.storage = storage
+        self.stateDirectory = stateDirectory
+        guard let json = String(data: policy, encoding: .utf8), !json.utf8.contains(0) else {
+            throw ArchiveCacheError.invalidPolicy
+        }
+        self.policy = json
+        let root = try RunnerNetworkDirectories(stateDirectory: stateDirectory).rootURL
+        try RunnerNetworkDirectories.createPrivateDirectory(root)
+        socketURL = root.appendingPathComponent("archive.sock")
+    }
+
+    static func start(storage: RunnerStorage, stateDirectory: URL, policy: Data,
+                      checkCancellation: () throws -> Void) throws -> ArchiveCacheService {
+        let service = try ArchiveCacheService(storage: storage, stateDirectory: stateDirectory, policy: policy)
+        try service.ensureRunning(checkCancellation: checkCancellation)
+        return service
+    }
+
+    func ensureRunning(checkCancellation: () throws -> Void) throws {
+        try lock.withLock {
+            if child?.isRunning == true { return }
+            try checkCancellation()
+            // Recheck the volume on every launch, including after a helper crash.
+            try storage.validate(stateDirectory: stateDirectory)
+            let root = storage.volumeURL.appendingPathComponent("job-caches")
+            let archives = root.appendingPathComponent("archives")
+            try storage.validatePath(archives)
+            try RunnerNetworkDirectories.createPrivateDirectory(root)
+            try RunnerNetworkDirectories.createPrivateDirectory(archives)
+            try removeSocket()
+            let process = Process()
+            let pipe = Pipe()
+            for handle in [pipe.fileHandleForReading, pipe.fileHandleForWriting] {
+                guard fcntl(handle.fileDescriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            }
+            process.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/yieldd-cache-server")
+            process.currentDirectoryURL = archives
+            process.environment = ["YIELDD_CACHE_POLICY": policy, "YIELDD_CACHE_SOCKET": socketURL.path,
+                                   "API_BASE_URL": "http://192.168.127.1:7341", "CACHE_MAX_SIZE_BYTES": "10737418240"]
+            process.standardInput = pipe
+            process.standardOutput = FileHandle.standardError
+            process.standardError = FileHandle.standardError
+            try process.run()
+            lifetime = pipe
+            child = process
+            do {
+                try pipe.fileHandleForReading.close()
+                let deadline = DispatchTime.now() + 30
+                while process.isRunning {
+                    try checkCancellation()
+                    var info = stat()
+                    if lstat(socketURL.path, &info) == 0 && info.st_mode & S_IFMT == S_IFSOCK { return }
+                    guard DispatchTime.now() < deadline else { break }
+                    Thread.sleep(forTimeInterval: 0.025)
+                }
+                throw ArchiveCacheError.startupFailed
+            } catch {
+                stopLocked()
+                throw error
+            }
+        }
+    }
+
+    func stop() { lock.withLock { stopLocked() } }
+
+    private func stopLocked() {
+        guard let child else { return }
+        if child.isRunning { child.terminate() }
+        // Closing stdin also handles an abrupt agent exit and an unresponsive transfer.
+        try? lifetime?.fileHandleForWriting.close()
+        let deadline = DispatchTime.now() + 2
+        while child.isRunning && DispatchTime.now() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        if child.isRunning { _ = kill(child.processIdentifier, SIGKILL) }
+        child.waitUntilExit()
+        self.child = nil
+        lifetime = nil
+        try? removeSocket()
+    }
+
+    // An uncatchable termination can leave the Unix socket in its private parent.
+    private func removeSocket() throws {
+        var info = stat()
+        guard lstat(socketURL.path, &info) == 0 else {
+            if errno == ENOENT { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard info.st_mode & S_IFMT == S_IFSOCK, info.st_uid == getuid() else { throw POSIXError(.EACCES) }
+        guard unlink(socketURL.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    deinit { stop() }
+}
+
+private enum ArchiveCacheError: LocalizedError {
+    case startupFailed, invalidPolicy
+    var errorDescription: String? {
+        switch self {
+        case .startupFailed: "The local archive service could not open its cache. Check the agent log."
+        case .invalidPolicy: "The job cache configuration must contain UTF-8 JSON."
+        }
+    }
+}

@@ -1,0 +1,233 @@
+diff --git a/src/http.rs b/src/http.rs
+index e671dc0..50ff7ed 100644
+--- a/src/http.rs
++++ b/src/http.rs
+@@ -1,7 +1,6 @@
+ //! HTTP error responses, request logging and the connection listener.
+ 
+ use std::io;
+-use std::net::SocketAddr;
+ use std::pin::Pin;
+ use std::time::Duration;
+ 
+@@ -10,7 +9,6 @@ use axum::http::StatusCode;
+ use axum::middleware::Next;
+ use axum::response::{IntoResponse, Response};
+ use axum::serve::Listener;
+-use tokio::net::{TcpListener, TcpStream};
+ use tokio_io_timeout::TimeoutStream;
+ 
+ use crate::error::Failure;
+@@ -68,15 +66,15 @@ pub(crate) async fn log_requests(request: Request, next: Next) -> Response {
+ /// download's storage read, its Storage Reader Lease and, on a first restore, the Merge it paces
+ /// forever. Bytes moving at any rate keep the connection alive.
+ #[derive(Debug)]
+-pub(crate) struct StalledClientListener {
+-    pub(crate) listener: TcpListener,
++pub(crate) struct StalledClientListener<L> {
++    pub(crate) listener: L,
+     /// `None` waits forever.
+     pub(crate) timeout: Option<Duration>,
+ }
+ 
+-impl Listener for StalledClientListener {
+-    type Addr = SocketAddr;
+-    type Io = Pin<Box<TimeoutStream<TcpStream>>>;
++impl<L: Listener> Listener for StalledClientListener<L> {
++    type Addr = L::Addr;
++    type Io = Pin<Box<TimeoutStream<L::Io>>>;
+ 
+     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+         let (stream, address) = Listener::accept(&mut self.listener).await;
+diff --git a/src/main.rs b/src/main.rs
+index 3b57986..757956a 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -12,6 +12,9 @@ mod storage;
+ #[cfg(test)]
+ mod tests;
+ mod twirp;
++mod yieldd {
++    include!(env!("YIELDD_CACHE_ADAPTER"));
++}
+ 
+ use std::io::IsTerminal as _;
+ use std::net::{Ipv4Addr, Ipv6Addr};
+@@ -55,6 +58,7 @@ async fn build_state(config: Config, adapter: Adapter) -> Result<AppState> {
+     }
+     let storage = Arc::new(Storage::new(db, adapter, Arc::clone(&config)).await?);
+     Ok(AppState {
++        policy: Arc::new(yieldd::Policy::load()?),
+         verifier: Arc::new(TokenVerifier::new(&config)?),
+         metrics: Arc::new(Metrics::new()?),
+         cleanup: Arc::new(Cleanup::new(Arc::clone(&storage), &config)),
+@@ -93,8 +97,13 @@ async fn serve(config: Config) -> Result<()> {
+     tracing::info!("🚀 Starting GitHub Actions Cache Server ({})", version());
+     let (host, port) = (config.host.clone(), config.port);
+     let timeout = config.download_idle_timeout;
++    let socket = std::env::var_os("YIELDD_CACHE_SOCKET");
++    let _owner_lock = socket.as_ref().map(|_| yieldd::owner()).transpose()?;
+     let adapter = Adapter::from_config(&config.storage).await?;
+     let state = build_state(config, adapter).await?;
++    if let Some(socket) = socket {
++        return yieldd::serve(socket.into(), state).await;
++    }
+     let listener = match host {
+         Some(host) => TcpListener::bind((host.as_str(), port)).await?,
+         None => match TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await {
+diff --git a/src/metrics.rs b/src/metrics.rs
+index 054c06f..90825f0 100644
+--- a/src/metrics.rs
++++ b/src/metrics.rs
+@@ -24,6 +24,7 @@ pub(crate) enum LookupResult {
+ impl Metrics {
+     pub(crate) fn new() -> Result<Self, prometheus::Error> {
+         let registry = Registry::new();
++        #[cfg(target_os = "linux")]
+         registry.register(Box::new(
+             prometheus::process_collector::ProcessCollector::for_self(),
+         ))?;
+diff --git a/src/routes.rs b/src/routes.rs
+index fee420a..0bfe703 100644
+--- a/src/routes.rs
++++ b/src/routes.rs
+@@ -22,6 +22,7 @@ use crate::storage::Storage;
+ #[derive(Debug, Clone)]
+ pub(crate) struct AppState {
+     pub(crate) config: Arc<Config>,
++    pub(crate) policy: Arc<crate::yieldd::Policy>,
+     pub(crate) storage: Arc<Storage>,
+     pub(crate) verifier: Arc<TokenVerifier>,
+     pub(crate) metrics: Arc<Metrics>,
+@@ -37,6 +38,7 @@ pub(crate) fn router(state: AppState) -> Router {
+     let router = Router::new()
+         .route("/", any(|| async { "OK" }))
+         .route("/health", any(|| async { "healthy" }))
++        .route("/yieldd/verify", axum::routing::post(crate::yieldd::verify))
+         .route("/metrics", any(cache::metrics))
+         .route(
+             "/devstoreaccount1/upload/{upload_id}",
+diff --git a/src/routes/cache.rs b/src/routes/cache.rs
+index 318e039..8f997bc 100644
+--- a/src/routes/cache.rs
++++ b/src/routes/cache.rs
+@@ -59,20 +59,19 @@ impl crate::twirp::CacheService for AppState {
+         &self,
+         req: Request<CreateCacheEntryRequest>,
+     ) -> twirp::Result<twirp::Response<CreateCacheEntryResponse>> {
+-        let scope = self.verifier.cache_scope(req.headers()).await?;
++        let mut scope = self.verifier.cache_scope(req.headers()).await?;
++        self.policy.apply(&mut scope);
++        scope.repo_id = "yieldd".to_owned();
+         let CreateCacheEntryRequest { key, version } = req.into_body();
+         let identity = save_identity(&scope, key, version)?;
+         match self.storage.create_upload(&identity).await? {
+             CreatedUpload::Created { upload, capability } => {
+-                Ok(twirp::Response::new(CreateCacheEntryResponse {
++                let url = format!("{}/devstoreaccount1/upload/{}?sig={capability}", self.config.api_base_url, upload.id);
++                crate::yieldd::transfer(CreateCacheEntryResponse {
+                     ok: true,
+-                    // The capability is base64url, so it needs no escaping.
+-                    signed_upload_url: format!(
+-                        "{}/devstoreaccount1/upload/{}?sig={capability}",
+-                        self.config.api_base_url, upload.id
+-                    ),
++                    signed_upload_url: url.clone(),
+                     message: String::new(),
+-                }))
++                }, &url)
+             }
+             // GitHub answers a duplicate reservation with 409, not 200 with ok: false.
+             CreatedUpload::AlreadyExists => Err(twirp::already_exists(
+@@ -85,7 +84,9 @@ impl crate::twirp::CacheService for AppState {
+         &self,
+         req: Request<FinalizeCacheEntryUploadRequest>,
+     ) -> twirp::Result<twirp::Response<FinalizeCacheEntryUploadResponse>> {
+-        let scope = self.verifier.cache_scope(req.headers()).await?;
++        let mut scope = self.verifier.cache_scope(req.headers()).await?;
++        self.policy.apply(&mut scope);
++        scope.repo_id = "yieldd".to_owned();
+         let FinalizeCacheEntryUploadRequest { key, version, .. } = req.into_body();
+         let identity = save_identity(&scope, key, version)?;
+         let upload = self
+@@ -105,7 +106,9 @@ impl crate::twirp::CacheService for AppState {
+         &self,
+         req: Request<GetCacheEntryDownloadUrlRequest>,
+     ) -> twirp::Result<twirp::Response<GetCacheEntryDownloadUrlResponse>> {
+-        let scope = self.verifier.cache_scope(req.headers()).await?;
++        let mut scope = self.verifier.cache_scope(req.headers()).await?;
++        self.policy.apply(&mut scope);
++        scope.repo_id = "yieldd".to_owned();
+         let GetCacheEntryDownloadUrlRequest {
+             key,
+             restore_keys,
+@@ -124,14 +127,16 @@ impl crate::twirp::CacheService for AppState {
+         } else {
+             LookupResult::Miss
+         });
+-        Ok(twirp::Response::new(matched.map_or_else(
++        let response = matched.map_or_else(
+             Default::default,
+             |matched| GetCacheEntryDownloadUrlResponse {
+                 ok: true,
+                 signed_download_url: matched.download_url,
+                 matched_key: matched.entry.key,
+             },
+-        )))
++        );
++        let url = response.signed_download_url.clone();
++        crate::yieldd::transfer(response, &url)
+     }
+ }
+ 
+diff --git a/src/scope.rs b/src/scope.rs
+index 1080961..bad4199 100644
+--- a/src/scope.rs
++++ b/src/scope.rs
+@@ -36,6 +36,7 @@ pub(crate) struct CacheScope {
+     /// Never empty.
+     pub(crate) scopes: Vec<ScopeGrant>,
+     pub(crate) repo_id: String,
++    pub(crate) repository: Option<String>,
+ }
+ 
+ impl CacheScope {
+@@ -67,6 +68,7 @@ pub(crate) struct Unauthorized(pub(crate) &'static str);
+ struct Claims {
+     ac: Option<String>,
+     repository_id: Option<String>,
++    repository: Option<String>,
+ }
+ 
+ /// Matches the original server's OIDC and JWKS fetch timeout.
+@@ -286,6 +288,9 @@ impl TokenVerifier {
+         };
+         let scopes: Vec<ScopeGrant> = serde_json::from_str(&scopes)
+             .map_err(|_parse_error| Unauthorized("Invalid JSON in cache scopes"))?;
++        if scopes.len() > 64 {
++            return Err(Unauthorized("Too many cache scopes"));
++        }
+         if scopes.is_empty() {
+             return Err(Unauthorized("Token does not contain any cache scopes"));
+         }
+@@ -295,7 +300,7 @@ impl TokenVerifier {
+         let Some(repo_id) = claims.repository_id.filter(|id| !id.is_empty()) else {
+             return Err(Unauthorized("Token does not contain repository id"));
+         };
+-        Ok(CacheScope { scopes, repo_id })
++        Ok(CacheScope { scopes, repo_id, repository: claims.repository })
+     }
+ }
+ 
+diff --git a/src/scope/tests.rs b/src/scope/tests.rs
+index e2e2fcf..7149ab3 100644
+--- a/src/scope/tests.rs
++++ b/src/scope/tests.rs
+@@ -152,6 +152,7 @@ fn permissions_are_bit_flags() {
+     let scope = CacheScope {
+         scopes: vec![grant("read", 1), grant("write", 2), grant("both", 3)],
+         repo_id: "1".to_owned(),
++        repository: None,
+     };
+     assert_eq!(
+         scope.read_scopes(),

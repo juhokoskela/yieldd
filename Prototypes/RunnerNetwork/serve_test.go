@@ -17,7 +17,7 @@ func TestServeRefusesSharedDirectory(t *testing.T) {
 	if err := os.Chmod(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := serve(t.Context(), filepath.Join(dir, "relay.sock"), io.Discard, new(denialCounters)); err == nil {
+	if err := serve(t.Context(), filepath.Join(dir, "relay.sock"), io.Discard, new(denialCounters), ""); err == nil {
 		t.Fatal("accepted shared socket directory")
 	}
 }
@@ -46,7 +46,7 @@ func testServeCancellation(t *testing.T, connectGuest bool) {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
-	go func() { defer close(done); _ = serve(ctx, path, writer, new(denialCounters)) }()
+	go func() { defer close(done); _ = serve(ctx, path, writer, new(denialCounters), "") }()
 	t.Cleanup(func() {
 		cancel()
 		writer.Close()
@@ -121,7 +121,7 @@ func TestServeDoesNotRemoveExistingSSHEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	if err := serve(t.Context(), path, io.Discard, new(denialCounters)); err == nil {
+	if err := serve(t.Context(), path, io.Discard, new(denialCounters), ""); err == nil {
 		t.Fatal("replaced existing SSH endpoint")
 	}
 	if _, err := os.Lstat(path + ".ssh"); err != nil {
@@ -137,7 +137,7 @@ func TestServeDoesNotRemoveExistingSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	if err := serve(t.Context(), path, io.Discard, new(denialCounters)); err == nil {
+	if err := serve(t.Context(), path, io.Discard, new(denialCounters), ""); err == nil {
 		t.Fatal("replaced existing endpoint")
 	}
 	if _, err := os.Lstat(path); err != nil {

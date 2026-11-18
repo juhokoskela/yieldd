@@ -19,13 +19,15 @@ protocol RunnerNetworking {
 struct RunnerNetwork: RunnerNetworking {
     private let executableURL: URL
     private let directories: RunnerNetworkDirectories
+    private let cacheSocket: URL?
     private let platform: RunnerPlatform
 
     static var bundledRelayURL: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/yieldd-network-relay")
     }
 
-    init(stateDirectory: URL, platform: RunnerPlatform, executableURL: URL = bundledRelayURL) throws {
+    init(stateDirectory: URL, platform: RunnerPlatform, executableURL: URL = bundledRelayURL, cacheSocket: URL? = nil) throws {
+        self.cacheSocket = cacheSocket
         self.executableURL = executableURL
         self.platform = platform
         directories = try RunnerNetworkDirectories(stateDirectory: stateDirectory)
@@ -47,7 +49,7 @@ struct RunnerNetwork: RunnerNetworking {
             return try RunnerNetworkRelay.start(
                 executableURL: executableURL, directory: directory,
                 identity: (runner: id.value, platform: platform.rawValue),
-                checkCancellation: checkCancellation
+                cacheSocket: cacheSocket, checkCancellation: checkCancellation
             )
         } catch {
             if let relayError = error as? RunnerNetworkRelayError, case .startAndCleanupFailed = relayError { throw error }
@@ -99,7 +101,7 @@ struct RunnerNetworkDirectories {
         if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
     }
 
-    private func directory(for id: RunnerID) throws -> URL {
+    func directory(for id: RunnerID) throws -> URL {
         guard id.isValid else { throw RunnerLeaseError.invalidRunnerID(path: rootURL.path) }
         return rootURL.appendingPathComponent(Self.key(id.value), isDirectory: true)
     }
@@ -108,7 +110,7 @@ struct RunnerNetworkDirectories {
         SHA256.hash(data: Data(value.utf8)).prefix(keyBytes).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func createPrivateDirectory(_ url: URL) throws {
+    static func createPrivateDirectory(_ url: URL) throws {
         if mkdir(url.path, 0o700) == 0 {
             guard chmod(url.path, 0o700) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         } else if errno != EEXIST {
