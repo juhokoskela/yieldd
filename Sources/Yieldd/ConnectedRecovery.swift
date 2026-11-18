@@ -8,7 +8,8 @@ func recoverConnectedPlatforms(
     output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
 ) throws {
     control?.recovering(ConnectedRunnerStore.all(in: directory).compactMap { try? $0.load() })
-    var pending: [(ConnectedRunnerStore, ConnectedOffer)] = []
+    typealias Pending = (ConnectedRunnerStore, ConnectedOffer, ConnectedHTTPClient?)
+    var pending: [Pending] = []
     var firstFailure: (any Error)?
     for store in ConnectedRunnerStore.all(in: directory) {
         try stop.check()
@@ -29,7 +30,12 @@ func recoverConnectedPlatforms(
                                               maximumExecutionDeadline: stop.executionDeadline).destroy(id)
                 }
             }
-            pending.append((store, lease.offer))
+            let workerID = store.platform.connectedWorkerID(slot: store.slot)
+            let client = confirmation == nil ? ConnectedHTTPClient(server: server, deviceID: deviceID, token: token,
+                platform: store.platform, slot: store.slot, checkCancellation: stop.check,
+                maximumExecutionDeadline: stop.executionDeadline,
+                connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) }) : nil
+            pending.append((store, lease.offer, client))
         } catch {
             firstFailure = firstFailure ?? error
             output.error(describeError(error))
@@ -37,22 +43,18 @@ func recoverConnectedPlatforms(
     }
     if pending.isEmpty, confirmation != nil, firstFailure == nil { throw ConnectedRunnerError.confirmationMismatch }
     while !pending.isEmpty {
-        var retry: [(ConnectedRunnerStore, ConnectedOffer)] = []
-        for (store, offer) in pending {
+        var retry: [Pending] = []
+        for (store, offer, client) in pending {
             try stop.check()
             let workerID = store.platform.connectedWorkerID(slot: store.slot)
             do {
-                if confirmation == nil {
-                    let client = ConnectedHTTPClient(server: server, deviceID: deviceID, token: token,
-                        platform: store.platform, slot: store.slot, checkCancellation: stop.check,
-                        maximumExecutionDeadline: stop.executionDeadline,
-                        connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
+                if let client {
                     try acknowledgeConnectedRunner(offer, complete: client.complete)
                 }
                 try store.clear()
                 control?.finishAssignment(worker: workerID)
             } catch where isTransientConnectedFailure(error) {
-                retry.append((store, offer))
+                retry.append((store, offer, client))
                 output.info("Retrying cleanup acknowledgement for \(offer.runner): \(describeError(error))")
             } catch {
                 firstFailure = firstFailure ?? error
