@@ -1,4 +1,4 @@
-name: GlassEQServer Linux incremental cache comparison
+name: GlassEQServer Linux isolated cold baseline
 on:
   push:
     branches: [bench/linux-glasseqserver-cache-20261119]
@@ -9,67 +9,4 @@ jobs:
     uses: ./.github/workflows/linux-server-guest.yml
     with:
       stage: cold
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-cold
-  remote_seed:
-    needs: cold
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: remote-seed
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-remote-seed
-  local_seed:
-    needs: remote_seed
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: local-seed
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-local-seed
-  native_seed:
-    needs: local_seed
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: native-seed
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-native-seed
-  remote_r1:
-    needs: native_seed
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: remote-r1
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-remote-r1
-  local_r1:
-    needs: remote_r1
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: local-r1
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-local-r1
-  native_r1:
-    needs: local_r1
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: native-r1
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-native-r1
-  native_r2:
-    needs: native_r1
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: native-r2
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-native-r2
-  local_r2:
-    needs: native_r2
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: local-r2
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-local-r2
-  remote_r2:
-    needs: local_r2
-    if: always() && !cancelled()
-    uses: ./.github/workflows/linux-server-guest.yml
-    with:
-      stage: remote-r2
-      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-remote-r2
+      label: yieldd-linux-bench-5ddfd8cbfbb4-linux-cold-baseline
