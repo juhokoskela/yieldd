@@ -246,7 +246,7 @@ func (d *deviceRouter) deviceHandler(token string) http.Handler {
 			return
 		}
 		switch r.URL.Path {
-		case "/v1/poll", "/v1/accept", "/v1/decline", "/v1/complete", "/v1/renew":
+		case "/v1/poll", "/v1/accept", "/v1/decline", "/v1/complete", "/v1/renew", "/v1/job-result":
 		default:
 			http.NotFound(w, r)
 			return
@@ -298,6 +298,12 @@ func (d *deviceRouter) deviceHandler(token string) http.Handler {
 		case "/v1/decline":
 			err = d.invoke(r.Context(), request, func(_ context.Context, worker *coordinator) error { return worker.declineDevice(request) })
 			response = struct{}{}
+		case "/v1/job-result":
+			err = d.invoke(r.Context(), request, func(_ context.Context, worker *coordinator) error {
+				var resultErr error
+				response, resultErr = worker.deviceJobResult(request)
+				return resultErr
+			})
 		case "/v1/renew":
 			err = d.invoke(r.Context(), request, func(ctx context.Context, worker *coordinator) error {
 				var renewalErr error

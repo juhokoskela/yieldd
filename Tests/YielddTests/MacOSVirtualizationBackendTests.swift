@@ -114,6 +114,77 @@ func macOSBackendCreatesOnceAndDestroysRepeatedly() throws {
     #expect(try fixture.cloneRootContents().isEmpty)
 }
 
+@Test
+func macOSBackendRevokedRelayCannotExposeCacheDisk() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let machine = ProbeVirtualMachine()
+    let network = BackendNetwork()
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult()), .success(processResult())])
+    let backend = try makeBackend(fixture, executor: executor, network: network, makeMachine: { _, _, _ in machine })
+    try backend.create(id: macOSBackendID, memory: .full)
+    try network.relays.first?.stop(deadline: nil)
+    #expect(throws: RunnerNetworkRelayError.self) {
+        try backend.attachNativeCache(image: fixture.rootURL.appendingPathComponent("cache.img"), cold: true, on: macOSBackendID)
+    }
+    #expect(machine.attachedNativeImage == nil)
+    #expect(executor.requests.count == 2)
+    try backend.destroy(macOSBackendID)
+}
+
+@Test
+func macOSBackendRefusesOccupiedCacheMountBeforeAttaching() throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let machine = ProbeVirtualMachine()
+    let executor = RecordingProcessExecutor(outcomes: [.success(processResult()), .success(processResult()),
+                                                       .success(processResult(status: 1))])
+    let backend = try makeBackend(fixture, executor: executor, makeMachine: { _, _, _ in machine })
+    try backend.create(id: macOSBackendID, memory: .full)
+    #expect(throws: ProcessExecutionError.self) {
+        try backend.attachNativeCache(image: fixture.rootURL.appendingPathComponent("cache.img"), cold: false, on: macOSBackendID)
+    }
+    #expect(machine.attachedNativeImage == nil)
+    #expect(executor.requests.last?.arguments.last?.contains("-e /Volumes/YielddCache || -L /Volumes/YielddCache") == true)
+    try backend.destroy(macOSBackendID)
+}
+
+@Test(arguments: ["success", "unmount-error", "renamed", "different-volume", "moved"])
+func macOSBackendDetachesCacheOnlyAfterGuestUnmount(outcome: String) throws {
+    let fixture = try ProbeBundleFixture()
+    defer { fixture.remove() }
+    let machine = ProbeVirtualMachine()
+    let volumeID = UUID()
+    let info = ["VolumeUUID": (outcome == "different-volume" ? UUID() : volumeID).uuidString,
+                "MountPoint": outcome == "moved" ? "/Volumes/Elsewhere" : "/Volumes/YielddCache",
+                "VolumeName": outcome == "renamed" ? "Renamed" : "YielddCache"]
+    let plist = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+    let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()), .success(processResult()), .success(processResult()),
+        .success(processResult(stdout: volumeID.uuidString + "\n")),
+        .success(processResult(stdout: String(decoding: plist, as: UTF8.self))),
+        outcome == "unmount-error" ? .failure(TestFailure.cleanup) : .success(processResult())
+    ])
+    let backend = try makeBackend(fixture, executor: executor, makeMachine: { _, _, _ in machine })
+    try backend.create(id: macOSBackendID, memory: .full)
+    let image = fixture.rootURL.appendingPathComponent("cache.img")
+    try backend.attachNativeCache(image: image, cold: false, on: macOSBackendID)
+    #expect(machine.attachedNativeImage == image)
+    switch outcome {
+    case "unmount-error":
+        #expect(throws: TestFailure.cleanup) { try backend.detachNativeCache(on: macOSBackendID) }
+    case "success":
+        try backend.detachNativeCache(on: macOSBackendID)
+        #expect(executor.requests.last?.arguments.last == "'/usr/sbin/diskutil' 'unmount' '\(volumeID.uuidString)'")
+    default:
+        #expect(throws: MacOSVirtualizationBackendError.self) { try backend.detachNativeCache(on: macOSBackendID) }
+        #expect(executor.requests.last?.arguments.last == "'/usr/sbin/diskutil' 'info' '-plist' '/Volumes/YielddCache'")
+    }
+    #expect(machine.nativeDetachCount == (outcome == "success" ? 1 : 0))
+    try backend.destroy(macOSBackendID)
+    #expect(machine.isStopped)
+}
+
 @Test(arguments: [false, true])
 func macOSBackendCleansCloneAfterCreationOrBootFailure(failBoot: Bool) throws {
     let fixture = try ProbeBundleFixture()

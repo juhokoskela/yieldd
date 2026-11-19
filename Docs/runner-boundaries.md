@@ -2,6 +2,8 @@
 
 The VM boundary separates a local workflow from the Mac's processes and files. yieldd does not share host directories with either guest. This assumes the hypervisor, its devices, Apple Container's host service, and SSH work as designed. It does not assume that anything inside the guest remains trustworthy after a job starts.
 
+When local caching is enabled, a job can leave bytes that later jobs will read. GitHub's signed grants determine which repository and branch caches it can read or update. Grouping branches from different repositories extends that trust to all group members. Workflow artifacts still go to GitHub. See the [cache trust policy](job-caches.md#share-trusted-branches).
+
 Linux jobs run as `runner` with passwordless `sudo` inside their disposable guest. Host permissions are unchanged. Rebuild the Linux guest image to enable this for new guests.
 
 Guest commands have bounded output capture. Diagnostic rendering escapes terminal controls, Unicode format characters, and default-ignorable characters, including bidirectional overrides and zero-width characters. Captured bytes remain unchanged for protocol parsing. Connected execution needs renewable coordinator authorization: five minutes without a renewal causes host-side destruction, while a healthy job can keep renewing without a total duration limit. Capacity is released only after destruction succeeds. Guest status remains useful progress information, not execution authority.

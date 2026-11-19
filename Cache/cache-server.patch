@@ -1,0 +1,1701 @@
+diff --git a/src/http.rs b/src/http.rs
+index e671dc0..50ff7ed 100644
+--- a/src/http.rs
++++ b/src/http.rs
+@@ -1,7 +1,6 @@
+ //! HTTP error responses, request logging and the connection listener.
+ 
+ use std::io;
+-use std::net::SocketAddr;
+ use std::pin::Pin;
+ use std::time::Duration;
+ 
+@@ -10,7 +9,6 @@ use axum::http::StatusCode;
+ use axum::middleware::Next;
+ use axum::response::{IntoResponse, Response};
+ use axum::serve::Listener;
+-use tokio::net::{TcpListener, TcpStream};
+ use tokio_io_timeout::TimeoutStream;
+ 
+ use crate::error::Failure;
+@@ -68,15 +66,15 @@ pub(crate) async fn log_requests(request: Request, next: Next) -> Response {
+ /// download's storage read, its Storage Reader Lease and, on a first restore, the Merge it paces
+ /// forever. Bytes moving at any rate keep the connection alive.
+ #[derive(Debug)]
+-pub(crate) struct StalledClientListener {
+-    pub(crate) listener: TcpListener,
++pub(crate) struct StalledClientListener<L> {
++    pub(crate) listener: L,
+     /// `None` waits forever.
+     pub(crate) timeout: Option<Duration>,
+ }
+ 
+-impl Listener for StalledClientListener {
+-    type Addr = SocketAddr;
+-    type Io = Pin<Box<TimeoutStream<TcpStream>>>;
++impl<L: Listener> Listener for StalledClientListener<L> {
++    type Addr = L::Addr;
++    type Io = Pin<Box<TimeoutStream<L::Io>>>;
+ 
+     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+         let (stream, address) = Listener::accept(&mut self.listener).await;
+diff --git a/src/main.rs b/src/main.rs
+index 3b57986..f55d83b 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -12,6 +12,9 @@ mod storage;
+ #[cfg(test)]
+ mod tests;
+ mod twirp;
++mod yieldd {
++    include!(env!("YIELDD_CACHE_ADAPTER"));
++}
+ 
+ use std::io::IsTerminal as _;
+ use std::net::{Ipv4Addr, Ipv6Addr};
+@@ -55,6 +58,7 @@ async fn build_state(config: Config, adapter: Adapter) -> Result<AppState> {
+     }
+     let storage = Arc::new(Storage::new(db, adapter, Arc::clone(&config)).await?);
+     Ok(AppState {
++        policy: Arc::new(yieldd::Policy::load()?),
+         verifier: Arc::new(TokenVerifier::new(&config)?),
+         metrics: Arc::new(Metrics::new()?),
+         cleanup: Arc::new(Cleanup::new(Arc::clone(&storage), &config)),
+@@ -92,9 +96,14 @@ async fn shutdown_signal() {
+ async fn serve(config: Config) -> Result<()> {
+     tracing::info!("🚀 Starting GitHub Actions Cache Server ({})", version());
+     let (host, port) = (config.host.clone(), config.port);
+-    let timeout = config.download_idle_timeout;
++    let socket = std::env::var_os("YIELDD_CACHE_SOCKET");
++    let _owner_lock = socket.as_ref().map(|_| yieldd::owner()).transpose()?;
+     let adapter = Adapter::from_config(&config.storage).await?;
+     let state = build_state(config, adapter).await?;
++    if let Some(socket) = socket {
++        let listener = tokio::net::UnixListener::bind(std::path::Path::new(&socket))?;
++        return serve_requests(listener, state).await;
++    }
+     let listener = match host {
+         Some(host) => TcpListener::bind((host.as_str(), port)).await?,
+         None => match TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await {
+@@ -106,9 +115,17 @@ async fn serve(config: Config) -> Result<()> {
+             }
+         },
+     };
++    tracing::info!(address = %listener.local_addr()?, "listening");
++    serve_requests(listener, state).await
++}
++
++async fn serve_requests<L: axum::serve::Listener>(listener: L, state: AppState) -> Result<()>
++where
++    L::Addr: std::fmt::Debug,
++{
++    let timeout = state.config.download_idle_timeout;
+     state.cleanup.spawn_schedules();
+     let storage = Arc::clone(&state.storage);
+-    tracing::info!(address = %listener.local_addr()?, "listening");
+     let listener = StalledClientListener { listener, timeout };
+     axum::serve(listener, router(state))
+         .with_graceful_shutdown(shutdown_signal())
+diff --git a/src/metrics.rs b/src/metrics.rs
+index 054c06f..90825f0 100644
+--- a/src/metrics.rs
++++ b/src/metrics.rs
+@@ -24,6 +24,7 @@ pub(crate) enum LookupResult {
+ impl Metrics {
+     pub(crate) fn new() -> Result<Self, prometheus::Error> {
+         let registry = Registry::new();
++        #[cfg(target_os = "linux")]
+         registry.register(Box::new(
+             prometheus::process_collector::ProcessCollector::for_self(),
+         ))?;
+diff --git a/src/routes.rs b/src/routes.rs
+index fee420a..0bfe703 100644
+--- a/src/routes.rs
++++ b/src/routes.rs
+@@ -22,6 +22,7 @@ use crate::storage::Storage;
+ #[derive(Debug, Clone)]
+ pub(crate) struct AppState {
+     pub(crate) config: Arc<Config>,
++    pub(crate) policy: Arc<crate::yieldd::Policy>,
+     pub(crate) storage: Arc<Storage>,
+     pub(crate) verifier: Arc<TokenVerifier>,
+     pub(crate) metrics: Arc<Metrics>,
+@@ -37,6 +38,7 @@ pub(crate) fn router(state: AppState) -> Router {
+     let router = Router::new()
+         .route("/", any(|| async { "OK" }))
+         .route("/health", any(|| async { "healthy" }))
++        .route("/yieldd/verify", axum::routing::post(crate::yieldd::verify))
+         .route("/metrics", any(cache::metrics))
+         .route(
+             "/devstoreaccount1/upload/{upload_id}",
+diff --git a/src/routes/cache.rs b/src/routes/cache.rs
+index 318e039..f50a0ac 100644
+--- a/src/routes/cache.rs
++++ b/src/routes/cache.rs
+@@ -36,6 +36,7 @@ fn save_identity(scope: &CacheScope, key: String, version: String) -> twirp::Res
+         .write_scope()
+         .ok_or_else(|| twirp::permission_denied("No scope with write permission found"))?;
+     Ok(EntryIdentity {
++        writer: scope.writer,
+         key: non_empty(key)?,
+         version: non_empty(version)?,
+         scope: write_scope.scope.clone(),
+@@ -59,20 +60,23 @@ impl crate::twirp::CacheService for AppState {
+         &self,
+         req: Request<CreateCacheEntryRequest>,
+     ) -> twirp::Result<twirp::Response<CreateCacheEntryResponse>> {
+-        let scope = self.verifier.cache_scope(req.headers()).await?;
++        let scope = self.archive_scope(req.headers()).await?;
+         let CreateCacheEntryRequest { key, version } = req.into_body();
+         let identity = save_identity(&scope, key, version)?;
+         match self.storage.create_upload(&identity).await? {
+             CreatedUpload::Created { upload, capability } => {
+-                Ok(twirp::Response::new(CreateCacheEntryResponse {
+-                    ok: true,
+-                    // The capability is base64url, so it needs no escaping.
+-                    signed_upload_url: format!(
+-                        "{}/devstoreaccount1/upload/{}?sig={capability}",
+-                        self.config.api_base_url, upload.id
+-                    ),
+-                    message: String::new(),
+-                }))
++                let url = format!(
++                    "{}/devstoreaccount1/upload/{}?sig={capability}",
++                    self.config.api_base_url, upload.id
++                );
++                crate::yieldd::transfer(
++                    CreateCacheEntryResponse {
++                        ok: true,
++                        signed_upload_url: url.clone(),
++                        message: String::new(),
++                    },
++                    &url,
++                )
+             }
+             // GitHub answers a duplicate reservation with 409, not 200 with ok: false.
+             CreatedUpload::AlreadyExists => Err(twirp::already_exists(
+@@ -85,12 +89,18 @@ impl crate::twirp::CacheService for AppState {
+         &self,
+         req: Request<FinalizeCacheEntryUploadRequest>,
+     ) -> twirp::Result<twirp::Response<FinalizeCacheEntryUploadResponse>> {
+-        let scope = self.verifier.cache_scope(req.headers()).await?;
+-        let FinalizeCacheEntryUploadRequest { key, version, .. } = req.into_body();
++        let scope = self.archive_scope(req.headers()).await?;
++        let FinalizeCacheEntryUploadRequest {
++            key,
++            version,
++            size_bytes,
++        } = req.into_body();
++        let size = u64::try_from(size_bytes)
++            .map_err(|_| twirp::invalid_argument("invalid archive size"))?;
+         let identity = save_identity(&scope, key, version)?;
+         let upload = self
+             .storage
+-            .complete_upload(&identity)
++            .complete_upload(&identity, (size > 0).then_some(size))
+             .await?
+             .ok_or_else(|| twirp::not_found("Upload not found"))?;
+         self.metrics.record_upload();
+@@ -105,7 +115,7 @@ impl crate::twirp::CacheService for AppState {
+         &self,
+         req: Request<GetCacheEntryDownloadUrlRequest>,
+     ) -> twirp::Result<twirp::Response<GetCacheEntryDownloadUrlResponse>> {
+-        let scope = self.verifier.cache_scope(req.headers()).await?;
++        let scope = self.archive_scope(req.headers()).await?;
+         let GetCacheEntryDownloadUrlRequest {
+             key,
+             restore_keys,
+@@ -124,14 +134,15 @@ impl crate::twirp::CacheService for AppState {
+         } else {
+             LookupResult::Miss
+         });
+-        Ok(twirp::Response::new(matched.map_or_else(
+-            Default::default,
+-            |matched| GetCacheEntryDownloadUrlResponse {
++        let response = matched.map_or_else(Default::default, |matched| {
++            GetCacheEntryDownloadUrlResponse {
+                 ok: true,
+                 signed_download_url: matched.download_url,
+                 matched_key: matched.entry.key,
+-            },
+-        )))
++            }
++        });
++        let url = response.signed_download_url.clone();
++        crate::yieldd::transfer(response, &url)
+     }
+ }
+
+diff --git a/src/scope.rs b/src/scope.rs
+index 1080961..28b3eef 100644
+--- a/src/scope.rs
++++ b/src/scope.rs
+@@ -11,6 +11,7 @@ use jsonwebtoken::jwk::{
+ };
+ use jsonwebtoken::{Algorithm, AlgorithmFamily, DecodingKey, Header, Validation};
+ use serde::Deserialize;
++use sha2::{Digest as _, Sha256};
+ use tokio::sync::{Mutex, OnceCell};
+
+ use crate::config::Config;
+@@ -33,9 +34,11 @@ pub(crate) struct ScopeGrant {
+ /// Scopes and repository a request may access.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct CacheScope {
++    pub(crate) writer: [u8; 32],
+     /// Never empty.
+     pub(crate) scopes: Vec<ScopeGrant>,
+     pub(crate) repo_id: String,
++    pub(crate) repository: Option<String>,
+ }
+
+ impl CacheScope {
+@@ -67,6 +70,7 @@ pub(crate) struct Unauthorized(pub(crate) &'static str);
+ struct Claims {
+     ac: Option<String>,
+     repository_id: Option<String>,
++    repository: Option<String>,
+ }
+
+ /// Matches the original server's OIDC and JWKS fetch timeout.
+@@ -286,6 +290,9 @@ impl TokenVerifier {
+         };
+         let scopes: Vec<ScopeGrant> = serde_json::from_str(&scopes)
+             .map_err(|_parse_error| Unauthorized("Invalid JSON in cache scopes"))?;
++        if scopes.len() > 64 {
++            return Err(Unauthorized("Too many cache scopes"));
++        }
+         if scopes.is_empty() {
+             return Err(Unauthorized("Token does not contain any cache scopes"));
+         }
+@@ -295,7 +302,12 @@ impl TokenVerifier {
+         let Some(repo_id) = claims.repository_id.filter(|id| !id.is_empty()) else {
+             return Err(Unauthorized("Token does not contain repository id"));
+         };
+-        Ok(CacheScope { scopes, repo_id })
++        Ok(CacheScope {
++            scopes,
++            repo_id,
++            repository: claims.repository,
++            writer: Sha256::digest(token).into(),
++        })
+     }
+ }
+
+diff --git a/src/scope/tests.rs b/src/scope/tests.rs
+index e2e2fcf..672c20c 100644
+--- a/src/scope/tests.rs
++++ b/src/scope/tests.rs
+@@ -150,8 +150,10 @@ fn permissions_are_bit_flags() {
+         permission,
+     };
+     let scope = CacheScope {
++        writer: [0; 32],
+         scopes: vec![grant("read", 1), grant("write", 2), grant("both", 3)],
+         repo_id: "1".to_owned(),
++        repository: None,
+     };
+     assert_eq!(
+         scope.read_scopes(),
+diff --git a/src/tests/cache_protocol.rs b/src/tests/cache_protocol.rs
+index facb97e..ff4d834 100644
+--- a/src/tests/cache_protocol.rs
++++ b/src/tests/cache_protocol.rs
+@@ -302,6 +302,7 @@ async fn counts_uploads_hits_misses_and_stored_bytes() {
+         "prometheus text format"
+     );
+     let metrics = response.text().await.unwrap();
++    #[cfg(target_os = "linux")]
+     assert!(
+         metrics.contains("process_start_time_seconds"),
+         "process metrics are wired up"
+diff --git a/src/storage.rs b/src/storage.rs
+index 13862d9..dc9567a 100644
+--- a/src/storage.rs
++++ b/src/storage.rs
+@@ -6,10 +6,10 @@ mod leases;
+ mod lifecycle;
+ mod object;
+
+-use std::collections::HashMap;
++use std::collections::{HashMap, VecDeque};
+ use std::fmt::Display;
+ use std::io;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex, PoisonError, Weak};
+
+ use axum::body::Bytes;
+ use base64::Engine as _;
+@@ -25,7 +25,7 @@ use sea_orm::{
+ use serde::Serialize;
+ use sha2::{Digest as _, Sha256};
+ use subtle::ConstantTimeEq as _;
+-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
++use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc};
+ use tokio_stream::wrappers::ReceiverStream;
+ use tokio_util::task::{AbortOnDropHandle, TaskTracker};
+ use utoipa::ToSchema;
+@@ -128,6 +128,9 @@ pub(crate) struct Storage {
+     pub(crate) adapter: Arc<Adapter>,
+     config: Arc<Config>,
+     merges: TaskTracker,
++    upload_locks: Mutex<HashMap<i64, Weak<RwLock<()>>>>,
++    part_indexes: Mutex<VecDeque<(String, Arc<[u64]>)>>,
++    eviction: tokio::sync::Mutex<()>,
+     /// One permit per Merge this process may run at once. Each Merge holds storage connections
+     /// and buffers for its whole duration; unbounded, a burst of first restores exhausts them.
+     merge_slots: Arc<Semaphore>,
+@@ -333,6 +336,9 @@ impl Storage {
+             merge_slots: Arc::new(Semaphore::new(config.max_concurrent_merges)),
+             config,
+             merges: TaskTracker::new(),
++            upload_locks: Mutex::default(),
++            part_indexes: Mutex::default(),
++            eviction: tokio::sync::Mutex::default(),
+         };
+         storage.reconcile_storage_location_sizes().await?;
+         Ok(storage)
+@@ -402,6 +408,40 @@ impl Storage {
+             .collect()
+     }
+
++    // Published parts are immutable. Repeated Azure range requests can share one
++    // directory inventory, even on a machine with many concurrent jobs.
++    async fn part_ends(&self, location: &StorageLocation) -> Result<Arc<[u64]>, ReadError> {
++        if let Some((_, ends)) = self
++            .part_indexes
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .iter()
++            .find(|(id, _)| id == &location.id)
++        {
++            return Ok(Arc::clone(ends));
++        }
++        let mut sizes = self.part_sizes(location).await?;
++        let mut end = 0_u64;
++        for size in &mut sizes {
++            end = end.saturating_add(*size);
++            *size = end;
++        }
++        let ends: Arc<[u64]> = sizes.into();
++        if ends.len() <= 65_536 {
++            let mut indexes = self
++                .part_indexes
++                .lock()
++                .unwrap_or_else(PoisonError::into_inner);
++            if !indexes.iter().any(|(id, _)| id == &location.id) {
++                if indexes.len() == 32 {
++                    indexes.pop_front();
++                }
++                indexes.push_back((location.id.clone(), Arc::clone(&ends)));
++            }
++        }
++        Ok(ends)
++    }
++
+     async fn download_location(
+         &self,
+         location: &StorageLocation,
+@@ -410,34 +450,32 @@ impl Storage {
+         if let Some((object, _)) = whole_object(location) {
+             return self.adapter.download_stream(&object, range).await;
+         }
+-        let part_sizes = self.part_sizes(location).await?;
++        let size = match location
++            .size_bytes
++            .and_then(|size| u64::try_from(size).ok())
++        {
++            Some(size) => size,
++            None => self.part_ends(location).await?.last().copied().unwrap_or(0),
++        };
+         let adapter = Arc::clone(&self.adapter);
+-        let size = part_sizes
+-            .iter()
+-            .fold(0_u64, |total, &part| total.saturating_add(part));
+         let Some(range) = range.filter(|_| size > 0) else {
+-            // An unmerged entry is concatenated from its Parts as it is read. Only an empty entry
+-            // ignores a range, like an empty object does.
++            // HEAD drops this lazy stream without opening any part.
+             return Ok(DownloadStream {
+                 stream: stream_parts(adapter, location, 0, 0),
+-                extent: Extent::Unsized,
++                extent: Extent::Whole { size },
+             });
+         };
+-        // Never the whole entry under a 200: the Azure SDK takes any 200 body as the bytes from
+-        // the offset it asked for.
+         let served = clamp_range(range, size)
+             .ok_or_else(|| ReadError::RangeNotSatisfiable(parts_folder(&location.folder_name)))?;
+-        // The Part the range starts in, and the offset into it.
+-        let (mut first, mut skip) = (0_i32, served.start);
+-        for &part in &part_sizes {
+-            if skip < part {
+-                break;
+-            }
+-            skip = skip.saturating_sub(part);
+-            first = first.saturating_add(1);
+-        }
++        let ends = self.part_ends(location).await?;
++        let first = ends.partition_point(|end| *end <= served.start);
++        let base = first.checked_sub(1).map_or(0, |previous| ends[previous]);
++        let first = i32::try_from(first).map_err(|_| Failure::msg("invalid part index"))?;
+         Ok(DownloadStream {
+-            stream: take_bytes(stream_parts(adapter, location, first, skip), served.len()),
++            stream: take_bytes(
++                stream_parts(adapter, location, first, served.start - base),
++                served.len(),
++            ),
+             extent: Extent::Partial {
+                 range: served,
+                 size,
+@@ -617,6 +655,20 @@ impl Storage {
+         })
+     }
+
++    pub(crate) fn upload_lock(&self, id: i64) -> Arc<RwLock<()>> {
++        let mut locks = self
++            .upload_locks
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner);
++        if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
++            return lock;
++        }
++        locks.retain(|_, weak| weak.strong_count() != 0);
++        let lock = Arc::new(RwLock::new(()));
++        locks.insert(id, Arc::downgrade(&lock));
++        lock
++    }
++
+     /// Stores one Part of an upload. False when the upload was deleted in the meantime (the
+     /// written Part is then Orphaned Storage).
+     pub(crate) async fn upload_part(
+@@ -626,7 +678,8 @@ impl Storage {
+         stream: ByteStream,
+         length: Option<u64>,
+     ) -> Result<bool> {
+-        uploads::Entity::update_many()
++        let _active = self.upload_lock(upload.id).read_owned().await;
++        let started = uploads::Entity::update_many()
+             .col_expr(
+                 uploads::Column::StartedPartUploadCount,
+                 uploads::Column::StartedPartUploadCount.into_expr().add(1),
+@@ -634,6 +687,9 @@ impl Storage {
+             .filter(uploads::COLUMN.id.eq(upload.id))
+             .exec(&self.db.pool)
+             .await?;
++        if started.rows_affected == 0 {
++            return Ok(false);
++        }
+         self.adapter
+             .upload_stream(
+                 &part_object(&upload.folder_name, part_index),
+@@ -659,11 +715,19 @@ impl Storage {
+     /// Reserves `identity` for a new upload; a concurrent reservation of the same identity loses
+     /// on the unique reservation hash.
+     pub(crate) async fn create_upload(&self, identity: &EntryIdentity) -> Result<CreatedUpload> {
++        let _metadata = match self.adapter.as_ref() {
++            Adapter::Filesystem(fs) => Some(fs.reserve_metadata()?),
++            Adapter::Object(_) => None,
++        };
+         let id = random_upload_id();
+         let capability = random_capability()?;
++        let folder_name = identity.upload_folder(id);
++        // Take the unique reservation first. Publishing swaps reservation for
++        // entry in one transaction, so another create sees one or the other.
++        let tx = self.db.pool.begin().await?;
+         let inserted = uploads::Entity::insert(uploads::ActiveModel {
+             id: Set(id),
+-            folder_name: Set(id.to_string()),
++            folder_name: Set(folder_name.clone()),
+             created_at: Set(now_ms()),
+             key: Set(identity.key.clone()),
+             version: Set(identity.version.clone()),
+@@ -673,39 +737,71 @@ impl Storage {
+             capability_hash: Set(Some(capability_hash(&capability))),
+             ..Default::default()
+         })
+-        .exec_without_returning(&self.db.pool)
++        .exec_without_returning(&tx)
+         .await;
+-        match inserted {
+-            Ok(_) => Ok(CreatedUpload::Created {
+-                upload: AuthorizedUpload {
+-                    id,
+-                    folder_name: id.to_string(),
+-                },
+-                capability,
+-            }),
+-            Err(error) if is_unique_violation(&error) => Ok(CreatedUpload::AlreadyExists),
+-            Err(error) => Err(error.into()),
++        if let Err(error) = inserted {
++            return if is_unique_violation(&error) {
++                Ok(CreatedUpload::AlreadyExists)
++            } else {
++                Err(error.into())
++            };
++        }
++        if cache_entries::Entity::find()
++            .select_only()
++            .column(cache_entries::Column::Id)
++            .filter(entry_identity(identity))
++            .into_tuple::<String>()
++            .one(&tx)
++            .await?
++            .is_some()
++        {
++            tx.rollback().await?;
++            return Ok(CreatedUpload::AlreadyExists);
+         }
++        tx.commit().await?;
++        Ok(CreatedUpload::Created {
++            upload: AuthorizedUpload { id, folder_name },
++            capability,
++        })
+     }
+
+-    pub(crate) async fn complete_upload(&self, identity: &EntryIdentity) -> Result<Option<Upload>> {
+-        let upload = uploads::Entity::find()
++    pub(crate) async fn complete_upload(
++        &self,
++        identity: &EntryIdentity,
++        expected_size: Option<u64>,
++    ) -> Result<Option<Upload>> {
++        let id: Option<i64> = uploads::Entity::find()
++            .select_only()
++            .column(uploads::Column::Id)
+             .filter(
+                 uploads::COLUMN
+                     .reservation_hash
+                     .eq(identity.reservation_hash()),
+             )
++            .into_tuple()
+             .one(&self.db.reads)
+             .await?;
+-        let Some(upload) = upload else {
++        let Some(id) = id else {
++            return Ok(None);
++        };
++        // Finish after any streaming parts. A prior finalizer or cleanup may have
++        // removed this reservation while we waited for exclusive ownership.
++        let _finishing = self.upload_lock(id).write_owned().await;
++        let Some(upload) = uploads::Entity::find_by_id(id).one(&self.db.reads).await? else {
+             return Ok(None);
+         };
++        if upload.folder_name != identity.upload_folder(id) {
++            return Ok(None);
++        }
+         if upload.finished_part_upload_count == 0 {
+             return Err(self
+                 .abandon_upload(&upload, "No parts have been uploaded".to_owned())
+                 .await);
+         }
+-        if upload.started_part_upload_count != upload.finished_part_upload_count {
++        // Older clients can omit the size; fail conservatively if a part failed.
++        if expected_size.is_none()
++            && upload.started_part_upload_count != upload.finished_part_upload_count
++        {
+             let reason = format!(
+                 "Not all parts have been uploaded (only {} of {} parts uploaded)",
+                 upload.finished_part_upload_count, upload.started_part_upload_count
+@@ -717,17 +813,34 @@ impl Storage {
+             .list_folder(&parts_folder(&upload.folder_name))
+             .await?;
+         let part_count = i32::try_from(parts.len()).unwrap_or(i32::MAX);
+-        if part_count != upload.finished_part_upload_count {
+-            let reason = format!(
+-                "Uploaded part count does not match actual part count in storage (expected {} but \
+-                 found {part_count})",
+-                upload.finished_part_upload_count
+-            );
+-            return Err(self.abandon_upload(&upload, reason).await);
++        if part_count == 0 || !(0..part_count).all(|i| parts.contains_key(&i.to_string())) {
++            return Err(self
++                .abandon_upload(&upload, "Archive parts are incomplete".to_owned())
++                .await);
+         }
+         let size_bytes = parts
+             .values()
+             .fold(0_u64, |total, bytes| total.saturating_add(*bytes));
++        if expected_size.is_some_and(|expected| expected != size_bytes) {
++            return Err(self
++                .abandon_upload(
++                    &upload,
++                    "Archive size differs from finalized size".to_owned(),
++                )
++                .await);
++        }
++        if self
++            .config
++            .cache_max_size_bytes
++            .is_some_and(|budget| size_bytes > budget.get())
++        {
++            return Err(self
++                .abandon_upload(
++                    &upload,
++                    "Archive exceeds the cache storage budget".to_owned(),
++                )
++                .await);
++        }
+         let location = StorageLocation {
+             id: uuid::Uuid::new_v4().to_string(),
+             folder_name: upload.folder_name.clone(),
+@@ -741,7 +854,7 @@ impl Storage {
+
+         self.promote_upload(identity, &upload, &location).await?;
+
+-        if let Err(error) = self.enforce_storage_budget().await {
++        if let Err(error) = self.enforce_storage_budget(Some(&location.id)).await {
+             tracing::warn!(%error, "Capacity-based Eviction failed after upload completion");
+         }
+         if self.config.eager_merge && whole_object(&location).is_none() {
+@@ -768,45 +881,33 @@ impl Storage {
+         storage_locations::Entity::insert(location.clone().into_active_model())
+             .exec_without_returning(&tx)
+             .await?;
+-        let existing: Option<String> = cache_entries::Entity::find()
+-            .select_only()
+-            .column(cache_entries::Column::Id)
+-            .inner_join(storage_locations::Entity)
+-            .filter(entry_identity(identity))
+-            .into_tuple()
+-            .one(&tx)
+-            .await?;
+-        let entry = cache_entries::ActiveModel {
++        cache_entries::Entity::insert(cache_entries::ActiveModel {
++            id: Set(uuid::Uuid::new_v4().to_string()),
++            key: Set(upload.key.clone()),
++            version: Set(upload.version.clone()),
++            scope: Set(identity.scope.clone()),
++            repo_id: Set(identity.repo_id.clone()),
+             updated_at: Set(now_ms()),
+             location_id: Set(location.id.clone()),
+-            ..Default::default()
+-        };
+-        if let Some(id) = existing {
+-            cache_entries::Entity::update_many()
+-                .set(entry)
+-                .filter(cache_entries::COLUMN.id.eq(id))
+-                .exec(&tx)
+-                .await?;
+-        } else {
+-            cache_entries::Entity::insert(cache_entries::ActiveModel {
+-                id: Set(uuid::Uuid::new_v4().to_string()),
+-                key: Set(upload.key.clone()),
+-                version: Set(upload.version.clone()),
+-                scope: Set(identity.scope.clone()),
+-                repo_id: Set(identity.repo_id.clone()),
+-                ..entry
+-            })
+-            .exec_without_returning(&tx)
+-            .await?;
++        })
++        .exec_without_returning(&tx)
++        .await?;
++        if uploads::Entity::delete_by_id(upload.id)
++            .exec(&tx)
++            .await?
++            .rows_affected
++            == 0
++        {
++            return Err(Failure::msg("upload expired before finalization"));
+         }
+-        uploads::Entity::delete_by_id(upload.id).exec(&tx).await?;
+         tx.commit().await?;
+         Ok(())
+     }
+
+     /// Capacity-based Eviction: once usage exceeds the Storage Budget, deletes entries by Cache
+     /// Recency until usage is back at 90% of the budget.
+-    pub(crate) async fn enforce_storage_budget(&self) -> Result<()> {
++    pub(crate) async fn enforce_storage_budget(&self, just_published: Option<&str>) -> Result<()> {
++        let _pass = self.eviction.lock().await;
+         let filesystem_usage = match self.config.cache_max_size_bytes {
+             Some(_) => None,
+             None => self.adapter.filesystem_usage().transpose()?,
+@@ -851,13 +952,19 @@ impl Storage {
+             if usage <= target {
+                 break;
+             }
++            if Some(id.as_str()) == just_published {
++                continue;
++            }
+             let tx = self.db.pool.begin().await?;
+             let deletion = delete_storage_location_if_unread(&tx, &id).await?;
+             tx.commit().await?;
+-            if deletion != LocationDeletion::Deleted {
+-                continue;
++            match deletion {
++                LocationDeletion::Deleted => {
++                    self.adapter.delete_folder(&folder_name).await?;
++                }
++                LocationDeletion::InUse => continue,
++                LocationDeletion::Missing => {}
+             }
+-            self.adapter.delete_folder(&folder_name).await?;
+             usage = match filesystem_usage.and_then(|_| self.adapter.filesystem_usage()) {
+                 Some(current) => current?.used_bytes,
+                 None => usage.saturating_sub(
+@@ -929,8 +1036,12 @@ impl Storage {
+         location: &StorageLocation,
+         range: Option<RangeRequest>,
+     ) -> Result<DownloadStream, ReadError> {
+-        // A ranged read serves its slice from the Parts and leaves the Merge to a whole read.
+-        if whole_object(location).is_some() || range.is_some() {
++        // yieldd keeps immutable filesystem parts when merging has been disabled.
++        if whole_object(location).is_some()
++            || range.is_some()
++            || (self.config.max_concurrent_merges == 0
++                && matches!(self.adapter.as_ref(), Adapter::Filesystem(_)))
++        {
+             return self.download_location(location, range).await;
+         }
+         self.part_sizes(location).await?;
+@@ -1105,6 +1216,25 @@ impl Storage {
+                 whole_object(&location),
+                 self.adapter.as_ref(),
+             ) else {
++                if self.config.max_concurrent_merges == 0
++                    && matches!(self.adapter.as_ref(), Adapter::Filesystem(_))
++                {
++                    let tx = self.db.pool.begin().await?;
++                    let current = storage_locations::Entity::find_by_id(&location.id)
++                        .inner_join(cache_entries::Entity)
++                        .filter(cache_entries::COLUMN.id.eq(entry.id.as_str()))
++                        .lock_exclusive()
++                        .one(&tx)
++                        .await?;
++                    let Some(current) = current else {
++                        continue;
++                    };
++                    // The local URL has been promised but GET has not acquired its own lease yet.
++                    let scope =
++                        whole_object(&current).map_or(ReaderLeaseScope::Parts, |(_, scope)| scope);
++                    leases::reserve_local_url(&tx, &current.id, scope).await?;
++                    tx.commit().await?;
++                }
+                 return Ok(Some(DownloadUrlMatch {
+                     download_url: default_url,
+                     entry,
+diff --git a/src/storage/filesystem.rs b/src/storage/filesystem.rs
+index f7fb624..92f3fdf 100644
+--- a/src/storage/filesystem.rs
++++ b/src/storage/filesystem.rs
+@@ -3,7 +3,8 @@
+ use std::collections::HashMap;
+ use std::io::{self, SeekFrom};
+ use std::path::{Component, Path, PathBuf};
+-use std::time::UNIX_EPOCH;
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, UNIX_EPOCH};
+
+ use futures_util::{StreamExt as _, TryStreamExt as _};
+ use tokio::fs;
+@@ -22,6 +23,51 @@ const READ_CHUNK_BYTES: usize = 256 * 1024;
+ #[derive(Debug)]
+ pub(crate) struct FilesystemAdapter {
+     root: PathBuf,
++    writing: Arc<Mutex<u64>>,
++}
++
++pub(crate) struct WriteReservation {
++    writing: Arc<Mutex<u64>>,
++    bytes: u64,
++}
++
++impl Drop for WriteReservation {
++    fn drop(&mut self) {
++        let mut writing = self
++            .writing
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        *writing -= self.bytes;
++    }
++}
++
++fn reserve(root: &Path, writing: &Arc<Mutex<u64>>, bytes: u64) -> io::Result<WriteReservation> {
++    let mut pending = writing
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner);
++    let stats = rustix::fs::statvfs(root)?;
++    let capacity = stats.f_blocks.saturating_mul(stats.f_frsize);
++    let available = stats.f_bavail.saturating_mul(stats.f_frsize);
++    // Cleanup and SQLite can still commit when multiple writers fill this filesystem.
++    let headroom = (capacity / 8).min(64 << 20);
++    let bytes = bytes.max(16 << 10);
++    if available.saturating_sub(headroom).saturating_sub(*pending) < bytes {
++        return Err(io::Error::from(io::ErrorKind::StorageFull));
++    }
++    *pending += bytes;
++    Ok(WriteReservation {
++        writing: Arc::clone(writing),
++        bytes,
++    })
++}
++
++async fn next_upload_chunk(
++    stream: &mut ByteStream,
++    timeout: Duration,
++) -> io::Result<Option<axum::body::Bytes>> {
++    tokio::time::timeout(timeout, stream.try_next())
++        .await
++        .map_err(|_| io::ErrorKind::TimedOut)?
+ }
+
+ fn is_not_found(error: &io::Error) -> bool {
+@@ -50,7 +96,14 @@ impl FilesystemAdapter {
+     pub(crate) async fn new(root: &Path) -> Result<Self> {
+         let root = std::path::absolute(root)?;
+         fs::create_dir_all(&root).await?;
+-        Ok(Self { root })
++        Ok(Self {
++            root,
++            writing: Arc::default(),
++        })
++    }
++
++    pub(crate) fn reserve_metadata(&self) -> io::Result<WriteReservation> {
++        reserve(&self.root, &self.writing, 64 << 10)
+     }
+
+     /// Resolves an object name below the root, rejecting names that escape it.
+@@ -147,9 +200,22 @@ impl FilesystemAdapter {
+         // stay perpetually fresh and never age out.
+         let temp = self.safe_path(&format!("tmp-{}", uuid::Uuid::new_v4()))?;
+         let written: Result<()> = async {
++            // Charge a window rather than a statvfs call for every network frame.
++            // Flush before releasing the claim: Tokio can buffer a pending file write.
++            const WINDOW: u64 = 1 << 20;
++            let mut claim = Some(reserve(&self.root, &self.writing, WINDOW)?);
++            let mut remaining = WINDOW;
+             let mut file = fs::File::create(&temp).await?;
+-            while let Some(chunk) = stream.try_next().await? {
++            while let Some(chunk) = next_upload_chunk(&mut stream, Duration::from_secs(60)).await? {
++                let length = chunk.len() as u64;
++                if length > remaining {
++                    file.flush().await?;
++                    drop(claim.take());
++                    remaining = length.max(WINDOW);
++                    claim = Some(reserve(&self.root, &self.writing, remaining)?);
++                }
+                 file.write_all(&chunk).await?;
++                remaining -= length;
+             }
+             file.flush().await?;
+             if let Some(parent) = path.parent() {
+diff --git a/src/storage/filesystem/tests.rs b/src/storage/filesystem/tests.rs
+index f2265a4..ddf434a 100644
+--- a/src/storage/filesystem/tests.rs
++++ b/src/storage/filesystem/tests.rs
+@@ -25,6 +25,19 @@ async fn read_all(stream: ByteStream) -> Vec<u8> {
+         .unwrap()
+ }
+
++#[tokio::test]
++async fn concurrent_writers_cannot_double_spend_the_free_bytes() {
++    let (_dir, adapter) = adapter().await;
++    let stats = adapter.usage().unwrap();
++    let headroom = (stats.capacity_bytes / 8).min(64 << 20);
++    let available = stats.capacity_bytes - stats.used_bytes - headroom;
++    let size = available - available / 3;
++    let first = reserve(&adapter.root, &adapter.writing, size).unwrap();
++    assert!(reserve(&adapter.root, &adapter.writing, size).is_err());
++    drop(first);
++    assert!(reserve(&adapter.root, &adapter.writing, size).is_ok());
++}
++
+ #[tokio::test]
+ async fn rejects_names_escaping_the_root() {
+     let (_dir, adapter) = adapter().await;
+@@ -127,3 +140,10 @@ async fn deletes_folders_and_top_level_files() {
+         "missing folder"
+     );
+ }
++
++#[tokio::test]
++async fn stalled_upload_releases_its_request() {
++    let mut stalled = stream::pending().boxed();
++    let result = next_upload_chunk(&mut stalled, Duration::from_millis(20)).await;
++    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
++}
+diff --git a/src/config.rs b/src/config.rs
+index d0e3bcf..bbebee2 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -49,7 +49,7 @@ pub(crate) struct Config {
+     /// Lifetime of a signed direct-download URL, 1 second to 1 hour.
+     pub(crate) direct_download_url_ttl: Duration,
+     pub(crate) eager_merge: bool,
+-    /// Merges this process runs at once, eager or lazy; at least 1.
++    /// Merges this process runs at once. Zero streams filesystem parts in place.
+     pub(crate) max_concurrent_merges: usize,
+     /// How long a response may wait for its client to read; `None` waits forever.
+     pub(crate) download_idle_timeout: Option<Duration>,
+@@ -286,8 +286,8 @@ struct Vars {
+     direct_download_url_ttl_seconds: Duration,
+     #[arg(long, env, action = ArgAction::Set, default_value_t = false)]
+     eager_merge: bool,
+-    #[arg(long, env, default_value = "16", value_parser = integer::<NonZeroU64>)]
+-    max_concurrent_merges: NonZeroU64,
++    #[arg(long, env, default_value = "16", value_parser = integer::<u64>)]
++    max_concurrent_merges: u64,
+     /// Milliseconds a download waits for its client to read; 0 waits forever
+     #[arg(long, env, default_value = "300000", value_parser = integer::<i32>)]
+     download_idle_timeout_ms: i32,
+@@ -598,7 +598,7 @@ impl Config {
+             enable_direct_downloads: given.enable_direct_downloads,
+             direct_download_url_ttl: given.direct_download_url_ttl_seconds,
+             eager_merge: given.eager_merge,
+-            max_concurrent_merges: usize::try_from(given.max_concurrent_merges.get())
++            max_concurrent_merges: usize::try_from(given.max_concurrent_merges)
+                 .unwrap_or(usize::MAX)
+                 .min(Semaphore::MAX_PERMITS),
+             // `i32` caps it like v9, at the largest delay a Node timer accepts.
+diff --git a/src/tests/downloads.rs b/src/tests/downloads.rs
+index 168c3ed..4f72036 100644
+--- a/src/tests/downloads.rs
++++ b/src/tests/downloads.rs
+@@ -155,8 +155,24 @@ async fn serves_ranges_of_unmerged_entries_and_pins_bytes_to_a_location() {
+     let server = TestServer::start().await;
+     let key = uuid::Uuid::new_v4().to_string();
+     let first = save_parts(server.storage(), &key, &parts()).await;
++    assert!(matches!(
++        server
++            .storage()
++            .create_upload(&super::harness::identity(&key))
++            .await
++            .unwrap(),
++        crate::storage::CreatedUpload::AlreadyExists
++    ));
++    server
++        .storage()
++        .delete_storage_location(&first.id)
++        .await
++        .unwrap();
+     let resaved = save_parts(server.storage(), &key, &[b"re".to_vec(), b"saved".to_vec()]).await;
+-    assert_ne!(first.id, resaved.id, "a re-save gets a new location");
++    assert_ne!(
++        first.id, resaved.id,
++        "a save after eviction gets a new location"
++    );
+
+     let stale = get(&server, &first.id, Some("bytes=0-10")).await;
+     assert_eq!(
+@@ -453,3 +469,37 @@ async fn closes_a_download_whose_client_stopped_reading() {
+         "the client sees a failed download, not a complete one"
+     );
+ }
++
++#[tokio::test]
++async fn unmerged_filesystem_streams_head_ranges_and_whole_without_copying() {
++    let server = TestServer::with(&[("MAX_CONCURRENT_MERGES", "0")]).await;
++    let parts = parts();
++    let location = save_parts(server.storage(), "multipart", &parts).await;
++    let expected = parts.concat();
++    let head = reqwest::Client::new()
++        .head(format!("{}/download/{}", server.url, location.id))
++        .send()
++        .await
++        .unwrap();
++    assert_eq!(head.status(), 200);
++    assert_eq!(
++        response_header(&head, "content-length"),
++        Some(expected.len().to_string())
++    );
++    assert!(head.bytes().await.unwrap().is_empty());
++    assert_serves_ranges(&server, &location.id, &expected, "x-ms-range").await;
++    let full = get(&server, &location.id, None).await;
++    assert_eq!(
++        response_header(&full, "content-length"),
++        Some(expected.len().to_string())
++    );
++    assert_eq!(full.bytes().await.unwrap(), expected);
++    server.storage().wait_for_ongoing_merges().await;
++    assert!(
++        !server
++            .adapter()
++            .object_exists(&format!("{}/merged", location.folder_name))
++            .await
++            .unwrap()
++    );
++}
+diff --git a/src/config/tests.rs b/src/config/tests.rs
+index 53b068c..e4e79af 100644
+--- a/src/config/tests.rs
++++ b/src/config/tests.rs
+@@ -115,9 +115,12 @@ fn bounds_merge_and_download_limits() {
+         Some(Duration::from_mins(5)),
+         "default idle timeout"
+     );
+-    assert!(
+-        config(&[("MAX_CONCURRENT_MERGES", "0")]).is_err(),
+-        "no merges"
++    assert_eq!(
++        config(&[("MAX_CONCURRENT_MERGES", "0")])
++            .unwrap()
++            .max_concurrent_merges,
++        0,
++        "zero disables merging"
+     );
+     let disabled = config(&[("DOWNLOAD_IDLE_TIMEOUT_MS", "0")]).unwrap();
+     assert_eq!(disabled.download_idle_timeout, None, "0 disables it");
+diff --git a/src/cleanup.rs b/src/cleanup.rs
+index 3839641..1f5f18c 100644
+--- a/src/cleanup.rs
++++ b/src/cleanup.rs
+@@ -8,8 +8,8 @@ use futures_util::{StreamExt as _, stream};
+ use sea_orm::ActiveValue::Set;
+ use sea_orm::sea_query::{Expr, ExprTrait as _};
+ use sea_orm::{
+-    ColumnTrait as _, Condition, EntityTrait as _, QueryFilter as _, QuerySelect as _,
+-    QueryTrait as _, Select, TransactionTrait as _,
++    ColumnTrait as _, Condition, EntityTrait as _, QueryFilter as _, QueryOrder as _,
++    QuerySelect as _, QueryTrait as _, Select, TransactionTrait as _,
+ };
+ use tokio::time::MissedTickBehavior;
+
+@@ -236,22 +236,40 @@ impl Cleanup {
+     ) -> Result<()> {
+         let db = &self.storage.db;
+         let cutoff = now_ms().saturating_sub(MINUTE_MS);
+-        loop {
+-            let stalled: Vec<(i64, String)> = uploads::Entity::find()
+-                .select_only()
+-                .columns([uploads::Column::Id, uploads::Column::FolderName])
+-                .filter(
++        let expired = || {
++            Condition::all()
++                .add(uploads::COLUMN.created_at.lt(cutoff))
++                .add(
+                     Condition::any()
+                         .add(uploads::COLUMN.last_part_uploaded_at.is_null())
+                         .add(uploads::COLUMN.last_part_uploaded_at.lt(cutoff)),
+                 )
+-                .filter(uploads::COLUMN.created_at.lt(cutoff))
++        };
++        let mut after = i64::MIN;
++        loop {
++            let stalled: Vec<(i64, String)> = uploads::Entity::find()
++                .select_only()
++                .columns([uploads::Column::Id, uploads::Column::FolderName])
++                .filter(expired())
++                .filter(uploads::COLUMN.id.gt(after))
++                .order_by_asc(uploads::COLUMN.id)
+                 .limit(u64::from(PAGE_SIZE))
+                 .into_tuple()
+                 .all(&db.pool)
+                 .await?;
+             for (id, folder_name) in &stalled {
+-                uploads::Entity::delete_by_id(*id).exec(&db.pool).await?;
++                after = *id;
++                let Ok(_idle) = self.storage.upload_lock(*id).try_write_owned() else {
++                    continue;
++                };
++                // Another part can finish or finalize between selection and deletion.
++                let deleted = uploads::Entity::delete_by_id(*id)
++                    .filter(expired())
++                    .exec(&db.pool)
++                    .await?;
++                if deleted.rows_affected == 0 {
++                    continue;
++                }
+                 summary.deleted_uploads = summary.deleted_uploads.saturating_add(1);
+                 match self.storage.adapter.delete_folder(folder_name).await {
+                     Ok(deleted) => summary.reclaimed(deleted.objects, deleted.bytes),
+@@ -325,7 +343,9 @@ impl Cleanup {
+         let query = storage_locations::Entity::find()
+             .left_join(cache_entries::Entity)
+             .filter(cache_entries::COLUMN.id.is_null());
+-        self.delete_locations(query, summary, failures).await
++        self.delete_locations(query, summary, failures).await?;
++        // Retry eviction on startup and after any download leases expire.
++        self.storage.enforce_storage_budget(None).await
+     }
+
+     async fn parts(&self, summary: &mut CleanupSummary, failures: &mut Vec<Failure>) -> Result<()> {
+diff --git a/src/tests/cleanup.rs b/src/tests/cleanup.rs
+index 14106b5..4a2dfa1 100644
+--- a/src/tests/cleanup.rs
++++ b/src/tests/cleanup.rs
+@@ -77,14 +77,14 @@ async fn evicts_least_recently_used_entries_only_after_exceeding_the_budget() {
+     }
+
+     let at_budget = server.storage_with(&[("CACHE_MAX_SIZE_BYTES", "12")]).await;
+-    at_budget.enforce_storage_budget().await.unwrap();
++    at_budget.enforce_storage_budget(None).await.unwrap();
+     assert!(
+         find_location(server.db(), &old.id).await.is_some(),
+         "within budget: nothing evicted"
+     );
+
+     let over_budget = server.storage_with(&[("CACHE_MAX_SIZE_BYTES", "11")]).await;
+-    over_budget.enforce_storage_budget().await.unwrap();
++    over_budget.enforce_storage_budget(None).await.unwrap();
+     assert!(
+         find_location(server.db(), &old.id).await.is_none(),
+         "least recently used is evicted"
+@@ -113,9 +113,10 @@ async fn finalization_succeeds_when_eviction_fails() {
+     let root_path = root.to_string_lossy().into_owned();
+     let server = TestServer::with(&[
+         ("STORAGE_FILESYSTEM_PATH", &root_path),
+-        ("CACHE_MAX_SIZE_BYTES", "1"),
++        ("CACHE_MAX_SIZE_BYTES", "7"),
+     ])
+     .await;
++    save_parts(server.storage(), "older", &[b"old".to_vec()]).await;
+     let CreatedUpload::Created { upload, .. } = server
+         .storage()
+         .create_upload(&identity("evict"))
+@@ -135,12 +136,15 @@ async fn finalization_succeeds_when_eviction_fails() {
+         .await
+         .unwrap();
+
+-    // Eviction picks the new location but cannot delete its folder.
++    // Eviction picks the older location but cannot delete its folder.
+     let set_mode =
+         |mode| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode)).unwrap();
+     set_mode(0o555);
+     let writable = std::fs::write(root.join("probe"), b"").is_ok();
+-    let completed = server.storage().complete_upload(&identity("evict")).await;
++    let completed = server
++        .storage()
++        .complete_upload(&identity("evict"), None)
++        .await;
+     set_mode(0o755);
+     if writable {
+         return; // running as root: permissions cannot make the deletion fail
+@@ -327,11 +331,12 @@ async fn failed_finalization_removes_the_upload_folder() {
+     else {
+         panic!("fresh key");
+     };
+-    put(server.adapter(), &format!("{id}/untracked"), b"partial").await;
++    let folder = identity("partial").upload_folder(id);
++    put(server.adapter(), &format!("{folder}/untracked"), b"partial").await;
+
+     let error = server
+         .storage()
+-        .complete_upload(&identity("partial"))
++        .complete_upload(&identity("partial"), None)
+         .await
+         .unwrap_err();
+     assert!(
+@@ -341,7 +346,7 @@ async fn failed_finalization_removes_the_upload_folder() {
+     assert!(
+         server
+             .adapter()
+-            .list_folder(&id.to_string())
++            .list_folder(&folder)
+             .await
+             .unwrap()
+             .is_empty(),
+@@ -363,7 +368,13 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
+     else {
+         panic!("fresh key");
+     };
+-    put(server.adapter(), &format!("{id}/parts/0"), b"authorized").await;
++    let folder = identity("authorized").upload_folder(id);
++    put(
++        server.adapter(),
++        &format!("{folder}/parts/0"),
++        b"authorized",
++    )
++    .await;
+     put(server.adapter(), "orphaned/parts/0", b"orphaned").await;
+     put(server.adapter(), "orphaned/parts/1", b"!").await;
+
+@@ -377,7 +388,7 @@ async fn orphan_reconciliation_deletes_only_unauthorized_expired_folders() {
+         "reclaimed what was deleted"
+     );
+     assert_eq!(
+-        part_count(&server, &id.to_string()).await,
++        part_count(&server, &folder).await,
+         1,
+         "authorized by its upload"
+     );
+@@ -415,3 +426,243 @@ async fn orphan_reconciliation_deletes_nothing_when_the_inventory_fails() {
+         "nothing was deleted"
+     );
+ }
++
++#[tokio::test]
++async fn expired_upload_cleanup_skips_progressing_parts_and_reclaims_abandoned_ones() {
++    use crate::db::uploads;
++    use axum::body::Bytes;
++    use futures_util::{StreamExt as _, stream};
++    use sea_orm::{ActiveValue::Set, QueryFilter as _};
++    let server = TestServer::start().await;
++    let storage = std::sync::Arc::clone(&server.state.storage);
++    let mut ids = Vec::new();
++    let mut transfers = Vec::new();
++    for key in ["slow", "abandoned"] {
++        let CreatedUpload::Created { upload, .. } =
++            storage.create_upload(&identity(key)).await.unwrap()
++        else {
++            panic!("fixture upload")
++        };
++        ids.push(upload.id);
++        transfers.push(upload);
++    }
++    uploads::Entity::update_many()
++        .set(uploads::ActiveModel {
++            created_at: Set(now_ms() - 120_000),
++            ..Default::default()
++        })
++        .filter(uploads::COLUMN.id.is_in(ids.clone()))
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    let active = transfers.remove(0);
++    let (entered, reading) = tokio::sync::oneshot::channel();
++    let (release, gate) = tokio::sync::oneshot::channel();
++    let writer = tokio::spawn(async move {
++        let stream = stream::once(async move {
++            entered.send(()).unwrap();
++            gate.await.unwrap();
++            Ok(Bytes::from_static(b"part"))
++        })
++        .boxed();
++        storage
++            .upload_part(&active, 0, stream, Some(4))
++            .await
++            .unwrap()
++    });
++    reading.await.unwrap();
++    let summary = server
++        .state
++        .cleanup
++        .run(Task::Uploads)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(summary.deleted_uploads, 1);
++    assert!(
++        uploads::Entity::find_by_id(ids[0])
++            .one(&server.db().pool)
++            .await
++            .unwrap()
++            .is_some()
++    );
++    assert!(
++        uploads::Entity::find_by_id(ids[1])
++            .one(&server.db().pool)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let storage = std::sync::Arc::clone(&server.state.storage);
++    let finalize = tokio::spawn(async move {
++        storage
++            .complete_upload(&identity("slow"), None)
++            .await
++            .unwrap()
++    });
++    tokio::task::yield_now().await;
++    assert!(!finalize.is_finished());
++    release.send(()).unwrap();
++    assert!(writer.await.unwrap());
++    assert!(finalize.await.unwrap().is_some());
++    assert!(
++        server
++            .storage()
++            .complete_upload(&identity("slow"), None)
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn oversized_upload_preserves_existing_cache_and_frees_its_staging() {
++    let server = TestServer::with(&[("CACHE_MAX_SIZE_BYTES", "10")]).await;
++    let storage = server.storage();
++    let healthy = save_parts(storage, "healthy", &[b"warm".to_vec()]).await;
++    let big = identity("big");
++    let CreatedUpload::Created { upload, .. } = storage.create_upload(&big).await.unwrap() else {
++        panic!("fresh key");
++    };
++    assert!(
++        storage
++            .upload_part(&upload, 0, super::harness::byte_stream("0123456789x"), None)
++            .await
++            .unwrap()
++    );
++    assert!(
++        storage
++            .complete_upload(&big, Some(11))
++            .await
++            .unwrap_err()
++            .to_string()
++            .contains("budget")
++    );
++    assert_eq!(part_count(&server, &big.upload_folder(upload.id)).await, 0);
++    assert!(find_location(server.db(), &healthy.id).await.is_some());
++    assert!(
++        storage
++            .match_cache_entry(&super::harness::query(&["big"]))
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let fits = save_parts(storage, "maximum", &[b"0123456789".to_vec()]).await;
++    assert!(
++        find_location(server.db(), &fits.id).await.is_some(),
++        "the reclaim target cannot evict its own new entry"
++    );
++}
++
++#[tokio::test]
++async fn local_download_url_survives_eviction_until_the_reader_can_start() {
++    use crate::db::storage_reader_leases;
++    use crate::storage::LocationDeletion;
++    use sea_orm::{ActiveValue::Set, PaginatorTrait as _};
++    let server = TestServer::with(&[("MAX_CONCURRENT_MERGES", "0")]).await;
++    let storage = server.storage();
++    let location = save_parts(storage, "protected", &[b"multi".to_vec(), b"part".to_vec()]).await;
++    for _ in 0..2 {
++        assert!(
++            storage
++                .cache_entry_with_download_url(&super::harness::query(&["protected"]))
++                .await
++                .unwrap()
++                .is_some()
++        );
++    }
++    assert_eq!(
++        storage_reader_leases::Entity::find()
++            .count(&server.db().pool)
++            .await
++            .unwrap(),
++        1
++    );
++    assert_eq!(
++        storage.delete_storage_location(&location.id).await.unwrap(),
++        LocationDeletion::InUse
++    );
++    let reader = storage.download(&location.id, None).await.unwrap().unwrap();
++    storage_reader_leases::Entity::update(storage_reader_leases::ActiveModel {
++        id: Set(location.id.clone()),
++        expires_at: Set(now_ms() - 1),
++        ..Default::default()
++    })
++    .exec(&server.db().pool)
++    .await
++    .unwrap();
++    assert_eq!(
++        storage.delete_storage_location(&location.id).await.unwrap(),
++        LocationDeletion::InUse
++    );
++    assert_eq!(read_all(reader.stream).await.unwrap(), b"multipart");
++    eventually(|| async {
++        storage.delete_storage_location(&location.id).await.unwrap() == LocationDeletion::Deleted
++    })
++    .await;
++}
++
++#[tokio::test]
++async fn concurrent_budget_sweeps_keep_entries_that_fit() {
++    let server = TestServer::with(&[("CACHE_MAX_SIZE_BYTES", "30")]).await;
++    for index in 0..5 {
++        let key = format!("entry-{index}");
++        let mut location = unmerged_location(&key);
++        location.size_bytes = Some(10);
++        insert_location(server.db(), &location).await;
++        insert_entry(server.db(), &entry(&key, &location.id, index)).await;
++    }
++    let passes = (0..8).map(|_| server.storage().enforce_storage_budget(None));
++    for result in futures_util::future::join_all(passes).await {
++        result.unwrap();
++    }
++    assert_eq!(server.db().stored_bytes().await.unwrap(), 20);
++}
++
++#[tokio::test]
++async fn scheduled_cleanup_retries_eviction_after_the_download_lease_expires() {
++    use crate::db::storage_reader_leases;
++    let server = TestServer::with(&[
++        ("CACHE_MAX_SIZE_BYTES", "10"),
++        ("MAX_CONCURRENT_MERGES", "0"),
++    ])
++    .await;
++    let storage = server.storage();
++    let first = save_parts(storage, "one", &[b"12345678".to_vec()]).await;
++    assert!(
++        storage
++            .cache_entry_with_download_url(&super::harness::query(&["one"]))
++            .await
++            .unwrap()
++            .is_some()
++    );
++    let second = save_parts(storage, "two", &[b"abcdefgh".to_vec()]).await;
++    assert!(
++        storage
++            .cache_entry_with_download_url(&super::harness::query(&["two"]))
++            .await
++            .unwrap()
++            .is_some()
++    );
++    server
++        .state
++        .cleanup
++        .run(Task::StorageLocations)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(server.db().stored_bytes().await.unwrap(), 16);
++    storage_reader_leases::Entity::delete_by_id(first.id)
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    server
++        .state
++        .cleanup
++        .run(Task::StorageLocations)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(server.db().stored_bytes().await.unwrap(), 8);
++    assert!(find_location(server.db(), &second.id).await.is_some());
++}
+diff --git a/src/db.rs b/src/db.rs
+index 76dab62..6530f47 100644
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -272,6 +272,7 @@ fn is_retryable_lock_error(failure: &Failure) -> bool {
+ /// upload may hold a reservation at a time.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct EntryIdentity {
++    pub(crate) writer: [u8; 32],
+     pub(crate) key: String,
+     pub(crate) version: String,
+     pub(crate) scope: String,
+@@ -279,6 +280,17 @@ pub(crate) struct EntryIdentity {
+ }
+
+ impl EntryIdentity {
++    // Finalize v2 identifies only a key/version. The opaque storage folder
++    // binds this reservation to the job that created it across helper restarts.
++    pub(crate) fn upload_folder(&self, id: i64) -> String {
++        let mut hash = Sha256::new();
++        hash.update(b"yieldd/upload-owner/v1\0");
++        hash.update(id.to_be_bytes());
++        hash.update(self.reservation_hash());
++        hash.update(self.writer);
++        format!("{:x}", hash.finalize())
++    }
++
+     /// SHA-256 of the JSON array `[key, version, scope, repoId]`, byte-identical to the original
+     /// server's `JSON.stringify`, so both can share a database during a rollout.
+     pub(crate) fn reservation_hash(&self) -> String {
+diff --git a/src/db/tests.rs b/src/db/tests.rs
+index e9f0000..06bbb01 100644
+--- a/src/db/tests.rs
++++ b/src/db/tests.rs
+@@ -57,6 +57,8 @@ async fn attempts(
+ #[test]
+ fn hashes_reservations_like_json_stringify() {
+     let identity = |key: &str, version: &str, scope: &str, repo_id: &str| EntryIdentity {
++        writer: [0; 32],
++
+         key: key.to_owned(),
+         version: version.to_owned(),
+         scope: scope.to_owned(),
+diff --git a/src/tests/harness.rs b/src/tests/harness.rs
+index 628098b..49754a9 100644
+--- a/src/tests/harness.rs
++++ b/src/tests/harness.rs
+@@ -336,6 +336,7 @@ pub(crate) fn query(keys: &[&str]) -> CacheQuery {
+
+ pub(crate) fn identity(key: &str) -> EntryIdentity {
+     EntryIdentity {
++        writer: [0; 32],
+         key: key.to_owned(),
+         version: VERSION.to_owned(),
+         scope: SCOPE.to_owned(),
+@@ -363,7 +364,7 @@ pub(crate) async fn save_parts(storage: &Storage, key: &str, parts: &[Vec<u8>])
+             .unwrap();
+     }
+     storage
+-        .complete_upload(&identity(key))
++        .complete_upload(&identity(key), None)
+         .await
+         .unwrap()
+         .unwrap();
+diff --git a/src/tests/reservations.rs b/src/tests/reservations.rs
+index f78d74c..02245fa 100644
+--- a/src/tests/reservations.rs
++++ b/src/tests/reservations.rs
+@@ -345,3 +345,137 @@ async fn matches_scopes_then_keys_then_exact_before_prefix() {
+         "no candidate matches"
+     );
+ }
++
++#[tokio::test]
++async fn expiration_never_lets_a_previous_writer_finalize_a_reused_key() {
++    use crate::cleanup::Task;
++    use crate::db::now_ms;
++    use sea_orm::QueryFilter as _;
++
++    let server = TestServer::start().await;
++    let storage = server.storage();
++    let first = identity("reuse");
++    let mut second = first.clone();
++    second.writer = [1; 32];
++    let CreatedUpload::Created { upload: old, .. } = storage.create_upload(&first).await.unwrap()
++    else {
++        panic!("new upload")
++    };
++    // Pre-owner-binding reservations used numeric folders. They cannot be
++    // finalized after an upgrade, but the normal expiry sweep still reclaims them.
++    uploads::Entity::update_many()
++        .set(uploads::ActiveModel {
++            folder_name: Set(old.id.to_string()),
++            ..Default::default()
++        })
++        .filter(uploads::COLUMN.id.eq(old.id))
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    assert!(
++        storage
++            .complete_upload(&first, None)
++            .await
++            .unwrap()
++            .is_none()
++    );
++    uploads::Entity::update_many()
++        .set(uploads::ActiveModel {
++            created_at: Set(now_ms() - 120_000),
++            ..Default::default()
++        })
++        .filter(uploads::COLUMN.id.eq(old.id))
++        .exec(&server.db().pool)
++        .await
++        .unwrap();
++    assert_eq!(
++        server
++            .state
++            .cleanup
++            .run(Task::Uploads)
++            .await
++            .unwrap()
++            .unwrap()
++            .deleted_uploads,
++        1
++    );
++    let CreatedUpload::Created { upload: new, .. } = storage.create_upload(&second).await.unwrap()
++    else {
++        panic!("new upload after expiry")
++    };
++    assert!(
++        !storage
++            .upload_part(&old, 0, byte_stream("old"), Some(3))
++            .await
++            .unwrap()
++    );
++    assert!(
++        storage
++            .upload_part(&new, 0, byte_stream("new"), Some(3))
++            .await
++            .unwrap()
++    );
++    assert!(
++        storage
++            .complete_upload(&first, Some(3))
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let (saved, denied) = tokio::join!(
++        storage.complete_upload(&second, Some(3)),
++        storage.create_upload(&first)
++    );
++    assert!(saved.unwrap().is_some());
++    assert!(matches!(denied.unwrap(), CreatedUpload::AlreadyExists));
++    assert!(matches!(
++        storage.create_upload(&first).await.unwrap(),
++        CreatedUpload::AlreadyExists
++    ));
++    let location = matched(storage, &["reuse"]).await.unwrap().location_id;
++    let data = storage.download(&location, None).await.unwrap().unwrap();
++    assert_eq!(super::harness::read_all(data.stream).await.unwrap(), b"new");
++}
++
++#[tokio::test]
++async fn repeated_blocks_preserve_the_distinct_inventory_and_final_length() {
++    let server = TestServer::start().await;
++    let storage = server.storage();
++    for (key, indices, expected_size, valid) in [
++        ("lost-ack", [0, 0, 1], 4_u64, true),
++        ("missing-block", [0, 0, 2], 4, false),
++        ("short-body", [0, 0, 1], 5, false),
++    ] {
++        let entry = identity(key);
++        let CreatedUpload::Created { upload, .. } = storage.create_upload(&entry).await.unwrap()
++        else {
++            panic!("new upload")
++        };
++        for i in indices {
++            assert!(
++                storage
++                    .upload_part(
++                        &upload,
++                        i,
++                        byte_stream(if i == 0 { "aa" } else { "bb" }),
++                        Some(2)
++                    )
++                    .await
++                    .unwrap()
++            );
++        }
++        let result = storage.complete_upload(&entry, Some(expected_size)).await;
++        if valid {
++            assert!(result.unwrap().is_some());
++            let location = matched(storage, &[key]).await.unwrap().location_id;
++            let data = storage.download(&location, None).await.unwrap().unwrap();
++            assert_eq!(
++                super::harness::read_all(data.stream).await.unwrap(),
++                b"aabb"
++            );
++        } else {
++            assert!(result.is_err());
++            assert!(matched(storage, &[key]).await.is_none());
++        }
++    }
++}
+diff --git a/src/storage/leases.rs b/src/storage/leases.rs
+index f6355e3..acfd04f 100644
+--- a/src/storage/leases.rs
++++ b/src/storage/leases.rs
+@@ -107,6 +107,33 @@ pub(crate) async fn release_merge_lease(
+     Ok(())
+ }
+
++// Each location has at most one handoff lease. Repeated lookups extend it until a
++// transfer can acquire its own renewable lease, even if the helper restarts.
++pub(crate) async fn reserve_local_url(
++    db: &impl ConnectionTrait,
++    location: &str,
++    scope: ReaderLeaseScope,
++) -> Result<()> {
++    use sea_orm::sea_query::OnConflict;
++    storage_reader_leases::Entity::insert(storage_reader_leases::ActiveModel {
++        id: Set(location.to_owned()),
++        storage_location_id: Set(location.to_owned()),
++        scope: Set(scope),
++        expires_at: Set(deadline(LEASE_DURATION)),
++    })
++    .on_conflict(
++        OnConflict::column(storage_reader_leases::Column::Id)
++            .update_columns([
++                storage_reader_leases::Column::Scope,
++                storage_reader_leases::Column::ExpiresAt,
++            ])
++            .to_owned(),
++    )
++    .exec_without_returning(db)
++    .await?;
++    Ok(())
++}
++
+ pub(crate) async fn create_reader_lease(
+     db: &impl ConnectionTrait,
+     storage_location_id: &str,

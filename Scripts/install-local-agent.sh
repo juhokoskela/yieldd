@@ -51,6 +51,7 @@ verify_application() {
     signer="anchor apple generic and certificate leaf = H\"$YIELDD_SIGNING_IDENTITY\" and certificate leaf[field.1.2.840.113635.100.6.1.12] exists"
     codesign --verify --strict -R="identifier \"dev.yieldd\" and $signer" "$1"
     codesign --verify --strict -R="identifier \"dev.yieldd.network-relay\" and $signer" "$1/Contents/Helpers/yieldd-network-relay"
+    codesign --verify --strict -R="identifier \"dev.yieldd.cache-server\" and $signer" "$1/Contents/Helpers/yieldd-cache-server"
 }
 
 if [ "$1" = --retry-enrollment ]; then

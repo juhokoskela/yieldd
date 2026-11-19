@@ -359,6 +359,8 @@ protocol MacOSVirtualMachineControlling: Sendable {
     func start(
         completion: @escaping @Sendable (Result<Void, any Error>) -> Void
     )
+    func attachNativeDisk(_ image: URL, completion: @escaping @Sendable (Result<Void, any Error>) -> Void)
+    func detachNativeDisk(completion: @escaping @Sendable (Result<Void, any Error>) -> Void)
     func forceStop(
         completion:
             @escaping @Sendable (
@@ -487,6 +489,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
     private let machine: VZVirtualMachine
     private let packetSocket: PacketSocket
     private var failure: (any Error)?
+    private var cacheDisk: VZUSBMassStorageDevice?
 
     init(bundleURL: URL, memoryBytes: UInt64, packetSocket: PacketSocket) throws {
         self.packetSocket = packetSocket
@@ -526,6 +529,45 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
     ) {
         queue.async {
             self.machine.start(completionHandler: completion)
+        }
+    }
+
+    func attachNativeDisk(_ image: URL, completion: @escaping @Sendable (Result<Void, any Error>) -> Void) {
+        queue.async {
+            do {
+                guard self.machine.state == .running, self.cacheDisk == nil,
+                      let controller = self.machine.usbControllers.first else { throw POSIXError(.EBUSY) }
+                let attachment = try VZDiskImageStorageDeviceAttachment(
+                    url: image, readOnly: false, cachingMode: .automatic, synchronizationMode: .full
+                )
+                let disk = VZUSBMassStorageDevice(configuration: .init(attachment: attachment))
+                self.cacheDisk = disk
+                controller.attach(device: disk) { error in
+                    if let error {
+                        self.cacheDisk = nil
+                        completion(.failure(error))
+                    } else {
+                        completion(.success(()))
+                    }
+                }
+            } catch { completion(.failure(error)) }
+        }
+    }
+
+    func detachNativeDisk(completion: @escaping @Sendable (Result<Void, any Error>) -> Void) {
+        queue.async {
+            guard let disk = self.cacheDisk, let controller = disk.usbController else {
+                completion(.failure(POSIXError(.ENXIO)))
+                return
+            }
+            controller.detach(device: disk) { error in
+                if let error {
+                    completion(.failure(error))
+                } else {
+                    self.cacheDisk = nil
+                    completion(.success(()))
+                }
+            }
         }
     }
 
@@ -626,6 +668,7 @@ private final class VirtualizationFrameworkMachine: NSObject, @unchecked Sendabl
         configuration.cpuCount = virtualCPUs
         configuration.memorySize = memoryBytes
         configuration.storageDevices = [storage]
+        configuration.usbControllers = [VZXHCIControllerConfiguration()]
         configuration.graphicsDevices = [graphics]
         configuration.networkDevices = [packetSocket.device()]
         configuration.audioDevices = [MacOSVirtualMachineLifecycle.makeAudioDevice()]

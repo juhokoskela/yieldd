@@ -296,7 +296,7 @@ func ensurePlatformScaleSet(ctx context.Context, client scaleSetAPI, cfg config,
 		if !sameLabels(set.Labels, baseLabels) && !sameLabels(set.Labels, desired.Labels) {
 			return 0, fmt.Errorf("scale set %q (%d) has unexpected labels %q", name, set.ID, scaleSetLabelNames(set.Labels))
 		}
-		if !sameLabels(set.Labels, desired.Labels) {
+		if !sameLabels(set.Labels, desired.Labels) || !set.RunnerSetting.DisableUpdate {
 			set, err = client.UpdateRunnerScaleSet(ctx, set.ID, desired)
 		}
 	}

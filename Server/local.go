@@ -30,6 +30,7 @@ type localLease struct {
 	Expires      time.Time  `json:"expires"`
 	JobStarted   bool       `json:"job_started,omitempty"`
 	JobCompleted bool       `json:"job_completed,omitempty"`
+	JobSucceeded bool       `json:"job_succeeded,omitempty"`
 }
 
 func (l *localLease) expired() bool {
@@ -156,7 +157,40 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 }
 
 type deviceAuthorization struct {
-	Continue bool `json:"continue"`
+	Continue     bool `json:"continue"`
+	JobSucceeded bool `json:"job_succeeded,omitempty"`
+}
+
+type finalJobResult string
+
+const (
+	resultPending     finalJobResult = "pending"
+	resultSucceeded   finalJobResult = "succeeded"
+	resultUnavailable finalJobResult = "unavailable"
+)
+
+type deviceJobResult struct {
+	Result finalJobResult `json:"result"`
+}
+
+func (l *lease) jobResult(slot int) finalJobResult {
+	if l == nil || l.CleanupIntent || l.Local == nil || l.Local.Slot != slot || l.Local.Phase != localIssued {
+		return resultUnavailable
+	}
+	if !l.Local.JobCompleted {
+		return resultPending
+	}
+	if l.Local.JobSucceeded {
+		return resultSucceeded
+	}
+	return resultUnavailable
+}
+
+func (c *coordinator) deviceJobResult(request deviceRequest) (deviceJobResult, error) {
+	if err := c.checkDevice(request); err != nil {
+		return deviceJobResult{}, err
+	}
+	return deviceJobResult{Result: c.state.Leases[request.Runner].jobResult(request.Slot)}, nil
 }
 
 func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
@@ -167,11 +201,8 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 }
 func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
 	l := a.lease
-	if l == nil || l.Local == nil || l.Local.Slot != request.Slot || l.Local.Phase != localIssued {
-		return &deviceAuthorization{}, nil
-	}
-	if l.CleanupIntent || l.Local.JobCompleted {
-		return &deviceAuthorization{}, nil
+	if result := l.jobResult(request.Slot); result != resultPending {
+		return &deviceAuthorization{JobSucceeded: result == resultSucceeded}, nil
 	}
 	busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, l.RunnerID)
 	if err != nil {
@@ -195,14 +226,25 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	return &deviceAuthorization{Continue: !l.Local.expired()}, nil
 }
 
-func (a *assignment) recordLocalJob(id int, completed bool) error {
+type localJobEvent uint8
+
+const (
+	jobStarted localJobEvent = iota
+	jobUnsuccessful
+	jobSucceeded
+)
+
+func (a *assignment) recordLocalJob(id int, event localJobEvent) error {
 	l := a.lease
 	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.RunnerID != id {
 		return nil
 	}
 	next := *l.Local
 	next.JobStarted = true
-	next.JobCompleted = next.JobCompleted || completed
+	if event != jobStarted && !next.JobCompleted {
+		next.JobCompleted = true
+		next.JobSucceeded = event == jobSucceeded
+	}
 	if next == *l.Local {
 		return nil
 	}

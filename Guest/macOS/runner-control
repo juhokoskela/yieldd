@@ -6,6 +6,10 @@ if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
     printf '2\n'
     exit 0
 fi
+if [[ $# -eq 2 && $1 == --protocol-version && $2 == --local-cache ]]; then
+    printf '3\n'
+    exit 0
+fi
 
 runner_directory="$HOME/actions-runner"
 state_directory="$runner_directory/.yieldd-runner"
@@ -90,6 +94,11 @@ worker() {
     IFS= read -r ACTIONS_RUNNER_INPUT_JITCONFIG < "$state_directory/jit-config"
     [[ -n "$ACTIONS_RUNNER_INPUT_JITCONFIG" ]] || return 1
     export ACTIONS_RUNNER_INPUT_JITCONFIG
+    if [[ -f "$state_directory/local-cache" ]]; then
+        export YIELDD_LOCAL_CACHE=1
+    else
+        unset YIELDD_LOCAL_CACHE
+    fi
     rm "$state_directory/jit-config"
     export ACTIONS_RUNNER_HOOK_JOB_STARTED="$HOME/.yieldd-job-started.sh"
     set +e

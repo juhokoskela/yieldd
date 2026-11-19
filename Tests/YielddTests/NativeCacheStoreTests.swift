@@ -1,0 +1,306 @@
+import Darwin
+import Foundation
+import Testing
+@testable import Yieldd
+
+private let mainScope = String(repeating: "a", count: 64)
+private let pullRequestScope = String(repeating: "b", count: 64)
+
+private func runner() -> RunnerID { .init(value: "yieldd-" + UUID().uuidString.lowercased()) }
+
+private func workspace() throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    return url
+}
+
+private func mark(_ disk: NativeCacheDisk, _ text: String) throws {
+    let file = try FileHandle(forWritingTo: disk.url)
+    defer { try? file.close() }
+    try file.write(contentsOf: Data(text.utf8))
+}
+
+private func read(_ disk: NativeCacheDisk) throws -> String {
+    let file = try FileHandle(forReadingFrom: disk.url)
+    defer { try? file.close() }
+    return String(decoding: try file.read(upToCount: 5) ?? Data(), as: UTF8.self)
+}
+
+@Test func nativeJobsClonePrivateImagesAndPublishOnlyToTheirWriteScope() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 1 << 20)
+    let seed = runner()
+    let first = try store.open(seed, readable: [mainScope], writable: mainScope)
+    #expect(first.isCold)
+    try mark(first, "main1")
+    try store.publish(first)
+    try store.discard(seed)
+
+    let pr = runner()
+    let inherited = try store.open(pr, readable: [pullRequestScope, mainScope], writable: pullRequestScope)
+    #expect(!inherited.isCold)
+    #expect(try read(inherited) == "main1")
+    try mark(inherited, "pull1")
+    try store.publish(inherited)
+    try store.discard(pr)
+
+    for (scope, expected) in [(mainScope, "main1"), (pullRequestScope, "pull1")] {
+        let id = runner()
+        let reader = try store.open(id, readable: [scope], writable: nil)
+        #expect(try read(reader) == expected)
+        try mark(reader, "other")
+        try store.publish(reader)
+        try store.discard(id)
+        let later = runner()
+        #expect(try read(store.open(later, readable: [scope], writable: nil)) == expected)
+        try store.discard(later)
+    }
+}
+
+@Test func concurrentNativePublishPreservesFirstCompletedGeneration() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 1 << 20)
+    let one = runner(), two = runner()
+    let first = try store.open(one, readable: [mainScope], writable: mainScope)
+    let second = try store.open(two, readable: [mainScope], writable: mainScope)
+    try mark(first, "first")
+    try mark(second, "later")
+    try store.publish(first)
+    try store.publish(second)
+    let check = runner()
+    #expect(try read(store.open(check, readable: [mainScope], writable: nil)) == "first")
+}
+
+@Test func frequentlyRestoredBaseSurvivesPullRequestEviction() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 1 << 20)
+    let first = runner()
+    let disk = try store.open(first, readable: [], writable: mainScope)
+    try mark(disk, "main1")
+    try store.publish(disk)
+    for n in 0..<17 {
+        let id = runner()
+        let pr = String(format: "%064x", n)
+        let disk = try store.open(id, readable: [pr, mainScope], writable: pr)
+        #expect(!disk.isCold)
+        try store.publish(disk)
+    }
+    let reader = runner()
+    #expect(try read(store.open(reader, readable: [mainScope], writable: nil)) == "main1")
+}
+
+@Test(arguments: ["replace", "symlink", "resize", "hardlink"])
+func replacedGuestDiskCannotBecomeASeed(change: String) throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 1 << 20)
+    let id = runner()
+    let disk = try store.open(id, readable: [], writable: mainScope)
+    let other = root.appendingPathComponent("other")
+    switch change {
+    case "replace", "symlink":
+        try FileManager.default.moveItem(at: disk.url, to: other)
+        if change == "replace" { try FileManager.default.copyItem(at: other, to: disk.url) }
+        else { try FileManager.default.createSymbolicLink(at: disk.url, withDestinationURL: other) }
+    case "hardlink":
+        try FileManager.default.linkItem(at: disk.url, to: other)
+    default:
+        #expect(truncate(disk.url.path, 1) == 0)
+    }
+    #expect(throws: (any Error).self) { try store.publish(disk) }
+    let check = runner()
+    #expect(try store.open(check, readable: [mainScope], writable: nil).isCold)
+    try store.discard(id)
+}
+
+@Test func nativeStoreRejectsInvalidScopeAndRunnerBeforeCreatingJob() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux)
+    #expect(throws: JobCacheError.self) { try store.open(runner(), readable: ["../seed"], writable: nil) }
+    #expect(throws: RunnerLeaseError.self) {
+        try store.open(.init(value: "yieldd-../sibling"), readable: [mainScope], writable: nil)
+    }
+}
+
+@Test func macOSColdFormatterUsesSlotCancellationAndRetainsRunnerOwnership() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let executor = RecordingProcessExecutor(outcomes: [.failure(TestFailure.cancelled)])
+    try withRunnerOwnership(in: root) { owner in
+        let descriptor = try #require(owner.ownershipDescriptor)
+        let storage = RunnerStorage(volumePath: root.resolvingSymlinksInPath().path, volumeUUID: UUID().uuidString)
+        let store = try NativeCacheStore(storage: storage, platform: .macOS, executor: executor, ownershipDescriptor: descriptor)
+        #expect(throws: TestFailure.cancelled) { try store.open(runner(), readable: [], writable: mainScope) }
+        let request = try #require(executor.requests.first)
+        #expect(request.executableURL.path == "/usr/sbin/diskutil")
+        #expect(request.cancellable)
+        #expect(request.ownershipDescriptor == descriptor)
+    }
+}
+
+@Test func macOSColdDiskHasTheRequestedRawSizeAndCanBeCloned() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let size: Int64 = 256 << 20
+    let store = NativeCacheStore(root: root, platform: .macOS, diskBytes: size)
+    let id = runner()
+    let first = try store.open(id, readable: [mainScope], writable: mainScope)
+    #expect(first.isCold)
+    let file = try FileHandle(forReadingFrom: first.url)
+    #expect(try file.seekToEnd() == UInt64(size))
+    try file.close()
+    try store.publish(first)
+    let second = runner()
+    #expect(try !store.open(second, readable: [mainScope], writable: nil).isCold)
+    try store.discard(second)
+}
+
+@Test func abandonedCheckoutCannotReopenUntilRecoveryDiscardsIt() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let id = runner()
+    let first = try store.open(id, readable: [], writable: mainScope)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: first.url.deletingLastPathComponent().path) == ["cache.img"])
+    #expect(throws: JobCacheError.self) { try store.open(id, readable: [], writable: mainScope) }
+    let restarted = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    try restarted.discard(id)
+    #expect(!FileManager.default.fileExists(atPath: first.url.deletingLastPathComponent().path))
+    #expect(try restarted.open(id, readable: [mainScope], writable: nil).isCold)
+}
+
+@Test func warmLookupLeavesTheIndexAloneAndPublicationReapsOrphans() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let first = runner()
+    try store.publish(store.open(first, readable: [], writable: mainScope))
+    try store.discard(first)
+    let area = root.appendingPathComponent(RunnerPlatform.linux.rawValue)
+    let index = area.appendingPathComponent("index.json")
+    let before = try Data(contentsOf: index)
+    let orphan = area.appendingPathComponent("seeds/\(UUID().uuidString).img")
+    try Data().write(to: orphan)
+    let second = runner()
+    let disk = try store.open(second, readable: [mainScope], writable: mainScope)
+    #expect(!disk.isCold)
+    #expect(try Data(contentsOf: index) == before)
+    #expect(FileManager.default.fileExists(atPath: orphan.path))
+    try store.publish(disk)
+    #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    try store.discard(second)
+}
+
+@Test func evictionCannotMakeAStaleWriterFirstAgain() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let otherSlot = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let original = try store.open(runner(), readable: [], writable: mainScope)
+    let stale = try otherSlot.open(runner(), readable: [], writable: mainScope)
+    try store.publish(original)
+    for n in 0..<16 {
+        let next = try store.open(runner(), readable: [], writable: String(format: "%064x", n))
+        try store.publish(next)
+    }
+    #expect(try store.open(runner(), readable: [mainScope], writable: nil).isCold)
+    try otherSlot.publish(stale)
+    #expect(try store.open(runner(), readable: [mainScope], writable: nil).isCold)
+    let fresh = try store.open(runner(), readable: [mainScope], writable: mainScope)
+    try mark(fresh, "fresh")
+    try store.publish(fresh)
+    #expect(try read(store.open(runner(), readable: [mainScope], writable: nil)) == "fresh")
+}
+
+@Test func fullNativeStorePreservesIndependentPendingWritesAcrossEvictions() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    for n in 0..<16 {
+        let id = runner()
+        try store.publish(store.open(id, readable: [], writable: String(format: "%064x", n)))
+        try store.discard(id)
+    }
+    let scopes = (16..<21).map { String(format: "%064x", $0) }
+    let writers = try scopes.map { scope in
+        let slot = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+        let disk = try slot.open(runner(), readable: [], writable: scope)
+        try mark(disk, "saved")
+        return (slot, disk)
+    }
+    for (slot, disk) in writers { try slot.publish(disk) }
+    for scope in scopes {
+        let reader = try store.open(runner(), readable: [scope], writable: nil)
+        #expect(try read(reader) == "saved")
+    }
+}
+
+@Test func nativeDiscardCompletesEvenWhenCatalogIsUnreadable() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let job = runner()
+    let disk = try store.open(job, readable: [], writable: mainScope)
+    try mark(disk, "dirty")
+    let index = root.appendingPathComponent("linux/index.json")
+    let catalog = try Data(contentsOf: index)
+    try writePrivateRunnerFile(Data("invalid".utf8), to: index)
+    try store.discard(job)
+    #expect(!FileManager.default.fileExists(atPath: disk.url.deletingLastPathComponent().path))
+    #expect(try Data(contentsOf: index) == Data("invalid".utf8))
+    try writePrivateRunnerFile(catalog, to: index)
+    try store.publish(disk)
+    #expect(try store.open(runner(), readable: [mainScope], writable: nil).isCold)
+}
+
+@Test func nativeRecoveryDropsWriterClaimEvenWhenPrivateImageIsGone() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let first = runner(), other = runner()
+    let abandoned = try store.open(first, readable: [], writable: mainScope)
+    let active = try store.open(other, readable: [], writable: pullRequestScope)
+    try FileManager.default.removeItem(at: abandoned.url.deletingLastPathComponent())
+    let recovered = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    try recovered.discard(first)
+    try recovered.discard(first)
+    // Without the claim, a late save is skipped before even opening the missing disk.
+    try store.publish(abandoned)
+    #expect(try recovered.open(runner(), readable: [mainScope], writable: nil).isCold)
+    try mark(active, "alive")
+    try store.publish(active)
+    #expect(try read(recovered.open(runner(), readable: [pullRequestScope], writable: nil)) == "alive")
+}
+
+@Test func nativeByteBudgetEvictsOldestScopesFirst() throws {
+    let root = try workspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = NativeCacheStore(root: root, platform: .linux, diskBytes: 4096)
+    let scopes = (0..<3).map { String(format: "%064x", $0) }
+    for scope in scopes { try store.publish(store.open(runner(), readable: [], writable: scope)) }
+    // Use the recorded allocation sizes to exercise a 16 GiB budget with small files.
+    let area = root.appendingPathComponent("linux")
+    let index = area.appendingPathComponent("index.json")
+    var catalog = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
+    var seeds = try #require(catalog["seeds"] as? [String: [String: Any]])
+    for (n, scope) in scopes.enumerated() {
+        var seed = try #require(seeds[scope])
+        let used = Date(timeIntervalSinceReferenceDate: TimeInterval(n))
+        seed["lastUsed"] = used.timeIntervalSinceReferenceDate
+        seed["bytes"] = [Int64(4096), 8 << 30, 10 << 30][n]
+        let id = try #require(seed["generation"] as? String)
+        let image = area.appendingPathComponent("seeds").appendingPathComponent(id + ".img")
+        try FileManager.default.setAttributes([.modificationDate: used], ofItemAtPath: image.path)
+        seeds[scope] = seed
+    }
+    catalog["seeds"] = seeds
+    try writePrivateRunnerFile(JSONSerialization.data(withJSONObject: catalog), to: index)
+    try store.publish(store.open(runner(), readable: [], writable: mainScope))
+    for (n, scope) in scopes.enumerated() {
+        #expect(try store.open(runner(), readable: [scope], writable: nil).isCold == (n < 2))
+    }
+}

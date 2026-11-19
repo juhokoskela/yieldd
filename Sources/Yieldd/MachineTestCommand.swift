@@ -23,7 +23,8 @@ struct MachineTestCommand: ParsableCommand {
                 try leaseStore.recoverMachineTest {
                     try AppleContainerBackend(containerURL: locator.locate("container"), executor: executor, stateDirectory: leaseStore.directory)
                 }
-                try removeUnleasedRunnerFiles(in: leaseStore.directory, checkCancellation: signalMonitor.check)
+                try removeUnleasedRunnerFiles(in: leaseStore.directory, ownershipDescriptor: leaseStore.ownershipDescriptor,
+                                             executor: executor, checkCancellation: signalMonitor.check)
             } else {
                 try leaseStore.recoverMachineTest { backend }
             }
@@ -36,7 +37,8 @@ struct MachineTestCommand: ParsableCommand {
                 waitingForMemory: {
                     print("Machine test is waiting for available host memory.")
                 }
-            ).run(id: id, journal: backend.platform == .linux ? leaseStore : nil)
+            ).run(id: id, journal: backend.platform == .linux ? leaseStore : nil,
+                  localCache: try loadJobCachePolicy(in: leaseStore.directory) != nil)
             print("Machine test passed.")
         }
     }
@@ -62,7 +64,7 @@ struct MachineTestRunner {
         self.waitingForMemory = waitingForMemory
     }
 
-    func run(id: RunnerID, journal: RunnerLeaseStore? = nil) throws {
+    func run(id: RunnerID, journal: RunnerLeaseStore? = nil, localCache: Bool = false) throws {
         let reservation = try memoryAdmission.acquire(
             reserving: backend.platform.memoryReservationBytes,
             checkCancellation: checkCancellation,
@@ -76,7 +78,7 @@ struct MachineTestRunner {
                 machineMayExist = true
             }
             try checkCancellation()
-            try RunnerGuestProtocol.validate(backend: backend, id: id)
+            try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: localCache)
             switch backend.platform {
             case .linux:
                 try backend.exec(

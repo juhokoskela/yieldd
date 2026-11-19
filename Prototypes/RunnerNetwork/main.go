@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,12 +28,13 @@ func main() {
 	log.SetOutput(io.Discard)
 	socket := flag.String("socket", "", "Datagram socket in a private, host-owned directory")
 	runner := flag.String("runner", "", "Host-issued runner identity for diagnostic summaries")
-	platform := flag.String("platform", "", "Runner platform for diagnostic summaries: linux or macos")
+	platform := flag.String("platform", "", "Runner platform (linux or macos), used for diagnostics and Linux cache disk export")
+	cacheSocket := flag.String("cache-socket", "", "Private archive service socket")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 	identity := relayIdentity{Runner: *runner, Platform: *platform}
-	if err := runOwnedRelay(ctx, *socket, os.Stdin, os.Stdout, os.Stderr, identity); err != nil {
+	if err := runOwnedRelay(ctx, *socket, os.Stdin, os.Stdout, os.Stderr, identity, *cacheSocket); err != nil {
 		reported := make(chan struct{})
 		go func() { defer close(reported); fmt.Fprintln(os.Stderr, err) }()
 		select {
@@ -45,7 +47,7 @@ func main() {
 
 // The owner holds stdin open without sending data. EOF, an error, or any input
 // revokes ownership. This covers owner crashes without trusting a reusable PID.
-func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, diagnostics io.Writer, identity relayIdentity) error {
+func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, diagnostics io.Writer, identity relayIdentity, cacheSocket string) error {
 	if err := identity.validate(); err != nil {
 		return err
 	}
@@ -83,7 +85,7 @@ func runOwnedRelay(ctx context.Context, socket string, owner *os.File, ready, di
 	// Diagnostics belong to the helper process. Never join a reporter that may
 	// be blocked by its consumer; process exit also ends that goroutine.
 	go counts.report(ctx, diagnostics)
-	err := serve(ctx, socket, ready, counts)
+	err := serve(ctx, socket, ready, counts, cacheSocket)
 	if err != nil && ctx.Err() == nil {
 		return err
 	}
@@ -102,7 +104,7 @@ func (i relayIdentity) validate() error {
 	return nil
 }
 
-func serve(ctx context.Context, path string, ready io.Writer, counts *denialCounters) error {
+func serve(ctx context.Context, path string, ready io.Writer, counts *denialCounters, cacheSocket string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if !filepath.IsAbs(path) {
@@ -132,6 +134,31 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 	network, err := newRelayNetwork(ctx, dial, counts)
 	if err != nil {
 		return err
+	}
+	if cacheSocket != "" {
+		results := githubResultsTransport(counts)
+		defer results.CloseIdleConnections()
+		cache := newRelayCache(cacheSocket, filepath.Dir(path), results)
+		listener, err := network.Listen("tcp", cacheAddress)
+		if err != nil {
+			return err
+		}
+		server := &http.Server{Handler: cache, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: time.Minute,
+			MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return ctx }}
+		go func() { _ = server.Serve(listener) }()
+		defer func() { cancel(); server.Close(); listener.Close(); cache.client.CloseIdleConnections() }()
+	}
+	if cacheSocket != "" && counts.identity.Platform == "linux" {
+		disk, err := network.Listen("tcp", nativeDiskAddress)
+		if err != nil {
+			return err
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = serveNativeDisk(ctx, disk, filepath.Dir(path))
+		}()
+		defer func() { cancel(); disk.Close(); <-done }()
 	}
 	ssh, err := net.ListenUnix("unix", &net.UnixAddr{Name: path + ".ssh", Net: "unix"})
 	if err != nil {

@@ -103,3 +103,38 @@ func TestLocalAuthorizationProgressRequiresMatchingRunnerAndDurableSave(t *testi
 		t.Fatal("cleanup renewed", err)
 	}
 }
+
+func TestNativeCachePermissionRequiresMatchingDurableJobSuccess(t *testing.T) {
+	for result, success := range map[string]bool{"Succeeded": true, "success": true, "Failed": false, "Canceled": false, "": false, "SucceededWithIssues": false} {
+		t.Run(result, func(t *testing.T) {
+			c, _, store, request := localFixture(t)
+			if _, err := c.acceptDevice(t.Context(), request); err != nil {
+				t.Fatal(err)
+			}
+			id := singleLease(c.state).RunnerID
+			job := &scaleset.JobCompleted{RunnerName: request.Runner, RunnerID: id, Result: result}
+			if err := c.HandleJobCompleted(t.Context(), job); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := store.load(c.state.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.state = saved
+			job.Result = "Succeeded"
+			if err := c.HandleJobCompleted(t.Context(), job); err != nil {
+				t.Fatal(err)
+			}
+			auth, err := c.renewDevice(t.Context(), request)
+			if err != nil || auth.Continue || auth.JobSucceeded != success {
+				t.Fatalf("renew after %q: %+v, %v", result, auth, err)
+			}
+			wrong := request
+			wrong.Slot++
+			auth, err = c.renewDevice(t.Context(), wrong)
+			if err != nil || auth.JobSucceeded {
+				t.Fatalf("wrong slot got completion permission: %+v, %v", auth, err)
+			}
+		})
+	}
+}

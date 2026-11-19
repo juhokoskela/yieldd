@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+export_dir=/run/yieldd-native
+image=$export_dir/nbd
+path=/mnt/yieldd-cache
+
+case "$#:${1:-}" in
+    2:mount)
+        case "$2" in cold|warm) ;; *) exit 2 ;; esac
+        install -d -m 0700 "$export_dir"
+        mkdir -p "$path"
+        if mountpoint -q "$path" || mountpoint -q "$export_dir"; then exit 1; fi
+        # Some OCI images have no /dev/fuse node even when their guest kernel supports FUSE.
+        if [ ! -e /dev/fuse ]; then mknod -m 0600 /dev/fuse c 10 229; fi
+        nbdfuse -C 1 "$export_dir" nbd://192.168.127.1:7342/ </dev/null >"$export_dir.log" 2>&1 &
+        pid=$!
+        born=$(cut -d " " -f 22 "/proc/$pid/stat")
+        printf '%s %s\n' "$pid" "$born" >"$export_dir.process"
+        for _ in $(seq 1 100); do
+            if [ -f "$image" ]; then break; fi
+            if ! kill -0 "$pid" 2>/dev/null; then cat "$export_dir.log" >&2; exit 1; fi
+            sleep 0.1
+        done
+        test -f "$image"
+        if [ "$2" = cold ]; then
+            # The host creates cold disks by extending a new empty file. Every block already reads zero.
+            mkfs.ext4 -q -F -E nodiscard,assume_storage_prezeroed=1 -L yieldd-cache "$image"
+        fi
+        mount -t ext4 -o loop,nosuid,nodev "$image" "$path"
+        if [ "$2" = cold ]; then chown runner:runner "$path"; fi
+        ;;
+    1:unmount)
+        # Reclaim free extents before saving. An unsupported discard still permits a clean unmount.
+        fstrim --minimum 1M "$path" || :
+        umount "$path"
+        loops=$(losetup -j "$image")
+        test -z "$loops"
+        sync -d "$image"
+        ;;
+    1:close)
+        fusermount3 -u "$export_dir"
+        # nbdfuse 1.20 can retain its socket after FUSE unmount. Close only this job’s client.
+        read -r pid born <"$export_dir.process"
+        if [ "$born" = "$(cut -d ' ' -f 22 "/proc/$pid/stat" 2>/dev/null)" ]; then
+            start-stop-daemon --stop --oknodo --signal KILL --pid "$pid" --exec /usr/bin/nbdfuse
+        fi
+        ;;
+    *) exit 2 ;;
+esac

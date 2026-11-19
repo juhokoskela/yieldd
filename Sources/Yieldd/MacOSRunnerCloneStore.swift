@@ -1,22 +1,23 @@
 import Darwin
 import Foundation
 
-func removeMacOSRunnerFiles(_ id: RunnerID, in directory: URL,
+func removeMacOSRunnerFiles(_ id: RunnerID, in directory: URL, executor: any ProcessExecuting,
                            makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
     var failures: [RunnerSessionCleanupFailure] = []
     do { try RunnerNetworkDirectories(stateDirectory: directory).remove(id) }
     catch { failures.append(.init(step: .network, error: error)) }
     do {
-        let clones = try (makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) })(.runners)
+        let clones = try (makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0, executor: executor) })(.runners)
         try clones.remove(id)
     } catch { failures.append(.init(step: .machine, error: error)) }
     if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
 }
 
 // Called under exclusive ownership after all outstanding guests have been recovered.
-func removeUnleasedRunnerFiles(in directory: URL, checkCancellation: () throws -> Void = {},
+func removeUnleasedRunnerFiles(in directory: URL, ownershipDescriptor: Int32? = nil, executor: ProcessExecutor = ProcessExecutor(),
+                               checkCancellation: () throws -> Void = {},
                                makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil) throws {
-    let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0) }
+    let makeCloneStore = makeCloneStore ?? { try MacOSRunnerCloneStore(stateDirectory: directory, kind: $0, executor: executor) }
     var failures: [RunnerSessionCleanupFailure] = []
     try checkCancellation()
     do { try RunnerNetworkDirectories(stateDirectory: directory).removeUnleased() }
@@ -24,6 +25,11 @@ func removeUnleasedRunnerFiles(in directory: URL, checkCancellation: () throws -
         if isCancellation(error) { throw error }
         if case let RunnerSessionError.cleanupFailed(entries) = error { failures.append(contentsOf: entries) }
         else { failures.append(.init(step: .network, error: error)) }
+    }
+    do { try ArchiveCacheVolume.recover(in: directory, ownershipDescriptor: ownershipDescriptor, executor: executor) }
+    catch {
+        if isCancellation(error) { throw error }
+        failures.append(.init(step: .archiveCache, error: error))
     }
     for kind in RunnerCloneKind.allCases {
         do {
@@ -46,11 +52,11 @@ struct MacOSRunnerCloneStore {
         validateRoot = {}
     }
 
-    init(stateDirectory: URL, kind: RunnerCloneKind = .runners) throws {
+    init(stateDirectory: URL, kind: RunnerCloneKind = .runners, executor: any ProcessExecuting = ProcessExecutor()) throws {
         let storage = try RunnerStorage.required(in: stateDirectory)
         rootURL = storage.cloneRoot(kind)
         validateRoot = {
-            let current = try RunnerStorage.validated(in: stateDirectory)
+            let current = try RunnerStorage.validated(in: stateDirectory, executor: executor)
             guard current == storage else { throw RunnerStorageError.volumeUnavailable(path: storage.volumePath) }
             try current.validatePath(current.cloneRoot(kind))
         }

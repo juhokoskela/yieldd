@@ -1,0 +1,87 @@
+--- a/src/Runner.Worker/JobRunner.cs
++++ b/src/Runner.Worker/JobRunner.cs
+@@ -186,6 +186,23 @@
+                 List<IStep> jobSteps = null;
+                 try
+                 {
++                    if (Environment.GetEnvironmentVariable("YIELDD_LOCAL_CACHE") == "1")
++                    {
++                        // Bind the GitHub-issued token before any workflow code runs. The relay
++                        // lives on this VM's private network and drops the binding on teardown.
++                        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
++                        {
++                            Timeout = TimeSpan.FromSeconds(15)
++                        };
++                        using var bind = new HttpRequestMessage(HttpMethod.Post, "http://192.168.127.1:7341/yieldd/bind");
++                        bind.Headers.Authorization = new AuthenticationHeaderValue("Bearer",
++                            systemConnection.Authorization.Parameters[EndpointAuthorizationParameters.AccessToken]);
++                        using var response = await client.SendAsync(bind, HttpCompletionOption.ResponseHeadersRead, jobRequestCancellationToken);
++                        if (response.StatusCode != System.Net.HttpStatusCode.NoContent)
++                        {
++                            throw new InvalidOperationException($"The local cache rejected the job (HTTP {(int)response.StatusCode}).");
++                        }
++                    }
+                     Trace.Info("Initialize job. Getting all job steps.");
+                     jobSteps = await jobExtension.InitializeJob(jobContext, message);
+                 }
+--- a/src/Runner.Worker/Handlers/Handler.cs
++++ b/src/Runner.Worker/Handlers/Handler.cs
+@@ -45,6 +45,36 @@
+         public string ActionDirectory { get; set; }
+         public List<JobExtensionRunner> LocalActionContainerSetupSteps { get; set; }
+
++        protected void SetResultsServiceUrl(string resultsUrl, IDictionary<string, string> containerEnvironment)
++        {
++            Environment["ACTIONS_RESULTS_URL"] = resultsUrl;
++            if (System.Environment.GetEnvironmentVariable("YIELDD_LOCAL_CACHE") != "1" ||
++                !string.Equals(resultsUrl.TrimEnd('/'), "https://results-receiver.actions.githubusercontent.com", StringComparison.OrdinalIgnoreCase))
++            {
++                return;
++            }
++
++            const string gateway = "192.168.127.1";
++            Environment["ACTIONS_RESULTS_URL"] = $"http://{gateway}:7341/";
++            // Clients disagree about which alias takes precedence. Preserve each effective
++            // list, including the other alias when only one is set.
++            string Existing(string name)
++            {
++                if (Environment.TryGetValue(name, out var value)) return value;
++                if (containerEnvironment == null) return System.Environment.GetEnvironmentVariable(name);
++                return containerEnvironment.TryGetValue(name, out value) ? value : null;
++            }
++            string Append(string preferred, string alternate)
++            {
++                var list = string.IsNullOrEmpty(preferred) ? alternate : preferred;
++                return string.IsNullOrEmpty(list) ? gateway : list + "," + gateway;
++            }
++            var lower = Existing("no_proxy");
++            var upper = Existing("NO_PROXY");
++            Environment["no_proxy"] = Append(lower, upper);
++            Environment["NO_PROXY"] = Append(upper, lower);
++        }
++
+         public void PrepareExecution(ActionRunStage stage)
+         {
+             // Print out action details
+--- a/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs
++++ b/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs
+@@ -70,7 +70,7 @@
+             }
+             if (systemConnection.Data.TryGetValue("ResultsServiceUrl", out var resultsUrl) && !string.IsNullOrEmpty(resultsUrl))
+             {
+-                Environment["ACTIONS_RESULTS_URL"] = resultsUrl;
++                SetResultsServiceUrl(resultsUrl, (StepHost as IContainerStepHost)?.Container?.ContainerEnvironmentVariables);
+             }
+
+             if (ExecutionContext.Global.Variables.GetBoolean("actions_uses_cache_service_v2") ?? false)
+--- a/src/Runner.Worker/Handlers/ContainerActionHandler.cs
++++ b/src/Runner.Worker/Handlers/ContainerActionHandler.cs
+@@ -236,7 +236,7 @@
+             }
+             if (systemConnection.Data.TryGetValue("ResultsServiceUrl", out var resultsUrl) && !string.IsNullOrEmpty(resultsUrl))
+             {
+-                Environment["ACTIONS_RESULTS_URL"] = resultsUrl;
++                SetResultsServiceUrl(resultsUrl, container.ContainerEnvironmentVariables);
+             }
+
+             if (ExecutionContext.Global.Variables.TryGetValue("actions_cache_mode", out var cacheMode) && !string.IsNullOrEmpty(cacheMode))

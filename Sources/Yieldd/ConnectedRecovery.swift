@@ -11,6 +11,8 @@ func recoverConnectedPlatforms(
     typealias Pending = (ConnectedRunnerStore, ConnectedOffer, ConnectedHTTPClient?)
     var pending: [Pending] = []
     var firstFailure: (any Error)?
+    let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+    var cacheStores: [RunnerPlatform: NativeCacheStore] = [:]
     for store in ConnectedRunnerStore.all(in: directory) {
         try stop.check()
         do {
@@ -21,14 +23,21 @@ func recoverConnectedPlatforms(
             try withConnectedRunnerActivity(id.value) {
                 switch store.platform {
                 case .macOS:
-                    try removeMacOSRunnerFiles(id, in: directory, makeCloneStore: makeCloneStore)
+                    try removeMacOSRunnerFiles(id, in: directory, executor: executor, makeCloneStore: makeCloneStore)
                 case .linux:
                     let container = try resolveContainer()
-                    let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
                     try AppleContainerSystem(containerURL: container, executor: executor, stateDirectory: directory).start()
                     try AppleContainerBackend(containerURL: container, executor: executor, stateDirectory: directory,
                                               maximumExecutionDeadline: stop.executionDeadline).destroy(id)
                 }
+                // Old checkouts still need recovery after the user disables caching.
+                if cacheStores[store.platform] == nil, let storage = try RunnerStorage.load(in: directory) {
+                    let cache = try NativeCacheStore(storage: storage, platform: store.platform,
+                                                     executor: executor, ownershipDescriptor: nil)
+                    try storage.validate(stateDirectory: directory, executor: executor)
+                    cacheStores[store.platform] = cache
+                }
+                try cacheStores[store.platform]?.discard(id)
             }
             let workerID = store.platform.connectedWorkerID(slot: store.slot)
             let client = confirmation == nil ? ConnectedHTTPClient(server: server, deviceID: deviceID, token: token,

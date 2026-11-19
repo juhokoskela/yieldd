@@ -8,7 +8,7 @@ Template creation is manual. Use an Apple Virtualization.framework macOS VM bund
 2. Enable Remote Login for `runner`. Install a dedicated SSH public key in its `~/.ssh/authorized_keys`.
 3. Install full Xcode. Open it, accept its license, finish first-launch setup, and install an iOS Simulator runtime under Xcode Settings > Components. Select that Xcode installation with `xcode-select`.
 4. Enable automatic login for `runner` in System Settings. After a cold boot, `/usr/bin/stat -f %Su /dev/console` must print `runner`, and `launchctl print "gui/$(id -u)"` from a runner SSH session must succeed. Do not rely on `sysadminctl` reporting success.
-5. Install the macOS ARM64 GitHub Actions runner in `/Users/runner/actions-runner`, but leave it unregistered.
+5. Install yieldd's pinned Actions runner at `/Users/runner/actions-runner` and leave it unregistered. On a build Mac with the .NET 8.0.427 SDK, run `Guest/actions-runner/build.sh osx-arm64 ./actions-runner` from this repository. The destination must be new. Transfer that directory to the template as the `runner` user. To upgrade an existing template, stop its runner and replace the whole runner directory with a fresh build.
 6. Copy this repository's `Guest/macOS/configure-runner` and `Guest/macOS/runner-control` to `/Users/runner/bin/yieldd-configure-runner` and `/Users/runner/bin/yieldd-runner-control`. Make both executable. Run `yieldd-runner-control ready` from that directory over SSH to check the login prerequisites.
 7. Remove any previous runner registration and shut down the template cleanly. Do not run the template while yieldd is cloning it.
 

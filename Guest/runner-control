@@ -6,6 +6,16 @@ if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
     printf '2\n'
     exit 0
 fi
+if [[ $# -eq 2 && $1 == --protocol-version && $2 == --local-cache ]]; then
+    for tool in nbdfuse fusermount3 mkfs.ext4 yieldd-native-cache; do
+        if ! PATH="$PATH:/usr/sbin" command -v "$tool" >/dev/null; then
+            echo "Rebuild the Linux guest image for local job caches: missing $tool." >&2
+            exit 1
+        fi
+    done
+    printf '3\n'
+    exit 0
+fi
 
 state_directory=/opt/actions-runner/.yieldd-runner
 
@@ -16,6 +26,11 @@ worker() {
     IFS= read -r ACTIONS_RUNNER_INPUT_JITCONFIG < "$state_directory/jit-config"
     [[ -n "$ACTIONS_RUNNER_INPUT_JITCONFIG" ]] || return 1
     export ACTIONS_RUNNER_INPUT_JITCONFIG
+    if [[ -f "$state_directory/local-cache" ]]; then
+        export YIELDD_LOCAL_CACHE=1
+    else
+        unset YIELDD_LOCAL_CACHE
+    fi
     rm "$state_directory/jit-config"
     set +e
     ./run.sh 2>&1 | tail -c 1048576 > "$state_directory/output.pending"

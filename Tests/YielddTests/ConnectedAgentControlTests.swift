@@ -61,6 +61,25 @@ func connectedClientDeclinesAnOfferReceivedDuringPauseWithoutAcceptingIt() throw
     #expect(declined && released && fixture.control.snapshot.drained)
 }
 
+@Test
+func cacheServiceRestartFailureRetriesBeforeAdvertisingCapacity() {
+    var events: [String] = []
+    var attempts = 0
+    #expect(throws: CancellationError.self) {
+        try runConnectedClient(checkCancellation: {}, recover: { events.append("recover") },
+            acquire: { Issue.record("Unexpected reservation"); return nil }, release: { _ in },
+            prepareToPoll: {
+                attempts += 1
+                if attempts == 1 { throw POSIXError(.ENOSPC) }
+            }, poll: { events.append("poll"); throw CancellationError() },
+            decline: { _ in Issue.record("Unexpected offer") }, run: { _, _, _ in Issue.record("Unexpected job") },
+            wait: { delay in #expect(delay == 5); events.append("wait") },
+            retrying: { error in #expect((error as? POSIXError)?.code == .ENOSPC); events.append("retry") })
+    }
+    #expect(attempts == 2)
+    #expect(events == ["recover", "retry", "wait", "poll"])
+}
+
 @Test(arguments: [false, true])
 func connectedDrainWaitsForRetryingCleanupBeforeReleasingAssignment(combined: Bool) throws {
     let fixture = try AgentControlFixture()

@@ -169,10 +169,12 @@ func uninstallConnectedAgent(store: ConnectedAgentStore, credentials: ConnectedA
 
 func recoverConnectedAgent(configuration: ConnectedAgentConfiguration, token: String,
                            directory: URL, stop: RunnerPoolStop, output: RunnerServiceOutput = .terminal) throws {
-    try withRunnerOwnership(in: directory, connected: true) { _ in
+    try withRunnerOwnership(in: directory, connected: true) { store in
         try recoverConnectedPlatforms(directory: directory, server: configuration.server, deviceID: configuration.deviceID,
             token: token, confirmation: nil, stop: stop, resolveContainer: configuration.resolveContainer, output: output)
-        try removeUnleasedRunnerFiles(in: directory, checkCancellation: stop.check)
+        let recoveryExecutor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+        try removeUnleasedRunnerFiles(in: directory, ownershipDescriptor: store.ownershipDescriptor,
+                                     executor: recoveryExecutor, checkCancellation: stop.check)
     }
 }
 

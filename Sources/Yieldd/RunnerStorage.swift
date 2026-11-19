@@ -186,7 +186,7 @@ struct RunnerStorage: Codable, Equatable {
         guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
-    private static func device(at url: URL) throws -> dev_t {
+    static func device(at url: URL) throws -> dev_t {
         var current = url
         while true {
             var status = stat()

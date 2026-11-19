@@ -80,9 +80,11 @@ func runConnectedService(
             output.info("Local guest destroyed and connected journal cleared after operator-confirmed registration removal.")
             return
         }
-        try removeUnleasedRunnerFiles(in: directory, checkCancellation: stop.check)
+        let startupExecutor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+        try removeUnleasedRunnerFiles(in: directory, ownershipDescriptor: ownershipDescriptor,
+                                     executor: startupExecutor, checkCancellation: stop.check)
         let storage = try RunnerStorage.required(in: directory)
-        try storage.validate(stateDirectory: directory)
+        try storage.validate(stateDirectory: directory, executor: startupExecutor)
         try RunnerNetwork.requireRelay()
         let memory = RunnerMemoryAdmission()
         for platform in platforms { try memory.validateCapacity(reserving: platform.memoryReservationBytes) }
@@ -91,13 +93,14 @@ func runConnectedService(
             try MacOSVirtualizationBackend.validateTemplate(at: template)
             try VirtualizationEntitlement.requireCurrentProcess()
         }
+        let cachePolicy = try loadJobCachePolicy(in: directory)
         let backends = try platforms.map { platform -> RunnerSlotBackend in
             switch platform {
             case .linux:
                 let container = try resolveContainer()
-                try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline))
-                try AppleContainerSystem(containerURL: container, executor: ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline), stateDirectory: directory).start()
-                try storage.validateContainer(containerExecutable: container)
+                try AppleContainerBackend.requireNetworkSupport(containerURL: container, executor: startupExecutor)
+                try AppleContainerSystem(containerURL: container, executor: startupExecutor, stateDirectory: directory).start()
+                try storage.validateContainer(containerExecutable: container, executor: startupExecutor)
                 return .linux(containerURL: container)
             case .macOS:
                 guard let template else { throw ValidationError("A macOS worker requires a template.") }
@@ -107,6 +110,12 @@ func runConnectedService(
         let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
+        let archiveService = try cachePolicy.map { policy in
+            try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
+                policy: policy, ownershipDescriptor: ownershipDescriptor, stop: stop)
+        }
+        defer { archiveService?.stop() }
+        let cacheSocket = archiveService?.socketURL
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
         if control?.isPaused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
@@ -116,24 +125,28 @@ func runConnectedService(
             let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
                                              platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline,
                 connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
-            let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
+            let authorization = ConnectedExecutionAuthorization(renew: client.renew, jobResult: client.jobResult, checkCancellation: stop.check)
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
+            let network = try RunnerNetwork(stateDirectory: directory, platform: platform, cacheSocket: cacheSocket)
+            let nativeCache = try cacheSocket.map { _ in
+                try NativeCacheStore(storage: storage, platform: platform, executor: executor, ownershipDescriptor: ownershipDescriptor)
+            }
             let backend: any RunnerBackend
             switch worker.backend {
             case let .linux(containerURL):
                 backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
-                    stateDirectory: directory, ownershipDescriptor: ownershipDescriptor,
+                    stateDirectory: directory, ownershipDescriptor: ownershipDescriptor, network: network,
                     checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                     dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
             case let .macOS(templateURL):
                 backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
                     cloneRootURL: RunnerStorage.cloneRoot(in: directory),
-                    executor: executor, checkCancellation: authorization.check, wait: stop.wait,
+                    executor: executor, network: network, checkCancellation: authorization.check, wait: stop.wait,
                     maximumExecutionDeadline: stop.executionDeadline)
             }
             let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
                 server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
-                authorization: authorization, wait: stop.wait,
+                authorization: authorization, wait: stop.wait, nativeCache: nativeCache,
                 stateChanged: {
                     control?.session(worker: workerID, state: $0)
                     reportRunnerServiceState($0, output: output)
@@ -144,7 +157,9 @@ func runConnectedService(
                 output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
             }, acquire: {
                 try memory.tryAcquire(reserving: platform.memoryReservationBytes)
-            }, release: memory.release, poll: {
+            }, release: memory.release, prepareToPoll: {
+                try archiveService?.ensureRunning()
+            }, poll: {
                 control?.update(worker: workerID, phase: .idle)
                 return try client.poll()
             }, decline: client.decline, run: { offer, allocation, release in

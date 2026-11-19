@@ -1,0 +1,178 @@
+import Foundation
+
+protocol NativeCacheBackend: RunnerBackend {
+    func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws
+    func detachNativeCache(on id: RunnerID) throws
+}
+
+// The slot worker reads verified cache requests from its relay’s private directory.
+final class NativeCacheSession {
+    private struct Grants: Decodable, Equatable {
+        let repositoryID: String
+        let repository: String?
+        let readScopes: [String]
+        let writeScope: String?
+
+        enum CodingKeys: String, CodingKey {
+            case repositoryID = "repository_id"
+            case repository
+            case readScopes = "read_scopes"
+            case writeScope = "write_scope"
+        }
+    }
+    private struct Request: Decodable {
+        enum Operation: String, Decodable { case open, save }
+        let id: String
+        let operation: Operation
+        let grants: Grants
+    }
+    private struct Response: Encodable {
+        let id: String
+        var writable: Bool?
+        var error: String?
+    }
+
+    private enum State {
+        case fresh
+        case mailboxFailed(hasCheckout: Bool)
+        case discardOnly
+        case attached(Grants, NativeCacheDisk)
+        case saveRequested(Grants, NativeCacheDisk)
+        case sealed(NativeCacheDisk)
+    }
+
+    private let id: RunnerID
+    private let repository: String
+    private let directory: URL
+    private let backend: any NativeCacheBackend
+    private let store: NativeCacheStore
+    private var state = State.fresh
+    private var lastRequest: String?
+
+    init(store: NativeCacheStore, backend: any NativeCacheBackend, id: RunnerID, repository: String, directory: URL) {
+        self.store = store
+        self.backend = backend
+        self.id = id
+        self.repository = repository
+        self.directory = directory
+    }
+
+    convenience init(store: NativeCacheStore, backend: any RunnerBackend, offer: ConnectedOffer, stateDirectory: URL) throws {
+        guard let backend = backend as? any NativeCacheBackend else { throw NativeCacheSessionError.unsupported }
+        let id = RunnerID(value: offer.runner)
+        let control = try RunnerNetworkDirectories(stateDirectory: stateDirectory).directory(for: id)
+        self.init(store: store, backend: backend, id: id, repository: offer.repository, directory: control)
+    }
+
+    func handleRequest() throws {
+        if case .mailboxFailed = state { return }
+        let request: Request
+        do {
+            guard let bytes = try readPrivateRunnerFile(directory.appendingPathComponent("native-request"), maximumBytes: 32 * 1024) else { return }
+            request = try JSONDecoder().decode(Request.self, from: bytes)
+        } catch {
+            disableMailbox("read the relay request")
+            return
+        }
+        guard request.id != lastRequest else { return }
+        var response = Response(id: request.id)
+        do {
+            guard !request.grants.repositoryID.isEmpty,
+                  request.grants.repository.map({ $0.caseInsensitiveCompare(repository) == .orderedSame }) ?? true
+            else { throw NativeCacheSessionError.inconsistentGrant }
+            switch request.operation {
+            case .open:
+                switch state {
+                case .attached(let grants, _) where grants == request.grants:
+                    break
+                case .fresh:
+                    // Either operation can allocate resources before throwing.
+                    state = .discardOnly
+                    let disk = try store.open(id, readable: request.grants.readScopes, writable: request.grants.writeScope)
+                    do {
+                        try backend.attachNativeCache(image: disk.url, cold: disk.isCold, on: id)
+                    } catch {
+                        if !disk.isCold, !isCancellation(error) {
+                            response.error = "The \(backend.platform.rawValue) guest could not attach its saved native cache. If this keeps happening, see Docs/job-caches.md#reset-a-native-cache."
+                        }
+                        throw error
+                    }
+                    state = .attached(request.grants, disk)
+                default:
+                    throw NativeCacheSessionError.inconsistentGrant
+                }
+                response.writable = request.grants.writeScope != nil
+            case .save:
+                switch state {
+                case let .attached(grants, disk), let .saveRequested(grants, disk):
+                    guard grants == request.grants else { throw NativeCacheSessionError.inconsistentGrant }
+                    if grants.writeScope != nil { state = .saveRequested(grants, disk) }
+                default:
+                    throw NativeCacheSessionError.inconsistentGrant
+                }
+            }
+        } catch where !isCancellation(error) && !(error is ConnectedExecutionError) {
+            let detail = [describeError(error), response.error].compactMap { $0 }.joined(separator: " ")
+            writeToStandardError("Native cache \(request.operation.rawValue) for \(id.value) failed: \(detail)\n")
+            response.error = response.error ?? "The runner could not \(request.operation.rawValue) the native cache."
+        }
+        do {
+            try writePrivateRunnerFile(JSONEncoder().encode(response), to: directory.appendingPathComponent("native-response"))
+            lastRequest = request.id
+        } catch {
+            disableMailbox("write the relay response")
+        }
+    }
+
+    private func disableMailbox(_ operation: String) {
+        let hasCheckout = if case .fresh = state { false } else { true }
+        state = .mailboxFailed(hasCheckout: hasCheckout)
+        writeToStandardError("Disabling the native cache for \(id.value) because the host could not \(operation).\n")
+    }
+
+    var saveRequested: Bool {
+        if case .saveRequested = state { return true }
+        return false
+    }
+
+    // The post action only records intent. Disk flush runs after the GitHub listener exits.
+    @discardableResult
+    func detachForPublication() -> Bool {
+        guard case let .saveRequested(_, disk) = state else { return false }
+        do {
+            try backend.detachNativeCache(on: id)
+            state = .sealed(disk)
+            return true
+        } catch {
+            writeToStandardError("Discarding native cache for \(id.value): \(describeError(error))\n")
+            return false
+        }
+    }
+
+    func publishAfterDestruction() {
+        guard case let .sealed(disk) = state else { return }
+        state = .discardOnly
+        do {
+            try store.publish(disk)
+        } catch {
+            writeToStandardError("Discarding native cache for \(id.value): \(describeError(error))\n")
+        }
+    }
+
+    func discard() throws {
+        switch state {
+        case .fresh, .mailboxFailed(hasCheckout: false): return
+        default: try store.discard(id)
+        }
+    }
+}
+
+private enum NativeCacheSessionError: Error, LocalizedError {
+    case unsupported, inconsistentGrant
+    var errorDescription: String? {
+        switch self {
+        case .unsupported: "This runner backend cannot attach native cache disks."
+        case .inconsistentGrant: "The cache permission does not match the open disk and repository."
+        }
+    }
+}

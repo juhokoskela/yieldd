@@ -1,11 +1,15 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0.427-bookworm-slim@sha256:341aa6e8bbaceb1194732328ca27c15bfa9c531687db83a66af3c0c1833f5534 AS worker
+COPY actions-runner/ /src/
+RUN bash /src/build.sh linux-arm64 /opt/actions-runner
+
 FROM ubuntu:24.04
 
 ENV container=container
 
-ARG ACTIONS_RUNNER_VERSION=2.337.0
-ARG ACTIONS_RUNNER_SHA256=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
 ARG GH_VERSION=2.102.1
 ARG GH_SHA256=5019b3cc6e8a03bb4d88600f8dbda2add8e6407705c159b0c63151036e77a1af
+
+COPY --from=worker /opt/actions-runner /opt/actions-runner
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -13,6 +17,10 @@ RUN apt-get update \
         curl \
         dbus \
         docker.io \
+        e2fsprogs \
+        fuse3 \
+        libnbd-bin \
+        util-linux \
         git \
         jq \
         sudo \
@@ -22,14 +30,7 @@ RUN apt-get update \
         build-essential \
         docker-compose-v2 \
         zstd \
-    && mkdir -p /opt/actions-runner \
-    && curl --fail --location --retry 3 \
-        --output /tmp/actions-runner.tar.gz \
-        "https://github.com/actions/runner/releases/download/v${ACTIONS_RUNNER_VERSION}/actions-runner-linux-arm64-${ACTIONS_RUNNER_VERSION}.tar.gz" \
-    && echo "${ACTIONS_RUNNER_SHA256}  /tmp/actions-runner.tar.gz" | sha256sum --check --strict \
-    && tar --extract --gzip --file /tmp/actions-runner.tar.gz --directory /opt/actions-runner \
     && /opt/actions-runner/bin/installdependencies.sh \
-    && rm -f /tmp/actions-runner.tar.gz \
     && curl --fail --location --retry 3 \
         --output /tmp/gh.tar.gz \
         "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz" \
@@ -39,6 +40,7 @@ RUN apt-get update \
     && rm -f /tmp/gh.tar.gz \
     && rm -rf /var/lib/apt/lists/*
 
+COPY native-cache /usr/local/bin/yieldd-native-cache
 COPY configure-runner /usr/local/bin/yieldd-configure-runner
 COPY runner-control /usr/local/bin/yieldd-runner-control
 COPY yieldd.slice /etc/systemd/system/yieldd.slice

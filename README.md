@@ -7,6 +7,7 @@
 - An Apple Silicon Mac running macOS 26 or newer
 - Swift 6.2 or newer
 - Go matching `Prototypes/RunnerNetwork/go.mod` to build the bundled network relay
+- Rustup to build the bundled archive service. The build script installs its pinned Rust toolchain.
 - For Linux runners: the [pinned Container fork](Docs/linux-runner-network.md) with relay-aware machine support and a running container system
 - A configured [quota-limited APFS volume](Docs/runner-storage.md) for guest storage, separate from recovery records
 - For macOS runners: a user-prepared template bundle on that guest-storage volume
@@ -59,6 +60,10 @@ After building the guest image, run:
 ```
 
 The command shares the runner ownership lock and memory-admission policy with foreground `connect`, and the login agent. It creates a uniquely named machine with no host home mount, runs `docker info`, checks both guest helpers' protocol version, runs `docker run --rm hello-world`, and destroys the machine. It attempts cleanup after every creation attempt, including failed ones and commands interrupted with Ctrl+C or SIGTERM.
+
+### Local job caching
+
+Enable the [local cache](Docs/job-caches.md) to keep Actions cache archives on the Mac or give a workflow a private writable build disk.
 
 ### macOS template validation
 
