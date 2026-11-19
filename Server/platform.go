@@ -1,0 +1,337 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/actions/scaleset"
+	"github.com/actions/scaleset/listener"
+)
+
+// Each repository/platform queue owns a journal, message session, and serialized lifecycle.
+type platformCoordinator struct {
+	cancel     context.CancelFunc
+	store      *stateStore
+	loop       *coordinatorLoop
+	session    listenerSession
+	messages   *listener.Listener
+	scaleSetID int
+	newSession func(context.Context) (listenerSession, error)
+}
+
+type listenerSession interface {
+	listener.Client
+	Close(context.Context) error
+}
+
+const listenerRetryDelay = 5 * time.Second
+const listenerMaximumRetryDelay = time.Minute
+
+func openPlatformCoordinator(ctx context.Context, cfg config, directory, token string, recoverOnly bool, maxFallbackRunners int) (_ *platformCoordinator, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("repository %s platform %s: %w", cfg.Repository, cfg.platform(), err)
+		}
+	}()
+	store, err := openStore(directory)
+	if err != nil {
+		return nil, err
+	}
+	p := &platformCoordinator{store: store}
+	defer func() {
+		if err != nil {
+			closeCoordinators(p)
+		}
+	}()
+	saved, err := store.load(cfg)
+	if err != nil {
+		return nil, err
+	}
+	worker, err := newQueueWorker(saved, store, token, maxFallbackRunners)
+	if err != nil {
+		return nil, err
+	}
+	loopContext, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+	p.loop = newCoordinatorLoop(loopContext, worker)
+	if recoverOnly {
+		return p, nil
+	}
+	// An offered lease has never reached registration. A Mac holding an old
+	// offer will get a rejection and poll again after reconnection.
+	droppedOffer := false
+	for name, l := range saved.Leases {
+		if l.Local != nil && l.Local.Phase == localOffered && !l.CleanupIntent {
+			delete(saved.Leases, name)
+			droppedOffer = true
+		}
+	}
+	if droppedOffer {
+		if err := store.save(saved); err != nil {
+			return nil, &journalWriteError{err}
+		}
+	}
+	worker.demandUnavailable = true
+	savedID, owner := saved.ScaleSetID, saved.Owner
+	// Session setup can overlap device requests; keep its SDK client independent.
+	sessionClient, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
+	if err != nil {
+		return nil, &sdkError{"initialize session client", err}
+	}
+	p.newSession = func(ctx context.Context) (listenerSession, error) {
+		if p.scaleSetID == 0 {
+			id, err := ensurePlatformScaleSet(ctx, sessionClient, cfg, savedID)
+			if err != nil {
+				worker.logger.Warn("Scale set verification failed; provisioning suspended", "error", err)
+				return nil, err
+			}
+			if savedID == 0 {
+				if err := p.recordScaleSetID(ctx, id); err != nil {
+					return nil, err
+				}
+			}
+			p.scaleSetID = id
+		}
+		return sessionClient.MessageSessionClient(ctx, p.scaleSetID, owner)
+	}
+	return p, nil
+}
+
+func (p *platformCoordinator) recordScaleSetID(ctx context.Context, id int) error {
+	return p.loop.invoke(ctx, func(context.Context) error {
+		worker := p.loop.worker
+		next := *worker.state
+		next.ScaleSetID = id
+		if err := worker.save(&next); err != nil {
+			return &journalWriteError{err}
+		}
+		*worker.state = next
+		return nil
+	})
+}
+
+func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRunners int) (*coordinator, error) {
+	cfg := saved.Config
+	logger := slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())
+	client, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
+	if err != nil {
+		return nil, &sdkError{"initialize client", err}
+	}
+	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+	return &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: maxFallbackRunners}, nil
+}
+
+func newScaleSetClient(configURL, token string) (*scaleset.Client, error) {
+	// A lost registration POST must never be retried automatically. Let the SDK
+	// create separate HTTP clients, rather than sharing its mutable auth policy.
+	return scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
+		GitHubConfigURL: configURL, PersonalAccessToken: token,
+		SystemInfo: scaleset.SystemInfo{System: "yieldd", Version: "prototype", Subsystem: "coordinator"},
+	}, scaleset.WithRetryMax(0), scaleset.WithTimeout(60*time.Second))
+}
+
+func closeCoordinators(workers ...*platformCoordinator) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var pending sync.WaitGroup
+	for _, worker := range workers {
+		pending.Go(func() { worker.close(ctx) })
+	}
+	pending.Wait()
+}
+
+func (p *platformCoordinator) close(ctx context.Context) {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	p.closeSession(ctx)
+	if err := p.store.Close(); err != nil {
+		slog.Error("Close state store", "error", err)
+	}
+}
+
+func (p *platformCoordinator) closeSession(ctx context.Context) {
+	if p.session != nil {
+		if err := p.session.Close(ctx); err != nil {
+			slog.Error("Close scale set session", "error", &sdkError{"close message session", err})
+		} else {
+			p.session = nil
+		}
+	}
+}
+
+func (p *platformCoordinator) run(ctx context.Context, recoverOnly bool) error {
+	if recoverOnly {
+		return recoverUntilDone(ctx, func() (bool, error) { return p.loop.worker.reconcile(ctx, true) })
+	}
+	defer p.cancel()
+	worker := p.loop.worker
+	// Remove a failed waiter's FIFO entry, never its issued capacity reservation.
+	defer worker.device.forget(worker.state.Owner)
+	logger := worker.logger.With("local_only", worker.state.Config.LocalOnly, "fallback", worker.state.Config.Fallback)
+	done := make(chan error, 1)
+	go func() { done <- p.loop.run(); p.cancel() }()
+	err := p.listen(logger)
+	p.cancel()
+	loopErr := <-done
+	if ctx.Err() == nil {
+		// Release this queue’s session even if healthy siblings keep the process running.
+		closeCtx, cancel := context.WithTimeout(context.Background(), listenerRetryDelay)
+		p.closeSession(closeCtx)
+		cancel()
+	}
+	if loopErr != nil && !onlyCancellation(loopErr) {
+		return loopErr
+	}
+	if err != nil && !onlyCancellation(err) {
+		return err
+	}
+	return nil
+}
+
+func (p *platformCoordinator) openMessages(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	session, err := p.newSession(ctx)
+	if err != nil {
+		return &sdkError{"open message session", err}
+	}
+	p.session = session
+	p.messages, err = listener.New(shutdownAwareListenerClient{Client: session, lifetime: p.loop.ctx}, listener.Config{ScaleSetID: p.scaleSetID, MaxRunners: maximumAssignments})
+	return err
+}
+
+func (p *platformCoordinator) listen(logger *slog.Logger) error {
+	ctx := p.loop.ctx
+	delay := listenerRetryDelay
+	for {
+		var err error
+		if p.messages == nil {
+			err = p.openMessages(ctx)
+			if err == nil {
+				logger.Info("Serving scale set", "scale_set", p.scaleSetID, "capacity", maximumAssignments, "fallback_capacity", p.loop.worker.maxFallbackRunners)
+			}
+		}
+		if err == nil {
+			started := time.Now()
+			err = p.messages.Run(ctx, p.loop)
+			var callback *callbackError
+			if errors.As(err, &callback) {
+				return callback
+			}
+			if ctx.Err() == nil {
+				if err := p.loop.suspendProvisioning(); err != nil {
+					return err
+				}
+			}
+			if time.Since(started) >= listenerMaximumRetryDelay {
+				delay = listenerRetryDelay
+			}
+			p.messages = nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if isJournalWrite(err) {
+			return err
+		}
+		logger.Warn("Demand listener unavailable; retaining assignments", "retry_delay", delay, "error", &sdkError{"listen for demand", err})
+		if err := waitForRetry(ctx, delay); err != nil {
+			return err
+		}
+		delay = min(delay*2, listenerMaximumRetryDelay)
+		if p.session != nil {
+			closeCtx, cancel := context.WithTimeout(ctx, listenerRetryDelay)
+			p.closeSession(closeCtx)
+			cancel()
+		}
+	}
+}
+
+type scaleSetAPI interface {
+	GetRunnerScaleSet(context.Context, int, string) (*scaleset.RunnerScaleSet, error)
+	GetRunnerScaleSetByID(context.Context, int) (*scaleset.RunnerScaleSet, error)
+	CreateRunnerScaleSet(context.Context, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
+	UpdateRunnerScaleSet(context.Context, int, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
+}
+
+func ensurePlatformScaleSet(ctx context.Context, client scaleSetAPI, cfg config, savedID int) (int, error) {
+	name := cfg.scaleSetName()
+	desired := &scaleset.RunnerScaleSet{Name: name, RunnerGroupID: 1, Labels: []scaleset.Label{{Name: name, Type: "System"}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}}
+	if cfg.platform() == "linux" {
+		desired.Labels = append(desired.Labels, scaleset.Label{Name: "yieldd-linux", Type: "System"})
+	}
+	var set *scaleset.RunnerScaleSet
+	var err error
+	operation := fmt.Sprintf("find scale set %q", name)
+	if savedID != 0 {
+		operation = fmt.Sprintf("get saved scale set %d", savedID)
+		set, err = client.GetRunnerScaleSetByID(ctx, savedID)
+	} else {
+		set, err = client.GetRunnerScaleSet(ctx, 1, name)
+	}
+	if err != nil {
+		return 0, &sdkError{operation, err}
+	}
+	baseLabels := []scaleset.Label{{Name: name}}
+	if set == nil {
+		if savedID != 0 {
+			return 0, errors.New("saved scale set is missing; refusing to replace its identity")
+		}
+		set, err = client.CreateRunnerScaleSet(ctx, desired)
+	} else {
+		if set.ID <= 0 || set.Name != name || set.RunnerGroupID != 1 || (savedID != 0 && set.ID != savedID) {
+			return 0, errors.New("scale set identity does not match its platform")
+		}
+		savedID = set.ID
+		if !sameLabels(set.Labels, baseLabels) && !sameLabels(set.Labels, desired.Labels) {
+			return 0, fmt.Errorf("scale set %q (%d) has unexpected labels %q", name, set.ID, scaleSetLabelNames(set.Labels))
+		}
+		if !sameLabels(set.Labels, desired.Labels) {
+			set, err = client.UpdateRunnerScaleSet(ctx, set.ID, desired)
+		}
+	}
+	if err != nil {
+		return 0, &sdkError{"configure scale set", err}
+	}
+	if set == nil || set.ID <= 0 || (savedID != 0 && set.ID != savedID) || set.Name != name || set.RunnerGroupID != 1 {
+		return 0, fmt.Errorf("invalid identity in GitHub response for scale set %q", name)
+	}
+	if !sameLabels(set.Labels, desired.Labels) {
+		if cfg.platform() != "linux" || !sameLabels(set.Labels, baseLabels) {
+			return 0, fmt.Errorf("scale set %q (%d) has labels %q; expected %q", name, set.ID, scaleSetLabelNames(set.Labels), scaleSetLabelNames(desired.Labels))
+		}
+		slog.Warn("GitHub did not retain the Linux alias; use runs-on: yieldd",
+			"repository", cfg.Repository, "scale_set", set.ID, "alias", "yieldd-linux")
+	}
+	return set.ID, nil
+}
+
+func scaleSetLabelNames(labels []scaleset.Label) []string {
+	names := make([]string, len(labels))
+	for i, label := range labels {
+		names[i] = label.Name
+	}
+	return names
+}
+
+func sameLabels(a, b []scaleset.Label) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, want := range b {
+		if !slices.ContainsFunc(a, func(got scaleset.Label) bool { return got.Name == want.Name }) {
+			return false
+		}
+	}
+	return true
+}

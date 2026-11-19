@@ -1,0 +1,198 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
+    printf '2\n'
+    exit 0
+fi
+
+runner_directory="$HOME/actions-runner"
+state_directory="$runner_directory/.yieldd-runner"
+lock_file="$state_directory/state.lock"
+process_group_file="$state_directory/process-group"
+status_file="$state_directory/exit-status"
+output_file="$state_directory/output.log"
+pending_output_file="$state_directory/output.pending"
+output_limit_bytes=$((1024 * 1024))
+output_chunk_bytes=$((64 * 1024))
+control_script="$(cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")"
+
+usage() {
+    echo "usage: yieldd-runner-control ready|start|status|output" >&2
+    exit 2
+}
+
+write_state() {
+    local value="$1"
+    local destination="$2"
+    local temporary="${destination}.$$"
+
+    printf '%s\n' "$value" > "$temporary"
+    mv -f "$temporary" "$destination"
+}
+
+read_process_group() {
+    local process_group
+
+    [[ -f "$process_group_file" ]] || return 1
+    IFS= read -r process_group < "$process_group_file" || return 1
+    [[ "$process_group" =~ ^[0-9]+$ ]] || return 1
+    (( process_group > 1 )) || return 1
+    printf '%s\n' "$process_group"
+}
+
+process_group_is_running() {
+    local process_group="$1"
+    kill -0 -- "-$process_group" 2>/dev/null
+}
+
+read_status() {
+    local status
+
+    [[ -f "$status_file" ]] || return 1
+    IFS= read -r status < "$status_file" || return 1
+    [[ "$status" =~ ^[0-9]+$ ]] && (( status <= 255 )) || {
+        echo "the runner recorded an invalid exit status" >&2
+        return 1
+    }
+    printf '%s\n' "$status"
+}
+
+capture_output() {
+    local chunk_file="${pending_output_file}.chunk.$$"
+    local output_size
+    local trimmed_file="${pending_output_file}.trim.$$"
+
+    : > "$pending_output_file" || return 1
+    while true; do
+        : > "$chunk_file" || return 1
+        /bin/dd bs="$output_chunk_bytes" count=1 of="$chunk_file" 2>/dev/null \
+            || return 1
+        [[ -s "$chunk_file" ]] || break
+        /bin/cat "$chunk_file" >> "$pending_output_file" || return 1
+        output_size="$(/usr/bin/stat -f %z "$pending_output_file")" || return 1
+        if (( output_size > output_limit_bytes )); then
+            /usr/bin/tail -c "$output_limit_bytes" "$pending_output_file" \
+                > "$trimmed_file" || return 1
+            mv -f "$trimmed_file" "$pending_output_file" || return 1
+        fi
+    done
+    rm -f "$chunk_file" "$trimmed_file" || return 1
+}
+
+worker() {
+    local capture_status
+    local -a pipeline_status
+    local status
+
+    cd "$runner_directory"
+    IFS= read -r ACTIONS_RUNNER_INPUT_JITCONFIG < "$state_directory/jit-config"
+    [[ -n "$ACTIONS_RUNNER_INPUT_JITCONFIG" ]] || return 1
+    export ACTIONS_RUNNER_INPUT_JITCONFIG
+    rm "$state_directory/jit-config"
+    export ACTIONS_RUNNER_HOOK_JOB_STARTED="$HOME/.yieldd-job-started.sh"
+    set +e
+    ./run.sh 2>&1 | capture_output
+    pipeline_status=("${PIPESTATUS[@]}")
+    set -e
+    status="${pipeline_status[0]}"
+    capture_status="${pipeline_status[1]}"
+    if (( capture_status != 0 )); then
+        status="$capture_status"
+    fi
+    mv -f "$pending_output_file" "$output_file"
+    write_state "$status" "$status_file"
+    exit "$status"
+}
+
+start_or_attach_locked() {
+    local process_group
+
+    if [[ -f "$status_file" ]]; then
+        return 0
+    fi
+
+    process_group="$(read_process_group 2>/dev/null || true)"
+    if [[ -n "$process_group" ]] && process_group_is_running "$process_group"; then
+        return 0
+    fi
+    if [[ -f "$status_file" ]]; then
+        return 0
+    fi
+    if [[ -n "$process_group" ]]; then
+        echo "the previous listener stopped without recording an exit status" >&2
+        return 1
+    fi
+
+    rm -f "$process_group_file" "$output_file" "$pending_output_file"
+    # Job control creates a new process group; nohup keeps it alive after SSH disconnects.
+    set -m
+    /usr/bin/nohup "$control_script" _worker </dev/null >/dev/null 2>&1 &
+    process_group=$!
+    set +m
+    write_state "$process_group" "$process_group_file"
+}
+
+ready() {
+    local console_user
+
+    console_user="$(stat -f %Su /dev/console)"
+    if [[ "$console_user" != runner ]]; then
+        echo "the runner account is not logged in at the macOS console; found $console_user" >&2
+        exit 1
+    fi
+
+    if ! launchctl print "gui/$(id -u)" >/dev/null; then
+        echo "the runner GUI launchd domain is unavailable; enable automatic login for runner" >&2
+        exit 1
+    fi
+}
+
+status() {
+    local started=false
+    local process_group
+    if [[ -f "$status_file" ]]; then
+        [[ ! -f "$state_directory/job-started" ]] || started=true
+        printf '{"phase":"exited","jobStarted":%s,"exitStatus":%s}\n' "$started" "$(read_status)"
+        return
+    fi
+    process_group="$(read_process_group)" || return 1
+    if ! process_group_is_running "$process_group"; then
+        if [[ -f "$status_file" ]]; then status; return; fi
+        echo "the runner stopped without recording an exit status" >&2
+        return 1
+    fi
+    [[ ! -f "$state_directory/job-started" ]] || started=true
+    printf '{"phase":"listening","jobStarted":%s}\n' "$started"
+}
+
+if [[ "$#" -ne 1 ]]; then
+    usage
+fi
+
+case "$1" in
+    ready)
+        ready
+        ;;
+    output)
+        read_status >/dev/null
+        exec cat "$output_file"
+        ;;
+    start)
+        mkdir -p "$state_directory"
+        /usr/bin/lockf -k "$lock_file" "$control_script" _start_or_attach_locked >/dev/null
+        ;;
+    status)
+        status
+        ;;
+    _worker)
+        worker
+        ;;
+    _start_or_attach_locked)
+        start_or_attach_locked
+        ;;
+    *)
+        usage
+        ;;
+esac

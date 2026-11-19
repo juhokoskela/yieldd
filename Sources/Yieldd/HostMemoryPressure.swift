@@ -1,7 +1,7 @@
 import Darwin
 import Dispatch
 
-enum HostMemoryPressure: Equatable, Sendable {
+enum HostMemoryPressure: String, Codable, Sendable {
     case normal
     case warning
     case critical
@@ -38,9 +38,5 @@ enum HostMemoryPressure: Equatable, Sendable {
             return .unknown
         }
         return HostMemoryPressure(dispatchSourceRawValue: rawValue)
-    }
-
-    var permitsFullRunnerMemory: Bool {
-        self == .normal
     }
 }

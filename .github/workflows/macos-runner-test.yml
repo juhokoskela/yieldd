@@ -1,44 +1,53 @@
 name: macOS runner test
 
 on:
+  workflow_dispatch:
   pull_request:
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   macos:
     runs-on: yieldd-macos
     timeout-minutes: 10
     steps:
-      - name: Check macOS and Xcode
+      - name: Check Xcode
         run: |
           sw_vers
           test "$(uname -m)" = arm64
           xcodebuild -version
-          swift --version
-
-      - name: Boot an iOS Simulator
+      - name: Check Swift
+        run: xcrun swift --version
+      - name: Boot a compatible iPhone simulator and capture its screen
+        shell: bash
         run: |
+          set -euo pipefail
           test "$(stat -f %Su /dev/console)" = "$(id -un)"
           launchctl print "gui/$(id -u)" >/dev/null
-
-          runtime="$(
-            xcrun simctl list runtimes \
-              | sed -n 's/.* - \(com\.apple\.CoreSimulator\.SimRuntime\.iOS-[^ ]*\)$/\1/p' \
-              | head -n 1
+          xcrun simctl list runtimes --json > "$RUNNER_TEMP/runtimes.json"
+          selection="$(/usr/bin/osascript -l JavaScript - "$RUNNER_TEMP/runtimes.json" <<'JAVASCRIPT'
+          ObjC.import('Foundation');
+          function run(argv) {
+              var text = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null);
+              var runtimes = JSON.parse(ObjC.unwrap(text)).runtimes;
+              for (var i = 0; i < runtimes.length; i++) {
+                  var runtime = runtimes[i];
+                  if (!runtime.isAvailable || runtime.identifier.indexOf('com.apple.CoreSimulator.SimRuntime.iOS-') !== 0) continue;
+                  var types = runtime.supportedDeviceTypes || [];
+                  for (var j = 0; j < types.length; j++) {
+                      if (types[j].identifier.indexOf('com.apple.CoreSimulator.SimDeviceType.iPhone-') === 0) {
+                          return runtime.identifier + ' ' + types[j].identifier;
+                      }
+                  }
+              }
+              throw new Error('No available compatible iPhone simulator was found.');
+          }
+          JAVASCRIPT
           )"
-          device_type="$(
-            xcrun simctl list devicetypes \
-              | sed -n 's/.*\(com\.apple\.CoreSimulator\.SimDeviceType\.iPhone[^)]*\).*/\1/p' \
-              | head -n 1
-          )"
-          test -n "$runtime"
-          test -n "$device_type"
-
-          device_id="$(xcrun simctl create yieldd-ci "$device_type" "$runtime")"
-          trap 'xcrun simctl shutdown "$device_id" >/dev/null 2>&1 || true; xcrun simctl delete "$device_id"' EXIT
-
-          xcrun simctl boot "$device_id"
-          xcrun simctl bootstatus "$device_id" -b
-          xcrun simctl io "$device_id" screenshot "$RUNNER_TEMP/yieldd-simulator.png"
-          test -s "$RUNNER_TEMP/yieldd-simulator.png"
+          read -r runtime device_type <<< "$selection"
+          device="$(xcrun simctl create yieldd-workflow-test "$device_type" "$runtime")"
+          trap 'xcrun simctl shutdown "$device" >/dev/null 2>&1 || true; xcrun simctl delete "$device"' EXIT
+          xcrun simctl bootstatus "$device" -b
+          xcrun simctl io "$device" screenshot "$RUNNER_TEMP/screenshot.png"
+          test -s "$RUNNER_TEMP/screenshot.png"

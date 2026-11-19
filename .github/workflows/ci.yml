@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  swift:
+    name: Swift build and tests
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Show runner and toolchain
+        run: |
+          echo "Runner: $RUNNER_NAME"
+          xcodebuild -version
+          swift --version
+
+      - name: Set up Go for the network relay
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: Prototypes/RunnerNetwork/go.mod
+          cache-dependency-path: Prototypes/RunnerNetwork/go.sum
+
+      - name: Build and verify signed app
+        run: Scripts/build-local-app.sh
+
+      - name: Build coordinator protocol fixture
+        working-directory: Server
+        run: go test -c -o ../.build/coordinator-protocol-test
+
+      - name: Test with the bundled relay (no VM)
+        # Parallel execution currently hits timing failures in lifecycle tests.
+        env:
+          YIELDD_TEST_RELAY: ${{ github.workspace }}/.build/yieldd.app/Contents/Helpers/yieldd-network-relay
+          YIELDD_TEST_COORDINATOR: ${{ github.workspace }}/.build/coordinator-protocol-test
+        run: swift test --no-parallel
+
+  bootstrap:
+    name: Bootstrap contract
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Test without GitHub credentials or runner registration
+        run: node --test .github/actions/bootstrap-runner/index.test.cjs
+
+  coordinator:
+    name: Coordinator contract
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Server
+    steps:
+      - name: Check out
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: Server/go.mod
+          cache-dependency-path: Server/go.sum
+      - name: Test and vet
+        run: |
+          go test -race ./...
+          go vet ./...
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+      - name: Build and smoke-test coordinator image
+        run: |
+          bash test-compose.sh
+          docker buildx build --load -t local/yieldd-coordinator:dev .
+          bash test-image.sh

@@ -4,6 +4,8 @@ ENV container=container
 
 ARG ACTIONS_RUNNER_VERSION=2.337.0
 ARG ACTIONS_RUNNER_SHA256=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
+ARG GH_VERSION=2.102.1
+ARG GH_SHA256=5019b3cc6e8a03bb4d88600f8dbda2add8e6407705c159b0c63151036e77a1af
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -13,11 +15,13 @@ RUN apt-get update \
         docker.io \
         git \
         jq \
+        sudo \
         systemd \
         systemd-sysv \
         libatomic1 \
         build-essential \
         docker-compose-v2 \
+        zstd \
     && mkdir -p /opt/actions-runner \
     && curl --fail --location --retry 3 \
         --output /tmp/actions-runner.tar.gz \
@@ -26,12 +30,21 @@ RUN apt-get update \
     && tar --extract --gzip --file /tmp/actions-runner.tar.gz --directory /opt/actions-runner \
     && /opt/actions-runner/bin/installdependencies.sh \
     && rm -f /tmp/actions-runner.tar.gz \
+    && curl --fail --location --retry 3 \
+        --output /tmp/gh.tar.gz \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz" \
+    && echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum --check --strict \
+    && tar --extract --gzip --file /tmp/gh.tar.gz --directory /usr/local --strip-components=1 \
+        "gh_${GH_VERSION}_linux_arm64/bin/gh" \
+    && rm -f /tmp/gh.tar.gz \
     && rm -rf /var/lib/apt/lists/*
 
 COPY configure-runner /usr/local/bin/yieldd-configure-runner
 COPY runner-control /usr/local/bin/yieldd-runner-control
 COPY yieldd.slice /etc/systemd/system/yieldd.slice
 COPY docker-daemon.json /etc/docker/daemon.json
+COPY runner.sudoers /etc/sudoers.d/runner
+COPY fstab /etc/fstab
 
 RUN mkdir -p /var/lib/dbus \
     && : > /etc/machine-id \
@@ -46,6 +59,9 @@ RUN mkdir -p /var/lib/dbus \
     && systemctl enable containerd.service docker.service \
     && useradd --create-home --shell /bin/bash runner \
     && usermod --append --groups docker runner \
+    && chmod 0440 /etc/sudoers.d/runner \
+    && visudo --check \
+    && test "$(runuser --user runner -- sudo --non-interactive id -u)" = 0 \
     && chown -R runner:runner /opt/actions-runner \
     && chmod 0755 \
         /usr/local/bin/yieldd-configure-runner \
@@ -54,6 +70,8 @@ RUN mkdir -p /var/lib/dbus \
         /usr/local/bin/yieldd-configure-runner \
         /usr/local/bin/yieldd-runner-control \
     && jq --exit-status . /etc/docker/daemon.json >/dev/null \
+    && findmnt --verify --tab-file /etc/fstab \
+    && test "$(gh --version | head -n 1 | cut -d ' ' -f 3)" = "$GH_VERSION" \
     && systemd-analyze verify /etc/systemd/system/yieldd.slice \
     && test "$(readlink -f /sbin/init)" = "$(readlink -f /lib/systemd/systemd)"
 

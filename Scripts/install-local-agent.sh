@@ -3,7 +3,7 @@
 set -eu
 
 if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 OWNER/REPOSITORY [OWNER/REPOSITORY ...]" >&2
+    echo "Usage: $0 --server URL --device-id UUID [--platform linux|macos ...] [--macos-template PATH]" >&2
     exit 64
 fi
 
@@ -18,73 +18,51 @@ if [ -L "$installed_application" ]; then
     exit 1
 fi
 
-"$script_directory/build-local-app.sh"
 mkdir -p "$applications_directory"
-staging_directory=$(mktemp -d "$applications_directory/.yieldd-install.XXXXXX")
-staged_application="$staging_directory/yieldd.app"
-previous_application="$staging_directory/previous-yieldd.app"
-guest_image="local/yieldd-guest:dev"
-staged_image="local/yieldd-guest:installing-$$"
-replacement_complete=false
-stop_builder=false
-remove_staged_image=false
-
+lock="$applications_directory/.yieldd-installer"
+if ! mkdir -m 700 "$lock"; then
+    echo "An installation is running or was interrupted. Inspect $lock before retrying." >&2
+    exit 1
+fi
+staged="$lock/yieldd.app"
+builder_active=false
 cleanup() {
-    status=$?
-    trap - 0
-    if [ "$stop_builder" = true ] && ! container builder stop; then
-        if [ "$status" -eq 0 ]; then
-            status=1
-        fi
-    fi
-    if [ "$remove_staged_image" = true ] \
-        && ! container image delete --force "$staged_image"; then
-        if [ "$status" -eq 0 ]; then
-            status=1
-        fi
-    fi
-    if [ "$replacement_complete" = false ] \
-        && [ -d "$previous_application" ] \
-        && [ ! -e "$installed_application" ]; then
-        mv "$previous_application" "$installed_application"
-    fi
-    rm -rf "$staging_directory"
-    exit "$status"
+    result=$?
+    trap - EXIT
+    if "$builder_active"; then container builder stop || :; fi
+    rm -rf "$lock"
+    exit "$result"
 }
-trap cleanup 0
+trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-ditto "$source_application" "$staged_application"
-codesign --verify --strict "$staged_application"
-"$staged_application/Contents/MacOS/yieldd" agent install \
-    --preflight-only "$@"
-stop_builder=true
-remove_staged_image=true
-container build -t "$staged_image" "$repository_directory/Guest"
-container builder stop
-stop_builder=false
-
 if [ -e "$installed_application" ]; then
-    installed_executable="$installed_application/Contents/MacOS/yieldd"
-    if [ ! -x "$installed_executable" ]; then
-        echo "$installed_application does not contain an executable yieldd installation." >&2
-        exit 1
-    fi
-
-    "$installed_executable" agent uninstall
-    mv "$installed_application" "$previous_application"
+    echo "Drain and uninstall the existing agent, then move $installed_application aside before installing." >&2
+    exit 1
 fi
 
-container image delete --force "$guest_image"
-container image tag "$staged_image" "$guest_image"
-container image delete "$staged_image"
-remove_staged_image=false
+"$script_directory/build-local-app.sh"
+ditto "$source_application" "$staged"
+codesign --verify --strict "$staged"
+platform=$("$staged/Contents/MacOS/yieldd" agent install --preflight-only "$@")
+case "$platform" in
+    linux)
+        builder_active=true
+        container build -t local/yieldd-guest:dev "$repository_directory/Guest"
+        container builder stop
+        builder_active=false
+        ;;
+    macos) ;;
+    *) echo "Unexpected installation preflight: $platform" >&2; exit 1 ;;
+esac
 
-mv "$staged_application" "$installed_application"
-replacement_complete=true
-
+if [ -e "$installed_application" ] || [ -L "$installed_application" ]; then
+    echo "Install destination appeared during staging: $installed_application" >&2
+    exit 1
+fi
+mv "$staged" "$installed_application"
+# Registration may have saved credentials or started a worker even if it reports failure.
 "$installed_application/Contents/MacOS/yieldd" agent install "$@"
-
 echo "Installed $installed_application"

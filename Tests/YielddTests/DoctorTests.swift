@@ -4,18 +4,20 @@ import Testing
 
 @Test
 func doctorReportsSuccessfulChecks() throws {
-    let fixture = try ExecutableFixture(names: ["container", "gh"])
+    let fixture = try ExecutableFixture(names: ["container"])
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [
+        .success(processResult()),
+        .success(processResult(stdout: "--network-socket")),
         .success(processResult()),
         .success(processResult()),
         .success(processResult()),
     ])
 
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        supportsAppleSilicon: { true }
+        loadStorage: { nil }, relayURL: URL(fileURLWithPath: "/usr/bin/true"), supportsAppleSilicon: { true }
     ).run()
 
     #expect(report.succeeded)
@@ -24,13 +26,14 @@ func doctorReportsSuccessfulChecks() throws {
         .passed(fixture.executable(named: "container").path),
         .passed("reachable"),
         .passed("available"),
-        .passed(fixture.executable(named: "gh").path),
-        .passed("authenticated"),
+        .passed("available"),
+        .passed("quota-backed"),
     ])
     #expect(executor.requests.map(\.arguments) == [
         ["system", "status", "--format", "json"],
+        ["machine", "create", "--help"],
+        ["machine", "boot", "--help"],
         ["machine", "list", "--quiet"],
-        ["auth", "status", "--active", "--hostname", "github.com"],
     ])
     try report.requireSuccess()
 }
@@ -40,21 +43,16 @@ func doctorSkipsDependentChecksWhenContainerIsMissing() {
     let directory = "/tmp/yieldd-empty-path-\(UUID().uuidString)"
     let executor = RecordingProcessExecutor(outcomes: [])
 
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: directory),
-        supportsAppleSilicon: { true }
+        loadStorage: { nil }, supportsAppleSilicon: { true }
     ).run()
 
     #expect(!report.succeeded)
     #expect(report.checks.count == 6)
     #expect(report.checks[2].status == .skipped("container executable is unavailable"))
     #expect(report.checks[3].status == .skipped("container executable is unavailable"))
-    guard case .failed = report.checks[4].status else {
-        Issue.record("Expected the gh executable check to fail")
-        return
-    }
-    #expect(report.checks[5].status == .skipped("gh executable is unavailable"))
     #expect(executor.requests.isEmpty)
     #expect(throws: DoctorReportError.checksFailed) {
         try report.requireSuccess()
@@ -69,10 +67,10 @@ func doctorAggregatesHostAndSystemFailures() throws {
         .success(processResult(stderr: "not running", status: 1)),
     ])
 
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        supportsAppleSilicon: { false }
+        loadStorage: { nil }, supportsAppleSilicon: { false }
     ).run()
 
     #expect(report.checks[0].status == .failed("this host does not report Apple Silicon support"))
@@ -87,23 +85,29 @@ func doctorAggregatesHostAndSystemFailures() throws {
 }
 
 @Test
-func doctorChecksGitHubEvenWhenContainerIsMissing() throws {
+func macOSDoctorDoesNotRequireOrInvokeContainer() throws {
     let fixture = try ExecutableFixture(names: ["gh"])
     defer { fixture.remove() }
     let executor = RecordingProcessExecutor(outcomes: [.success(processResult())])
-
-    let report = Doctor(
+    let report = Doctor(stateDirectory: unconfiguredContainerStateDirectory,
         executor: executor,
         executableLocator: ExecutableLocator(searchPath: fixture.directory.path),
-        supportsAppleSilicon: { true }
-    ).run()
+        loadStorage: { nil }, supportsAppleSilicon: { true }
+    ).run(templateURL: fixture.directory.appendingPathComponent("missing.bundle"))
 
     #expect(!report.succeeded)
-    #expect(report.checks[4].status == .passed(fixture.executable(named: "gh").path))
-    #expect(report.checks[5].status == .passed("authenticated"))
-    #expect(executor.requests.map(\.arguments) == [
-        ["auth", "status", "--active", "--hostname", "github.com"],
-    ])
+    #expect(!report.checks.contains { $0.name.hasPrefix("container") })
+    let relay = try #require(report.checks.first { $0.name == "network relay" })
+    guard case .failed = relay.status else {
+        Issue.record("An unpackaged test executable must report its missing relay")
+        return
+    }
+    let template = try #require(report.checks.first { $0.name == "macOS template" })
+    guard case .failed = template.status else {
+        Issue.record("Expected missing template validation to fail")
+        return
+    }
+    #expect(executor.requests.isEmpty)
 }
 
 private struct ExecutableFixture {

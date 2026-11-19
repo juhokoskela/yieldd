@@ -15,6 +15,7 @@ struct ProcessRequest: Equatable, Sendable {
     let timeout: TimeInterval?
     let outputCapture: ProcessOutputCapture
     let cancellable: Bool
+    let ownershipDescriptor: Int32?
 
     init(
         executableURL: URL,
@@ -22,7 +23,8 @@ struct ProcessRequest: Equatable, Sendable {
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
         outputCapture: ProcessOutputCapture = .all,
-        cancellable: Bool = true
+        cancellable: Bool = true,
+        ownershipDescriptor: Int32? = nil
     ) {
         if let timeout {
             precondition(timeout.isFinite && timeout > 0)
@@ -35,6 +37,7 @@ struct ProcessRequest: Equatable, Sendable {
         self.standardInput = standardInput
         self.timeout = timeout
         self.outputCapture = outputCapture
+        self.ownershipDescriptor = ownershipDescriptor
         self.cancellable = cancellable
     }
 }
@@ -115,7 +118,7 @@ extension ProcessExecutionError: LocalizedError {
         case let .timedOut(request, result):
             processFailureDescription(
                 executableURL: request.executableURL,
-                reason: "timed out after \(request.timeout ?? 0) seconds",
+                reason: "timed out after \(request.timeout ?? 0) seconds\(timeoutSubcommand(request))",
                 stderr: result.stderrText
             )
         case let .nonZeroExit(request, result):
@@ -133,8 +136,21 @@ extension ProcessExecutionError: LocalizedError {
         }
     }
 
+    private func timeoutSubcommand(_ request: ProcessRequest) -> String {
+        guard request.executableURL.lastPathComponent == "container" else { return "" }
+        // Only fixed subcommands are safe to report; later arguments can contain credentials.
+        let subcommand = request.arguments.prefix(2).joined(separator: " ")
+        switch subcommand {
+        case "machine create", "machine inspect", "machine boot", "machine run", "machine list", "machine delete",
+             "system start", "system status":
+            return " (\(subcommand))"
+        default:
+            return ""
+        }
+    }
+
     private func processFailureDescription(executableURL: URL, reason: String, stderr: String) -> String {
-        let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = terminalSafeOutput(stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !detail.isEmpty else {
             return "Process \(executableURL.path) \(reason)."
         }
@@ -144,12 +160,20 @@ extension ProcessExecutionError: LocalizedError {
 
 protocol ProcessExecuting {
     func execute(_ request: ProcessRequest) throws -> ProcessResult
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult
+}
+
+extension ProcessExecuting {
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
+        try checking()
+        return try execute(request)
+    }
 }
 
 struct ProcessExecutor: ProcessExecuting {
     private let terminationGracePeriod: TimeInterval
     private let cancellationPollInterval: TimeInterval
-    private let checkCancellation: (() throws -> Void)?
+    private var checkCancellation: (() throws -> Void)?
     private let maximumExecutionDeadline: (@Sendable () -> DispatchTime?)?
 
     init(
@@ -164,6 +188,22 @@ struct ProcessExecutor: ProcessExecuting {
         self.cancellationPollInterval = cancellationPollInterval
         self.checkCancellation = checkCancellation
         self.maximumExecutionDeadline = maximumExecutionDeadline
+    }
+
+    func execute(_ request: ProcessRequest, checking: @escaping () throws -> Void) throws -> ProcessResult {
+        try checking()
+        var monitored = self
+        monitored.checkCancellation = {
+            try self.checkCancellation?()
+            do { try checking() }
+            catch { throw ProcessMonitorFailure(cause: error) }
+        }
+        do { return try monitored.execute(request) }
+        catch {
+            if case let ProcessExecutionError.cancelled(_, _, underlying) = error,
+               let failure = underlying as? ProcessMonitorFailure { throw failure.cause }
+            throw error
+        }
     }
 
     func execute(_ request: ProcessRequest) throws -> ProcessResult {
@@ -365,6 +405,11 @@ struct ProcessExecutor: ProcessExecuting {
             STDERR_FILENO
         ))
 
+        if let descriptor = request.ownershipDescriptor {
+            // Keep recovery excluded while an orphaned create can still publish its guest.
+            try requirePOSIXSuccess(posix_spawn_file_actions_addinherit_np(&fileActions, descriptor))
+        }
+
         var attributes: posix_spawnattr_t?
         try requirePOSIXSuccess(posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
@@ -375,6 +420,7 @@ struct ProcessExecutor: ProcessExecuting {
         sigemptyset(&defaultSignals)
         sigaddset(&defaultSignals, SIGINT)
         sigaddset(&defaultSignals, SIGTERM)
+        sigaddset(&defaultSignals, SIGHUP)
         try requirePOSIXSuccess(posix_spawnattr_setsigdefault(&attributes, &defaultSignals))
         var signalMask = sigset_t()
         sigemptyset(&signalMask)
@@ -571,6 +617,10 @@ struct ProcessExecutor: ProcessExecuting {
         }
         return false
     }
+}
+
+private struct ProcessMonitorFailure: Error {
+    let cause: any Error
 }
 
 private enum ProcessWaitOutcome {

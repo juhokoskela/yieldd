@@ -1,41 +1,96 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
+
+if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
+    printf '2\n'
+    exit 0
+fi
+
+state_directory=/opt/actions-runner/.yieldd-runner
+
+worker() {
+    local -a statuses
+    cd /opt/actions-runner
+    export ACTIONS_RUNNER_HOOK_JOB_STARTED=/home/runner/.yieldd-job-started.sh
+    IFS= read -r ACTIONS_RUNNER_INPUT_JITCONFIG < "$state_directory/jit-config"
+    [[ -n "$ACTIONS_RUNNER_INPUT_JITCONFIG" ]] || return 1
+    export ACTIONS_RUNNER_INPUT_JITCONFIG
+    rm "$state_directory/jit-config"
+    set +e
+    ./run.sh 2>&1 | tail -c 1048576 > "$state_directory/output.pending"
+    statuses=("${PIPESTATUS[@]}")
+    set -e
+    local status="${statuses[0]}"
+    if (( statuses[1] != 0 )); then status="${statuses[1]}"; fi
+    mv -f "$state_directory/output.pending" "$state_directory/output.log"
+    printf '%s\n' "$status" > "$state_directory/exit-status.$$"
+    mv -f "$state_directory/exit-status.$$" "$state_directory/exit-status"
+    exit "$status"
+}
+
+start_locked() {
+    [[ ! -f "$state_directory/exit-status" ]] || return 0
+    if [[ -f "$state_directory/launched" ]]; then
+        systemctl is-active --quiet yieldd-runner.service || [[ -f "$state_directory/exit-status" ]]
+        return
+    fi
+    # Record the attempt before launching; an ambiguous failure must not launch a second listener.
+    touch "$state_directory/launched"
+    systemd-run --quiet --service-type=exec --unit=yieldd-runner \
+        --slice=yieldd.slice --uid=runner --working-directory=/opt/actions-runner \
+        /usr/local/bin/yieldd-runner-control _worker
+}
+
+status() {
+    local started=false
+    local exit_status
+    if [[ -f "$state_directory/exit-status" ]]; then
+        [[ ! -f "$state_directory/job-started" ]] || started=true
+        IFS= read -r exit_status < "$state_directory/exit-status"
+        [[ "$exit_status" =~ ^[0-9]+$ ]] && (( exit_status <= 255 )) || return 1
+        printf '{"phase":"exited","jobStarted":%s,"exitStatus":%s}\n' "$started" "$exit_status"
+        return
+    fi
+    systemctl is-active --quiet yieldd-runner.service || {
+        if [[ -f "$state_directory/exit-status" ]]; then status; return; fi
+        echo "the runner stopped without recording an exit status" >&2
+        return 1
+    }
+    [[ ! -f "$state_directory/job-started" ]] || started=true
+    printf '{"phase":"listening","jobStarted":%s}\n' "$started"
+}
 
 usage() {
     echo "usage: yieldd-runner-control memory constrained|full" >&2
-    echo "       yieldd-runner-control run|stop" >&2
+    echo "       yieldd-runner-control start|status|output" >&2
     exit 2
 }
 
 if [[ "$#" -eq 1 ]]; then
     case "$1" in
-        run)
-            exec systemd-run \
-                --quiet \
-                --wait \
-                --pipe \
-                --collect \
-                --service-type=exec \
-                --unit=yieldd-runner \
-                --slice=yieldd.slice \
-                --uid=runner \
-                --working-directory=/opt/actions-runner \
-                /opt/actions-runner/run.sh
+        start)
+            install -d -o runner -g runner -m 0700 "$state_directory"
+            flock "$state_directory/state.lock" "$0" _start_locked
             ;;
-        stop)
-            if [[ "$(systemctl show yieldd-runner.service --property=LoadState --value)" == "not-found" ]]; then
-                exit 0
-            fi
-            if systemctl stop yieldd-runner.service; then
-                exit 0
-            fi
-            [[ "$(systemctl show yieldd-runner.service --property=LoadState --value)" == "not-found" ]]
-            exit
+        status)
+            status
+            ;;
+        _start_locked)
+            start_locked
+            ;;
+        _worker)
+            worker
+            ;;
+        output)
+            [[ -f "$state_directory/exit-status" ]] || exit 1
+            exec cat "$state_directory/output.log"
             ;;
         *)
             usage
             ;;
     esac
+    exit 0
 fi
 
 if [[ "$#" -ne 2 ]]; then

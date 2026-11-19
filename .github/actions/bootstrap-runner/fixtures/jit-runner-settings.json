@@ -1,0 +1,12 @@
+{
+  "AgentId": "1",
+  "AgentName": "yieldd-bootstrap-test",
+  "DisableUpdate": "False",
+  "Ephemeral": "True",
+  "PoolId": "1",
+  "PoolName": null,
+  "ServerUrl": "https://runner.example.invalid/",
+  "RunnerScaleSetId": "1",
+  "RunnerScaleSetName": "yieldd-test",
+  "WorkFolder": "_work"
+}

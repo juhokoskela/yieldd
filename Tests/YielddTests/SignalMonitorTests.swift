@@ -16,27 +16,35 @@ func signalMonitorHandlesTimeoutFailedInstallAndCaughtSignal() throws {
 
     let delivery = RecordedSignal()
     let monitor = try SignalMonitor(
-        signals: [SIGUSR2],
         signalReceived: delivery.record
     )
     try monitor.wait(for: 0)
-    #expect(Darwin.kill(Darwin.getpid(), SIGUSR2) == 0)
+    let child = try ProcessExecutor().execute(ProcessRequest(
+        executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "kill -HUP $$; printf survived"],
+        timeout: 5
+    ))
+    #expect(child.terminationReason == .uncaughtSignal)
+    #expect(child.terminationStatus == SIGHUP)
+    #expect(child.stdout.isEmpty)
+    try monitor.check()
+    #expect(Darwin.kill(Darwin.getpid(), SIGHUP) == 0)
 
     do {
         try monitor.wait(for: 1)
         Issue.record("Expected the wait to be interrupted")
     } catch let interruption as SignalInterruption {
-        #expect(interruption.signal == SIGUSR2)
+        #expect(interruption.signal == SIGHUP)
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
-    #expect(delivery.value == SIGUSR2)
+    #expect(delivery.value == SIGHUP)
 
     do {
         try monitor.check()
         Issue.record("Expected the signal interruption to persist")
     } catch let interruption as SignalInterruption {
-        #expect(interruption.signal == SIGUSR2)
+        #expect(interruption.signal == SIGHUP)
     } catch {
         Issue.record("Unexpected error: \(error)")
     }

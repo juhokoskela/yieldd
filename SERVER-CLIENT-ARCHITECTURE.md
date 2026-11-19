@@ -1,6 +1,6 @@
 # Server-client architecture
 
-This document records a possible connected mode for `yieldd`. It is not implemented. The foreground service and installable local agent remain standalone and do not require a server.
+Unattended execution requires the coordinator. It listens for GitHub demand by repository and platform, prefers connected Macs, and provisions hosted fallback where configured. Each Mac can connect in the foreground or through its login agent. See the [coordinator runbook](Server/README.md) and [Mac setup guide](Docs/connected-mac-prototype.md).
 
 ## Responsibilities
 
@@ -8,10 +8,10 @@ GitHub remains the source of truth for workflow jobs and their state. The server
 
 The server should:
 
-- Receive queued and completed job events from GitHub.
+- Listen to GitHub Scale Set demand and job lifecycle events.
 - Enforce repository access rules.
 - Track connected Macs and their available runner slots.
-- Reserve capacity and assign jobs.
+- Reserve capacity and issue runner provisioning offers.
 - Reassign expired offers and choose the configured hosted fallback.
 - Request just-in-time runner configuration from GitHub.
 
@@ -22,11 +22,11 @@ The Mac client should:
 - Create the runner machine, execute one job, and clean it up.
 - Preserve enough local state to recover after a crash or reboot.
 
-The server sends declarative assignments, never arbitrary shell commands. An assignment identifies the repository, GitHub job, runner configuration, resource shape, and expiry. GitHub sends the actual workflow to the runner.
+The server sends declarative provisioning offers, never arbitrary shell commands. An offer identifies the repository, scale set, runner configuration, resource shape, and expiry. It does not bind the runner to an individual GitHub job. GitHub sends the actual workflow to an eligible idle runner.
 
 ## Repository authorization
 
-A GitHub App installation defines the outer boundary. The app may have access to selected repositories or every repository in an account or organization.
+The intended authorization boundary is a GitHub App installation. The first coordinator prototype instead uses a server-only `GH_TOKEN` and one explicitly configured repository. App enrollment remains future work. The app may eventually have access to selected repositories or every repository in an account or organization.
 
 Within that boundary, the user chooses one of two policies:
 
@@ -47,10 +47,10 @@ The active request also acts as an availability signal. If the Mac sleeps, loses
 
 ## Assignment flow
 
-1. GitHub reports that an eligible workflow job is queued.
-2. The server records the job and checks its repository policy.
-3. The scheduler chooses an online Mac with an available slot and creates an expiring assignment.
-4. The Mac accepts the assignment before its deadline. A rejected or expired assignment returns to the queue.
+1. The Scale Set listener acquires available demand and reports the assigned-job count.
+2. The server compares that demand with recorded provisioning and running capacity within its repository policy.
+3. The scheduler chooses an online Mac with an available slot and creates an expiring provisioning offer.
+4. The Mac accepts before the offer's deadline. A rejected or expired offer releases the reservation.
 5. The server requests an encoded just-in-time runner configuration from GitHub and gives it to the assigned Mac.
 6. The Mac creates the guest machine and starts the runner with that configuration.
 7. The runner connects directly to GitHub, receives the workflow, and reports logs and job status to GitHub.
@@ -59,15 +59,15 @@ The active request also acts as an availability signal. If the Mac sleeps, loses
 
 The server should hold the GitHub App credentials. The Mac receives only the assignment-specific runner configuration and never the app private key or a long-lived GitHub token.
 
-GitHub documents both [just-in-time runner configuration](https://docs.github.com/en/rest/actions/self-hosted-runners) and an [HTTPS long-poll listener architecture](https://docs.github.com/en/actions/concepts/runners/actions-runner-controller) for runner scale sets. The exact integration used by `yieldd` still needs a focused prototype.
+The server uses the official [Runner Scale Set Client](https://github.com/actions/scaleset/tree/v0.4.0) for long polling and scale-set JIT configuration. The single-slot prototype offers work to its configured Mac when an authenticated availability poll is fresh, otherwise it uses the configured fallback. Expired unaccepted offers can fall back; issued credentials require confirmed local cleanup before that reservation is released.
 
 ## Queue semantics
 
-The server stores a scheduling view of GitHub's queue, not workflow source code, logs, or command payloads. Records should be keyed by GitHub job identity and processed idempotently because webhook deliveries may be repeated.
+GitHub owns job assignment. The server persists provisioning identities and cleanup obligations, not a second queue of workflow commands. Job lifecycle events aid reconciliation; they are not a promise that a particular runner will receive a particular job.
 
 At minimum, the scheduler must enforce:
 
-- One active assignment for a job.
+- One active provisioning owner for each reserved unit of capacity.
 - One job for each available runner slot.
 - Repository authorization before every assignment.
 - Expiring offers and reservations.
@@ -79,32 +79,21 @@ Fairness, priorities, per-repository concurrency limits, and separate device poo
 
 An unavailable Mac must not leave a job waiting for GitHub's self-hosted-runner timeout. The server should choose the hosted backend when no eligible Mac is online, all slots remain busy past the configured wait, or repeated assignments fail.
 
-GitHub does not treat `runs-on: yieldd` as an automatic alternative to a hosted runner. The backend therefore needs to be selected before the workload enters a yieldd-only queue. A small hosted routing job could reserve `yieldd` capacity and provide the workload job's `runs-on` value. Other GitHub-native approaches should be tested before this becomes part of the public workflow contract.
+GitHub does not treat `runs-on: yieldd` as an automatic alternative to a hosted runner. The intended interface keeps that selector unchanged: yieldd supplies compute behind it instead of rewriting the queued job's target.
 
-The exact fallback mechanism remains an open design question. It should be proven with a minimal workflow before building the server around it.
+The label-based fallback dispatches a bootstrap workflow in `yieldd-infra` on a user-configured runner target. That job starts an ephemeral yieldd listener on the provided machine, which can receive the original queued workload. Application repositories need no routing actions or bootstrap workflows. The fallback label has no default and may target GitHub-hosted compute or another provider that permits this arrangement.
 
-## Standalone and connected modes
+Manual repository-JIT experiments established happy-path cross-repository execution on Ubuntu, plus same-repository failure, cancellation, and no-pickup behavior. Live coordinator tests subsequently confirmed automatic hosted execution, restart reconciliation, and workload failure with cleanup. The coordinator records intent before side effects, uses per-bootstrap secrets, bounds provisioning, and reconciles registrations and bootstrap runs. Missing pickup acknowledgement must never trigger replacement execution without reconciling the original attempt.
 
-Standalone mode keeps the current model:
+## Mac operation
 
-```sh
-yieldd serve OWNER/REPOSITORY [OWNER/REPOSITORY ...]
-```
-
-The repository list is local, and each argument creates one slot.
-
-The installed local agent persists this same repository list and runs the same pool through a per-user LaunchAgent. It is an unattended form of standalone mode, not the beginning of the server protocol.
-
-Connected mode moves repository authorization and scheduling to the server. Local configuration should then contain device identity, capacity policy, and server connection details rather than an authoritative repository list.
-
-Both modes should use the same local runner-session, cleanup, and recovery code. The standalone LaunchAgent's repository list is local-only and does not define the connected-client configuration.
+The coordinator owns unattended scheduling. The foreground client and login agent run the same connected service. After enrollment, a trusted workflow can verify local job pickup through the coordinator.
 
 ## Open questions
 
-- Which GitHub event or runner-scale-set interface should feed the queue?
-- How should a workflow select between `yieldd` and its hosted fallback?
 - How should device enrollment and credential rotation work?
-- Which queue controls are necessary beyond a bounded FIFO policy?
+- How should a lost Mac's provisioning and GitHub runner state be reconciled before fallback?
+- Which fairness and admission controls are needed beyond one repository and one runner?
 - How much status and diagnostic data should Macs report to the server?
 
-These questions belong in later prototypes. They do not block the installable standalone LaunchAgent milestone.
+The current connected slice uses one manually provisioned device token and retains ambiguous local execution until the Mac reconnects and confirms cleanup. Device enrollment, automatic remediation for permanently lost Macs, and multi-device scheduling are not implemented.

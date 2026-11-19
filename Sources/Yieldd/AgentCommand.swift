@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import OSLog
 
@@ -11,54 +12,13 @@ struct AgentCommand: ParsableCommand {
         subcommands: [
             AgentInstallCommand.self,
             AgentStatusCommand.self,
+            AgentPauseCommand.self,
+            AgentResumeCommand.self,
+            AgentDrainCommand.self,
             AgentUninstallCommand.self,
             AgentRunCommand.self,
         ]
     )
-}
-
-struct AgentInstallCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "install",
-        abstract: "Configure and enable the local agent."
-    )
-
-    @Argument(help: "Repositories in owner/name form. Repeat a repository to give it another runner slot.")
-    var repositories: [String]
-
-    @Flag(name: .long, help: .hidden)
-    var preflightOnly = false
-
-    mutating func validate() throws {
-        guard repositories.count <= RunnerPool.maximumSlots else {
-            throw ValidationError("The local agent supports at most \(RunnerPool.maximumSlots) runner slots.")
-        }
-        _ = try repositories.map(GitHubRepository.init)
-    }
-
-    mutating func run() throws {
-        let locator = ExecutableLocator()
-        try run(locateExecutable: locator.locate)
-    }
-
-    func run(locateExecutable: (String) throws -> URL) throws {
-        let configuration = try AgentConfiguration(
-            repositories: repositories.map(GitHubRepository.init),
-            containerURL: locateExecutable("container"),
-            ghURL: locateExecutable("gh")
-        )
-        guard !preflightOnly else {
-            return
-        }
-
-        let service = try localAgentService()
-        try installAgent(
-            configuration: configuration,
-            store: AgentConfigurationStore(),
-            service: service
-        )
-        print(registrationStatusDescription(service.status()))
-    }
 }
 
 struct AgentStatusCommand: ParsableCommand {
@@ -67,12 +27,20 @@ struct AgentStatusCommand: ParsableCommand {
         abstract: "Show local agent registration, configuration, and active runners."
     )
 
+    @Flag(name: .long, help: "Print a versioned JSON report for the connected agent.")
+    var json = false
+
     mutating func run() throws {
-        try reportAgentStatus(
-            store: AgentConfigurationStore(),
-            service: localAgentService(),
-            output: { print($0) }
-        )
+        let report = try connectedAgentStatus(registration: AgentRegistrationState(localAgentService().status()),
+                                              directory: yielddApplicationSupportDirectory())
+        if json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            print(String(decoding: try encoder.encode(report), as: UTF8.self))
+        } else {
+            print(renderAgentStatus(report))
+        }
     }
 }
 
@@ -90,15 +58,12 @@ struct AgentUninstallCommand: AsyncParsableCommand {
             )
         }
 
-        let store = try AgentConfigurationStore()
-        try await uninstallAgent(
-            store: store,
-            service: service,
-            recover: {
-                try recoverAgentRunners(store: store)
-            }
-        )
-        print("Local agent unregistered and configuration removed.")
+        let store = try ConnectedAgentStore(directory: yielddApplicationSupportDirectory())
+        try await uninstallConnectedAgent(store: store, credentials: .keychain, service: service) { configuration, token in
+            try recoverConnectedAgent(configuration: configuration, token: token, directory: store.directory,
+                stop: RunnerPoolStop.monitoringSignals())
+        }
+        print("Agent unregistered and configuration removed.")
     }
 }
 
@@ -112,74 +77,36 @@ struct AgentRunCommand: ParsableCommand {
     )
 
     mutating func run() throws {
-        let stop = try RunnerPoolStop.monitoringSignals(
-            shutdownTimeout: Self.shutdownTimeout
-        )
         defer { agentLogger.notice("Stopping yieldd.") }
+        var stateDirectory: URL?
         do {
-            let store = try AgentConfigurationStore()
-            let configuration = try store.load()
-            try configuration.requireExecutables()
-            try withRunnerOwnership(in: store.directory) { leaseStore in
-                try AppleContainerSystem(
-                    containerURL: configuration.containerURL,
-                    executor: ProcessExecutor(
-                        checkCancellation: stop.check,
-                        maximumExecutionDeadline: stop.executionDeadline
-                    )
-                ).start()
-                try runRunnerService(
-                    repositories: configuration.repositories,
-                    leaseStore: leaseStore,
-                    containerURL: configuration.containerURL,
-                    ghURL: configuration.ghURL,
-                    stop: stop,
-                    output: .agentLog
-                )
-            }
+            let store = try ConnectedAgentStore(directory: yielddApplicationSupportDirectory())
+            stateDirectory = store.directory
+            guard let connected = try store.load() else { throw AgentError.connectedConfigurationRequired }
+            let control = ConnectedAgentControl(directory: store.directory, configuration: connected)
+            let stop = try RunnerPoolStop.monitoringSignals(shutdownTimeout: Self.shutdownTimeout, onStop: control.stopping)
+            let endpoint = AgentControlEndpoint(control: control)
+            endpoint.start()
+            defer { endpoint.stop() }
+            try prepareConnectedAgentKeychain()
+            let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
+            try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
+                platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
+                resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
         } catch where isCancellation(error) {
             return
         } catch {
+            if let stateDirectory, FileManager.default.fileExists(atPath: ConnectedAgentStore(directory: stateDirectory).file.path) {
+                // Diagnostic history is best effort and never changes recovery obligations.
+                try? AgentFailureStore(directory: stateDirectory).save(AgentReportedError(message: describeError(error)))
+            }
             agentLogger.error("Local agent failed: \(describeError(error), privacy: .public)")
             throw error
         }
     }
 }
 
-private func recoverAgentRunners(store: AgentConfigurationStore) throws {
-    try withRunnerOwnership(in: store.directory) { leaseStore in
-        guard !(try leaseStore.load()).isEmpty else {
-            return
-        }
-
-        let configuration = try store.load()
-        try configuration.requireExecutables()
-        let stop = try RunnerPoolStop.monitoringSignals()
-        let session = makeRunnerSession(
-            leaseStore: leaseStore,
-            containerURL: configuration.containerURL,
-            ghURL: configuration.ghURL,
-            stop: stop,
-            stateChanged: { state in
-                switch state {
-                case let .waitingForGitHubCleanup(id, retryDelay):
-                    print(githubCleanupRetryMessage(id: id, delay: retryDelay))
-                case let .leaseCleanupFailed(id, reason):
-                    writeToStandardError(
-                        "Warning: Could not clear runner lease for \(id.value): \(reason)\n"
-                    )
-                case .preparing, .waitingForJob, .cleaningUp:
-                    break
-                }
-            }
-        )
-        for id in try session.recoverAbandonedRunners() {
-            print("Cleaned up abandoned runner \(id.value).")
-        }
-    }
-}
-
-private extension RunnerServiceOutput {
+extension RunnerServiceOutput {
     static let agentLog = RunnerServiceOutput(
         info: { agentLogger.notice("\($0, privacy: .public)") },
         warning: { agentLogger.warning("\($0, privacy: .public)") },

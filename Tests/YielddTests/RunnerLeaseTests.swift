@@ -2,119 +2,25 @@ import Foundation
 import Testing
 @testable import Yieldd
 
-private let lease = RunnerLease(
-    runnerID: RunnerID(value: "yieldd-test-123"),
-    repository: try! GitHubRepository("owner/repository")
-)
-private let secondLease = RunnerLease(
-    runnerID: RunnerID(value: "yieldd-test-456"),
-    repository: try! GitHubRepository("other/repository")
-)
-
 @Test
-func leaseStoreRoundTripsAndClearsLease() throws {
+func leaseStoreRepairsStateDirectoryPermissions() throws {
     let directory = makeStateDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try RunnerLeaseStore(directory: directory)
-
-    #expect(try store.load().isEmpty)
-
-    try store.save(lease)
-    try store.save(secondLease)
-    #expect(try store.load() == [lease, secondLease])
-
-    try store.clear(lease.runnerID)
-    #expect(try store.load() == [secondLease])
-
-    try store.clear(secondLease.runnerID)
-    try store.clear(secondLease.runnerID)
-    #expect(try store.load().isEmpty)
-}
-
-@Test
-func leaseStorePreservesConcurrentUpdates() async throws {
-    let directory = makeStateDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try RunnerLeaseStore(directory: directory)
-    let leases = try (0..<8).map { index in
-        RunnerLease(
-            runnerID: RunnerID(value: "yieldd-test-\(index)"),
-            repository: try GitHubRepository("owner/repository-\(index)")
-        )
-    }
-
-    try await withThrowingTaskGroup(of: Void.self) { group in
-        for lease in leases {
-            group.addTask {
-                try store.save(lease)
-            }
-        }
-        try await group.waitForAll()
-    }
-
-    #expect(Set(try store.load().map(\.runnerID)) == Set(leases.map(\.runnerID)))
-}
-
-@Test
-func leaseStoreSupportsMaximumRunnerSlots() throws {
-    let directory = makeStateDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try RunnerLeaseStore(directory: directory)
-    let repository = try GitHubRepository(
-        "\(String(repeating: "o", count: 39))/\(String(repeating: "r", count: 100))"
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o755]
+    )
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: directory.path
     )
 
-    for index in 0..<RunnerPool.maximumSlots {
-        let suffix = String(index)
-        let runnerID = RunnerID(value:
-            "yieldd-\(String(repeating: "a", count: 121 - suffix.count))\(suffix)"
-        )
-        try store.save(RunnerLease(runnerID: runnerID, repository: repository))
-    }
-
-    #expect(try store.load().count == RunnerPool.maximumSlots)
-}
-
-@Test
-func leaseStoreRejectsOversizedState() throws {
-    let directory = makeStateDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
     let store = try RunnerLeaseStore(directory: directory)
-    try Data(repeating: 0, count: RunnerLeaseStore.maximumBytes + 1).write(to: store.fileURL)
+    let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
 
-    #expect(throws: RunnerLeaseError.tooLarge(
-        path: store.fileURL.path,
-        maximumBytes: RunnerLeaseStore.maximumBytes
-    )) {
-        try store.load()
-    }
-}
-
-@Test
-func leaseStoreReportsPathForInvalidContents() throws {
-    let directory = makeStateDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try RunnerLeaseStore(directory: directory)
-    try Data(
-        #"{"runnerID":"yieldd-test-123","repository":"owner/repository"}"#.utf8
-    ).write(to: store.fileURL)
-
-    #expect(throws: RunnerLeaseError.invalidContents(path: store.fileURL.path)) {
-        try store.load()
-    }
-}
-
-@Test
-func leaseStoreRejectsInvalidRunnerID() throws {
-    let directory = makeStateDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let store = try RunnerLeaseStore(directory: directory)
-
-    try Data(#"[{"runnerID":"other-runner","repository":"owner/repository"}]"#.utf8)
-        .write(to: store.fileURL)
-    #expect(throws: RunnerLeaseError.invalidRunnerID(path: store.fileURL.path)) {
-        try store.load()
-    }
+    #expect(store.directory == directory)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
 }
 
 @Test

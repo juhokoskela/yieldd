@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+if [[ "$#" -eq 1 && "$1" == --protocol-version ]]; then
+    printf '2\n'
+    exit 0
+fi
+
+if [[ "$#" -ne 1 || "$1" != --jit ]]; then
+    echo "usage: yieldd-configure-runner --jit" >&2
+    exit 2
+fi
+IFS= read -r credential
+
+if [[ -z "$credential" ]]; then
+    echo "runner credential is empty" >&2
+    exit 2
+fi
+
+cd "$HOME/actions-runner"
+if [[ -e .runner || -e .credentials || -e .yieldd-runner/jit-config ]]; then
+    echo "runner credentials already exist; use a fresh guest" >&2
+    exit 2
+fi
+for marker in exit-status process-group launched job-started; do
+    if [[ -e ".yieldd-runner/$marker" ]]; then
+        echo "runner lifecycle state already exists; use a fresh guest" >&2
+        exit 2
+    fi
+done
+mkdir -p .yieldd-runner
+cat > "$HOME/.yieldd-job-started.sh" <<'HOOK'
+#!/bin/bash
+set -euo pipefail
+state_directory="$HOME/actions-runner/.yieldd-runner"
+printf 'started\n' > "$state_directory/job-started.$$"
+mv -f "$state_directory/job-started.$$" "$state_directory/job-started"
+HOOK
+chmod 0700 "$HOME/.yieldd-job-started.sh"
+printf '%s\n' "$credential" > .yieldd-runner/jit-config

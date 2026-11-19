@@ -1,0 +1,52 @@
+name: yieldd-coordinator
+
+services:
+  coordinator:
+    image: local/yieldd-coordinator:dev
+    build: .
+    ports:
+      - "127.0.0.1:8787:8787"
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 128
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 90s
+    environment:
+      GH_TOKEN: ${GH_TOKEN:?Set GH_TOKEN}
+      YIELDD_CLIENT_TOKEN: ${YIELDD_CLIENT_TOKEN:?Set YIELDD_CLIENT_TOKEN}
+    command:
+      - --repositories
+      - ${YIELDD_REPOSITORIES:?Set YIELDD_REPOSITORIES to comma-separated OWNER/REPOSITORY names}
+      - --local-only-repositories
+      - ${YIELDD_LOCAL_ONLY_REPOSITORIES:-}
+      - --infrastructure
+      - ${YIELDD_INFRASTRUCTURE:?Set YIELDD_INFRASTRUCTURE}
+      - --fallback-runner
+      - ${YIELDD_FALLBACK_RUNNER:?Set YIELDD_FALLBACK_RUNNER to a JSON label string or array}
+      - --macos-fallback-runner
+      - ${YIELDD_MACOS_FALLBACK_RUNNER:-}
+      - --repository-routes
+      - ${YIELDD_REPOSITORY_ROUTES:-}
+      - --max-fallback-runners
+      - ${YIELDD_MAX_FALLBACK_RUNNERS:-1}
+      - --device-id
+      - ${YIELDD_DEVICE_ID:?Set YIELDD_DEVICE_ID}
+      - --client-listen
+      - 0.0.0.0:8787
+      - --allow-non-loopback-client-listen
+      - --state-dir
+      - /var/lib/yieldd
+    volumes:
+      - state:/var/lib/yieldd
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  state:
+    name: ${YIELDD_STATE_VOLUME:-yieldd-coordinator-state}

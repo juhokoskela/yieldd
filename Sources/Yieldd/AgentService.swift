@@ -9,79 +9,21 @@ struct LocalAgentService {
     let unregister: () async throws -> Void
 }
 
-func installAgent(
-    configuration: AgentConfiguration,
-    store: AgentConfigurationStore,
-    service: LocalAgentService
-) throws {
+func enableAgent(service: LocalAgentService) throws {
     switch service.status() {
-    case .enabled, .requiresApproval:
-        do {
-            guard try store.load() == configuration else {
-                throw AgentError.configurationChanged
-            }
-        } catch AgentConfigurationError.missing,
-                AgentConfigurationError.invalidContents {
-            try store.save(configuration)
-        }
+    case .enabled, .requiresApproval: break
     case .notRegistered:
-        try store.save(configuration)
-        do {
-            try service.register()
-        } catch {
-            // Registration reports denied approval as an error. Re-reading the service state
-            // distinguishes that expected result from other registration failures.
-            guard service.status() == .requiresApproval else {
-                throw error
-            }
+        do { try service.register() }
+        catch {
+            // Registration can throw when macOS requires user approval.
+            guard service.status() == .requiresApproval else { throw error }
         }
-    case .notFound:
-        throw AgentError.serviceNotFound
-    @unknown default:
-        throw AgentError.unknownStatus
+    case .notFound: throw AgentError.serviceNotFound
+    @unknown default: throw AgentError.unknownStatus
     }
 }
 
-func reportAgentStatus(
-    store: AgentConfigurationStore,
-    service: LocalAgentService,
-    output: (String) -> Void
-) throws {
-    output(registrationStatusDescription(service.status()))
-
-    var configurationError: (any Error)?
-    do {
-        let configuration = try store.load()
-        output("Repositories: \(configuration.repositories.map(\.fullName).joined(separator: ", "))")
-        output("container: \(configuration.containerURL.path)")
-        output("gh: \(configuration.ghURL.path)")
-    } catch AgentConfigurationError.missing {
-        output("Configuration: not installed")
-    } catch {
-        configurationError = error
-        output("Configuration: \(describeError(error))")
-    }
-
-    let leases = try RunnerLeaseStore(directory: store.directory).load()
-    if leases.isEmpty {
-        output("Active runner leases: none")
-    } else {
-        output("Active runner leases:")
-        for lease in leases {
-            output("- \(lease.runnerID.value) (\(lease.repository.fullName))")
-        }
-    }
-
-    if let configurationError {
-        throw configurationError
-    }
-}
-
-func uninstallAgent(
-    store: AgentConfigurationStore,
-    service: LocalAgentService,
-    recover: () throws -> Void
-) async throws {
+func disableAgent(service: LocalAgentService) async throws {
     switch service.status() {
     case .enabled, .requiresApproval, .notFound:
         do {
@@ -94,9 +36,6 @@ func uninstallAgent(
     @unknown default:
         throw AgentError.unknownStatus
     }
-
-    try recover()
-    try store.remove()
 }
 
 func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {
@@ -150,12 +89,15 @@ private func isMissingService(_ error: any Error) -> Bool {
 
 enum AgentError: Error, Equatable, LocalizedError {
     case notPackaged
+    case connectedConfigurationRequired
     case configurationChanged
     case serviceNotFound
     case unknownStatus
 
     var errorDescription: String? {
         switch self {
+        case .connectedConfigurationRequired:
+            "Run the installer to enroll this Mac."
         case .notPackaged:
             "Local agent commands must run from the packaged yieldd application."
         case .configurationChanged:

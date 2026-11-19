@@ -4,6 +4,56 @@ import Testing
 @testable import Yieldd
 
 @Test
+func monitoredProcessPropagatesRelayFailureInsteadOfCancellation() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("yieldd-monitor-\(UUID().uuidString)", isDirectory: true)
+    let processGroupURL = directory.appendingPathComponent("group.pid")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer {
+        terminateProcessGroupRecorded(at: processGroupURL)
+        try? FileManager.default.removeItem(at: directory)
+    }
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/bin/sh"),
+        arguments: ["-c", "echo $$ > \"$1\"; exec /bin/sleep 30", "yieldd-monitor-test", processGroupURL.path], timeout: 2)
+    let error = try #require(#expect(throws: RunnerNetworkRelayError.self) {
+        try ProcessExecutor(terminationGracePeriod: 0, cancellationPollInterval: 0.01).execute(request, checking: {
+            if processIdentifierRecorded(at: processGroupURL) != nil {
+                throw RunnerNetworkRelayError.exited(status: 9)
+            }
+        })
+    })
+    #expect(!isCancellation(error))
+    let processGroup = try #require(processIdentifierRecorded(at: processGroupURL))
+    #expect(!processGroupExists(processGroup))
+}
+
+@Test
+func monitoredExecutionDoesNotRecheckAfterReturningSuccess() throws {
+    var checks = 0
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [])
+    let result = processResult()
+    let executor = RecordingProcessExecutor(outcomes: [.success(result)])
+    #expect(try executor.execute(request, checking: {
+        checks += 1
+        if checks > 1 { throw RunnerNetworkRelayError.exited(status: 9) }
+    }) == result)
+    #expect(checks == 1)
+}
+
+@Test
+func monitoredProcessPreservesActualCancellation() throws {
+    var checks = 0
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 2)
+    let error = try #require(#expect(throws: CancellationError.self) {
+        try ProcessExecutor(terminationGracePeriod: 0, cancellationPollInterval: 0.01).execute(request, checking: {
+            checks += 1
+            if checks >= 2 { throw CancellationError() }
+        })
+    })
+    #expect(isCancellation(error))
+}
+
+@Test
 func capturesStandardOutput() throws {
     let request = ProcessRequest(
         executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
@@ -99,6 +149,23 @@ func requireSuccessPreservesSignalResult() {
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
+}
+
+@Test(arguments: [["machine", "inspect"], ["machine", "run"], ["system", "status"]])
+func timeoutReportsTheContainerSubcommandWithoutArgumentsOrInput(_ subcommand: [String]) {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/local/bin/container"),
+        arguments: subcommand + ["--name", "private-runner", "--", "secret-token"],
+        standardInput: Data("private-jit".utf8), timeout: 10)
+    let error = ProcessExecutionError.timedOut(request: request, result: processResult(stdout: "private-output"))
+    #expect(describeError(error) == "Process /usr/local/bin/container timed out after 10.0 seconds (\(subcommand.joined(separator: " "))).")
+}
+
+@Test(arguments: [[], ["machine", "secret-token"], ["machine", "run\nsecret-token"], ["--token", "secret-token"]])
+func timeoutOmitsUnrecognizedContainerArguments(_ arguments: [String]) {
+    let request = ProcessRequest(executableURL: URL(fileURLWithPath: "/usr/local/bin/container"),
+        arguments: arguments, timeout: 10)
+    let error = ProcessExecutionError.timedOut(request: request, result: processResult())
+    #expect(describeError(error) == "Process /usr/local/bin/container timed out after 10.0 seconds.")
 }
 
 @Test

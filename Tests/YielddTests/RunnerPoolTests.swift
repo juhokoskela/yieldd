@@ -1,22 +1,23 @@
 import ArgumentParser
+import Dispatch
 import Foundation
 import Testing
 @testable import Yieldd
 
-private let firstPoolRepository = try! GitHubRepository("owner/first")
-private let secondPoolRepository = try! GitHubRepository("owner/second")
+private let firstPoolRepository = "owner/first"
+private let secondPoolRepository = "owner/second"
 
 @Test
-func poolRunsOneConcurrentSlotPerRepository() throws {
+func poolRunsConcurrentMixedPlatformSlots() throws {
     let gate = ConcurrentSlotGate(expected: 2)
 
-    try RunnerPool(stop: RunnerPoolStop()) { repository, _ in
-        try gate.enter(repository)
-    }.run(repositories: [firstPoolRepository, secondPoolRepository])
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: [RunnerPlatform.linux, .macOS]) { platform, _ in
+        try gate.enter(platform == .linux ? firstPoolRepository : secondPoolRepository)
+    }
 
-    #expect(Set(gate.repositories.map(\.fullName)) == [
-        firstPoolRepository.fullName,
-        secondPoolRepository.fullName,
+    #expect(Set(gate.repositories) == [
+        firstPoolRepository,
+        secondPoolRepository,
     ])
     #expect(gate.maximumActiveSlots == 2)
 }
@@ -25,9 +26,9 @@ func poolRunsOneConcurrentSlotPerRepository() throws {
 func poolPreservesRepeatedRepositorySlots() throws {
     let gate = ConcurrentSlotGate(expected: 2)
 
-    try RunnerPool(stop: RunnerPoolStop()) { repository, _ in
+    try RunnerPool(stop: RunnerPoolStop()).run(slots: [firstPoolRepository, firstPoolRepository]) { repository, _ in
         try gate.enter(repository)
-    }.run(repositories: [firstPoolRepository, firstPoolRepository])
+    }
 
     #expect(gate.repositories == [firstPoolRepository, firstPoolRepository])
     #expect(gate.maximumActiveSlots == 2)
@@ -39,7 +40,7 @@ func poolFailureCancelsOtherSlotsAndPreservesTheFirstError() {
     let peerWasCancelled = LockedFlag()
 
     #expect(throws: TestFailure.runnerJob) {
-        try RunnerPool(stop: RunnerPoolStop()) { repository, stop in
+        try RunnerPool(stop: RunnerPoolStop()).run(slots: [firstPoolRepository, secondPoolRepository]) { repository, stop in
             try gate.enter(repository)
             if repository == firstPoolRepository {
                 throw TestFailure.runnerJob
@@ -50,7 +51,7 @@ func poolFailureCancelsOtherSlotsAndPreservesTheFirstError() {
             } catch is CancellationError {
                 peerWasCancelled.set()
             }
-        }.run(repositories: [firstPoolRepository, secondPoolRepository])
+        }
     }
 
     #expect(peerWasCancelled.value)
@@ -72,49 +73,41 @@ func poolStopStartsOneShutdownDeadline() throws {
 }
 
 @Test
-func serviceCommandPreservesRepeatedRepositories() throws {
-    let command = try RunnerServiceCommand.parse([
-        firstPoolRepository.fullName,
-        firstPoolRepository.fullName,
-    ])
-
-    #expect(command.repositories == [
-        firstPoolRepository.fullName,
-        firstPoolRepository.fullName,
-    ])
-}
-
-@Test
-func serviceCommandRejectsTooManyRunnerSlots() {
-    let arguments = Array(
-        repeating: firstPoolRepository.fullName,
-        count: RunnerPool.maximumSlots + 1
+func capacityWaitObservesPoolStop() throws {
+    let blocked = DispatchSemaphore(value: 0)
+    let cancelled = DispatchSemaphore(value: 0)
+    let admission = RunnerMemoryAdmission(
+        physicalMemoryBytes: 16 * 1_024 * 1_024 * 1_024,
+        readMemoryPressure: { .normal }
     )
+    let reservation = try admission.acquire(reserving: RunnerPlatform.linux.memoryReservationBytes)
+    let stop = RunnerPoolStop()
 
-    do {
-        _ = try RunnerServiceCommand.parse(arguments)
-        Issue.record("Expected excessive runner slots to be rejected")
-    } catch {
-        #expect(String(describing: error).contains(
-            "at most \(RunnerPool.maximumSlots) runner slots"
-        ))
+    DispatchQueue.global().async {
+        do {
+            _ = try admission.acquire(
+                reserving: RunnerPlatform.linux.memoryReservationBytes,
+                checkCancellation: stop.check,
+                onBlocked: { blocked.signal() }
+            )
+            Issue.record("Stopped admission must not succeed")
+        } catch is CancellationError {
+            cancelled.signal()
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
     }
-}
 
-@Test
-func serviceCommandAcceptsMaximumRunnerSlots() throws {
-    let arguments = Array(
-        repeating: firstPoolRepository.fullName,
-        count: RunnerPool.maximumSlots
-    )
-
-    _ = try RunnerServiceCommand.parse(arguments)
+    #expect(blocked.wait(timeout: .now() + 1) == .success)
+    stop.request()
+    #expect(cancelled.wait(timeout: .now() + 1) == .success)
+    admission.release(reservation)
 }
 
 private final class ConcurrentSlotGate: @unchecked Sendable {
     private let condition = NSCondition()
     private let expected: Int
-    private var recordedRepositories: [GitHubRepository] = []
+    private var recordedRepositories: [String] = []
     private var activeSlots = 0
     private var maximumSlots = 0
 
@@ -122,7 +115,7 @@ private final class ConcurrentSlotGate: @unchecked Sendable {
         self.expected = expected
     }
 
-    var repositories: [GitHubRepository] {
+    var repositories: [String] {
         condition.withLock { recordedRepositories }
     }
 
@@ -130,7 +123,7 @@ private final class ConcurrentSlotGate: @unchecked Sendable {
         condition.withLock { maximumSlots }
     }
 
-    func enter(_ repository: GitHubRepository) throws {
+    func enter(_ repository: String) throws {
         condition.lock()
         recordedRepositories.append(repository)
         activeSlots += 1
