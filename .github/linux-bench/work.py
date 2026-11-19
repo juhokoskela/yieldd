@@ -42,6 +42,7 @@ if sys.argv[1]=="prepare":
     assert report["go"]=="go version go1.27.4 linux/arm64" and report["cpus"]==4,report
     if not stage.startswith("native"):
         run("sudo","install","-d","-m","0755","-o","runner","-g","runner",str(cache))
+    report["python"]=sys.version
     record()
 elif sys.argv[1]=="work":
     with clock("cache_checks"):
