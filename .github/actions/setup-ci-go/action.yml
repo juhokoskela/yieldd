@@ -1,0 +1,19 @@
+name: Set up Go on a yieldd cache disk
+description: Use the job's native disk for Go modules and build results
+inputs:
+  go-version-file:
+    description: Path to the module that selects the Go toolchain
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: juhokoskela/yieldd/actions/native-cache@5d2ef98d365cf397d7eef130b6063e190ac6220e
+    - name: Configure Go cache directories
+      shell: bash
+      run: |
+        echo "GOMODCACHE=$YIELDD_CACHE_PATH/go-mod" >> "$GITHUB_ENV"
+        echo "GOCACHE=$YIELDD_CACHE_PATH/go-build" >> "$GITHUB_ENV"
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+        cache: false
