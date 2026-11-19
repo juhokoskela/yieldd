@@ -3,6 +3,8 @@ name: macOS runner test
 on:
   workflow_dispatch:
   pull_request:
+    paths:
+      - .github/workflows/macos-runner-test.yml
 
 permissions: {}
 
