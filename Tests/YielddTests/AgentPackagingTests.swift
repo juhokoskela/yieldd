@@ -37,7 +37,7 @@ func localAgentEntitlementsEnableVirtualization() throws {
 func freshAgentInstallerChecksPreflightBeforeEnrollment(result: String) throws {
     let fixture = try InstallerFixture(preflightResult: result)
     defer { fixture.remove() }
-    let execution = try fixture.run(arguments: fixture.arguments)
+    let execution = try fixture.run()
     let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
     let valid = result == "linux" || result == "macos"
     #expect((execution.terminationStatus == 0) == valid)
@@ -50,7 +50,7 @@ func freshAgentInstallerChecksPreflightBeforeEnrollment(result: String) throws {
 func interruptedImageBuildStopsTheBuilderBeforeRemovingStaging() throws {
     let fixture = try InstallerFixture(preflightResult: "linux")
     defer { fixture.remove() }
-    let result = try fixture.run(arguments: fixture.arguments, interruptBuild: true)
+    let result = try fixture.run(interruptBuild: true)
     #expect(result.terminationStatus == 143)
     let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
     #expect(events.contains("container:builder stop"))
@@ -64,22 +64,68 @@ func installerRefusesAnExistingAppBeforePreflightOrImageBuild() throws {
     defer { fixture.remove() }
     try FileManager.default.createDirectory(at: fixture.oldMarker.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data("original".utf8).write(to: fixture.oldMarker)
-    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    #expect(try fixture.run().terminationStatus != 0)
     #expect(try String(contentsOf: fixture.oldMarker, encoding: .utf8) == "original")
     #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
+}
+
+@Test(arguments: ["", "-", "Apple Development", "1234", String(repeating: "G", count: 40)])
+func installerRequiresACertificateFingerprint(identity: String) throws {
+    let fixture = try InstallerFixture(preflightResult: "macos")
+    defer { fixture.remove() }
+    let result = try fixture.run(identity: identity)
+    #expect(result.terminationStatus != 0)
+    #expect(result.stderrText.contains("YIELDD_SIGNING_IDENTITY"))
+    #expect(!FileManager.default.fileExists(atPath: fixture.logURL.path))
+}
+
+@Test(arguments: ["yieldd.app", "yieldd-network-relay"])
+func installerChecksTheSelectedCertificateBeforePreflight(artifact: String) throws {
+    let fixture = try InstallerFixture(preflightResult: "macos")
+    defer { fixture.remove() }
+    let fingerprint = "0123456789abcdef0123456789abcdef01234567"
+    let result = try fixture.run(identity: fingerprint, rejectSignatureOf: artifact)
+    #expect(result.terminationStatus != 0)
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
+    let verification = try #require(events.split(separator: "\n").last)
+    #expect(verification.hasPrefix("codesign:"))
+    #expect(verification.hasSuffix("/\(artifact)"))
+    let identifier = artifact == "yieldd.app" ? "dev.yieldd" : "dev.yieldd.network-relay"
+    #expect(verification.contains("-R=identifier \"\(identifier)\" and anchor apple generic"))
+    #expect(verification.contains("certificate leaf = H\"\(fingerprint)\""))
+    #expect(verification.contains("certificate leaf[field.1.2.840.113635.100.6.1.12] exists"))
+    #expect(!events.contains("new:agent"))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.applicationsURL.path).isEmpty)
 }
 
 @Test
 func failedEnrollmentKeepsTheInstalledBundleForRecovery() throws {
     let fixture = try InstallerFixture(preflightResult: "macos", enrollmentFails: true)
     defer { fixture.remove() }
-    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    #expect(try fixture.run().terminationStatus != 0)
     let executable = fixture.applicationsURL.appendingPathComponent("yieldd.app/Contents/MacOS/yieldd")
     #expect(FileManager.default.isExecutableFile(atPath: executable.path))
     let events = try String(contentsOf: fixture.logURL, encoding: .utf8)
     #expect(events.contains("new:agent install --server"))
-    #expect(try fixture.run(arguments: fixture.arguments).terminationStatus != 0)
+    #expect(try fixture.run().terminationStatus != 0)
     #expect(try String(contentsOf: fixture.logURL, encoding: .utf8) == events)
+}
+
+@Test(arguments: [false, true])
+func enrollmentRetryVerifiesInstalledBundleBeforeExecution(rejectRelay: Bool) throws {
+    let fixture = try InstallerFixture(preflightResult: "macos")
+    defer { fixture.remove() }
+    let installed = fixture.applicationsURL.appendingPathComponent("yieldd.app")
+    try FileManager.default.createDirectory(at: fixture.applicationsURL, withIntermediateDirectories: true)
+    try FileManager.default.copyItem(at: fixture.rootURL.appendingPathComponent(".build/yieldd.app"), to: installed)
+
+    let result = try fixture.run(retryEnrollment: true, rejectSignatureOf: rejectRelay ? "yieldd-network-relay" : nil)
+    #expect((result.terminationStatus == 0) == !rejectRelay)
+    let events = try String(contentsOf: fixture.logURL, encoding: .utf8).split(separator: "\n")
+    try #require(events.count == (rejectRelay ? 2 : 3))
+    #expect(events[0].hasSuffix(installed.path))
+    #expect(events[1].hasSuffix(installed.appendingPathComponent("Contents/Helpers/yieldd-network-relay").path))
+    if !rejectRelay { #expect(events[2].hasPrefix("new:agent install --server")) }
 }
 
 @Test(arguments: [false, true])
@@ -138,7 +184,8 @@ private struct InstallerFixture {
         """)
     }
 
-    func run(arguments: [String], interruptBuild: Bool = false) throws -> ProcessResult {
+    func run(retryEnrollment: Bool = false, interruptBuild: Bool = false, identity: String = String(repeating: "A", count: 40),
+             rejectSignatureOf artifact: String? = nil) throws -> ProcessResult {
         let original = try String(contentsOf: repositoryRoot.appendingPathComponent("Scripts/install-local-agent.sh"), encoding: .utf8)
         let scriptDirectoryAssignment = #"script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"#
         let applicationsDirectoryAssignment = #"applications_directory="${HOME:?}/Applications""#
@@ -146,7 +193,11 @@ private struct InstallerFixture {
         try #require(original.contains(scriptDirectoryAssignment))
         try #require(original.contains(applicationsDirectoryAssignment))
         let script = """
-        codesign() { echo codesign >> \(quote(logURL.path)); }
+        export YIELDD_SIGNING_IDENTITY=\(quote(identity))
+        codesign() {
+            printf 'codesign:%s\\n' "$*" >> \(quote(logURL.path))
+            case "$*" in */\(quote(artifact ?? ""))) return 1 ;; esac
+        }
         container() {
             printf 'container:%s\\n' "$*" >> \(quote(logURL.path))
             if [ "$1" = build ] && \(interruptBuild ? "true" : "false"); then kill -TERM "$$"; fi
@@ -159,7 +210,7 @@ private struct InstallerFixture {
             .replacingOccurrences(of: applicationsDirectoryAssignment,
                                   with: "applications_directory=\(quote(applicationsURL.path))")
         return try ProcessExecutor().execute(ProcessRequest(
-            executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-s", "--"] + arguments,
+            executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-s", "--"] + (retryEnrollment ? ["--retry-enrollment"] : []) + arguments,
             standardInput: Data(script.utf8), timeout: 20
         ))
     }

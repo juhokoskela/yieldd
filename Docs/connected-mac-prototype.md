@@ -85,7 +85,18 @@ The proxy must forward all of `/v1/`, including `/v1/macos/`. Workflows need onl
 
 ## Connected agent at login
 
-After validating foreground execution, install the connected agent from the repository root:
+The installed app and network relay use the same Apple Development identity. The signing Mac needs the certificate, its private key and a trusted WWDR G3 intermediate. [Apple's WWDR intermediate certificates](https://developer.apple.com/help/account/certificates/wwdr-intermediate-certificates/)
+
+List valid identities and export the 40-character fingerprint beside your Apple Development identity.
+
+```sh
+security find-identity -v -p codesigning
+export YIELDD_SIGNING_IDENTITY='<40-character fingerprint>'
+```
+
+For a staging check before taking a worker offline, run `Scripts/build-local-app.sh` from this shell. It signs and verifies `.build/yieldd.app`. Standalone builds default to ad-hoc signing when the variable is unset. The installer requires the fingerprint and checks both staged signatures before preflight.
+
+After validating foreground execution, install from the same shell:
 
 ```sh
 Scripts/install-local-agent.sh \
@@ -97,7 +108,9 @@ Supply `YIELDD_CLIENT_TOKEN` in the installer's environment for first enrollment
 
 To upgrade, run `agent drain` and then `agent uninstall` from the installed app. Keep the coordinator and original credentials available until both commands succeed. Move the unregistered bundle out of `~/Applications/yieldd.app`, then run the installer with the enrollment token. If either command fails, keep the bundle, credentials, and journals, and finish recovery before replacing anything. Use the previous release to finish any standalone cleanup.
 
-If initial enrollment stops after the installer copies the signed app, inspect its `agent status` and retry its `agent install` with the same arguments and token. A saved pause survives reinstall. Check readiness and resume when ready to accept jobs.
+When preparing a new installable release, increase `CFBundleVersion` in `Packaging/Info.plist` above the previous installed build, including any locally versioned build. Reuse the signing identity across upgrades. Enrollment refreshes Launch Services at the final bundle path before registering the login item.
+
+If initial enrollment stops after the installer copies the signed app, run `Scripts/install-local-agent.sh --retry-enrollment` followed by the original arguments, with the same certificate fingerprint and token. This verifies the installed app and relay and retries enrollment without rebuilding or moving the bundle. A saved pause survives reinstall. Check readiness and resume when ready to accept jobs.
 
 Use `yieldd agent status` from the installed app to inspect registration and configuration, and `yieldd agent uninstall` to disable it and recover outstanding assignments. Configuration and the Keychain token remain if recovery fails. The agent uses unified logging under subsystem `dev.yieldd`, category `agent`, and has a 50-second shutdown budget. Foreground `connect` remains available for diagnostics.
 
@@ -134,7 +147,7 @@ Use the installer from this checkout and a trusted repository to validate the in
 3. Pause during a long poll and while jobs are active. Confirm existing jobs finish, new offers are declined, idle capacity stops being advertised, and configured hosted fallback runs new demand. Restart while paused and verify pause persists.
 4. Drain during execution and cleanup retries. Confirm it waits until cleanup is complete, and that Ctrl+C only stops the wait. Resume/re-pause from another terminal and restart the service during separate drain attempts; each wait must fail rather than silently attach to a new admission period.
 5. Interrupt networking and restart the coordinator/client with their original state. Confirm status reports retry/recovery accurately, no duplicate execution starts, and unresolved cleanup remains recorded. Check the unavailable-service report after a startup failure.
-6. Drain and uninstall with the current binary, move the bundle aside, and reinstall. Verify readiness, explicit resume, local execution, and cleanup.
+6. Drain and uninstall with the current binary, move the bundle aside, and reinstall. After the next login, confirm that the agent runs from `~/Applications/yieldd.app/Contents/MacOS/yieldd` while the checkout and previous bundle are still on disk. Verify worker readiness, explicit resume, local execution, and cleanup.
 
 The installed service, real guests, network-isolation checks, and fallback placement are live acceptance boundaries. Unit tests and the anonymous XPC fixture do not establish them.
 

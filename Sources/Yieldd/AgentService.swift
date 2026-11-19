@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 import ServiceManagement
 
@@ -7,6 +8,7 @@ struct LocalAgentService {
     let status: () -> SMAppService.Status
     let register: () throws -> Void
     let unregister: () async throws -> Void
+    var refreshBundleRegistration: () throws -> Void = {}
 }
 
 func enableAgent(service: LocalAgentService) throws {
@@ -38,11 +40,12 @@ func disableAgent(service: LocalAgentService) async throws {
     }
 }
 
-func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {
-    let plistURL = bundle.bundleURL
+func localAgentService() throws -> LocalAgentService {
+    let bundleURL = Bundle.main.bundleURL
+    let plistURL = bundleURL
         .appendingPathComponent("Contents/Library/LaunchAgents", isDirectory: true)
         .appendingPathComponent(agentPlistName, isDirectory: false)
-    guard bundle.bundleURL.pathExtension == "app",
+    guard bundleURL.pathExtension == "app",
           FileManager.default.fileExists(atPath: plistURL.path) else {
         throw AgentError.notPackaged
     }
@@ -62,6 +65,16 @@ func localAgentService(bundle: Bundle = .main) throws -> LocalAgentService {
                     }
                 }
             }
+        },
+        refreshBundleRegistration: {
+            let installed = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications", isDirectory: true).resolvingSymlinksInPath()
+                .appendingPathComponent("yieldd.app", isDirectory: true)
+            guard bundleURL.resolvingSymlinksInPath().path == installed.path else {
+                throw AgentError.notInstalled
+            }
+            let status = LSRegisterURL(bundleURL as CFURL, true)
+            guard status == noErr else { throw AgentError.bundleRegistration(status) }
         }
     )
 }
@@ -89,6 +102,8 @@ private func isMissingService(_ error: any Error) -> Bool {
 
 enum AgentError: Error, Equatable, LocalizedError {
     case notPackaged
+    case notInstalled
+    case bundleRegistration(OSStatus)
     case connectedConfigurationRequired
     case configurationChanged
     case serviceNotFound
@@ -100,10 +115,14 @@ enum AgentError: Error, Equatable, LocalizedError {
             "Run the installer to enroll this Mac."
         case .notPackaged:
             "Local agent commands must run from the packaged yieldd application."
+        case .notInstalled:
+            "Run the installer to enroll the app at ~/Applications/yieldd.app."
+        case let .bundleRegistration(status):
+            "Launch Services could not register the installed yieldd app (OSStatus \(status))."
         case .configurationChanged:
             "The local agent is already configured differently. Uninstall it before changing its configuration."
         case .serviceNotFound:
-            "macOS could not resolve the local agent registration. Uninstall it before installing again."
+            "macOS could not locate the bundled dev.yieldd.agent login item."
         case .unknownStatus:
             "macOS returned an unknown local agent registration status."
         }

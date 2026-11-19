@@ -41,8 +41,11 @@ func connectedAgentInstallationIsIdempotentAndRejectsCredentialChanges() throws 
     defer { fixture.remove() }
     let keychain = FakeAgentKeychain()
     let registered = Mutex(false)
-    let service = LocalAgentService(status: { registered.withLock { $0 } ? .enabled : .notRegistered },
-        register: { registered.withLock { $0 = true } }, unregister: {})
+    var refreshes = 0
+    let service = LocalAgentService(status: {
+        #expect(refreshes > 0)
+        return registered.withLock { $0 } ? .enabled : .notRegistered
+    }, register: { registered.withLock { $0 = true } }, unregister: {}, refreshBundleRegistration: { refreshes += 1 })
     try installConnectedAgent(configuration: agentConfiguration, token: agentToken, store: fixture.store,
         credentials: keychain.credentials, service: service)
     try installConnectedAgent(configuration: agentConfiguration, token: agentToken, store: fixture.store,
@@ -53,6 +56,7 @@ func connectedAgentInstallationIsIdempotentAndRejectsCredentialChanges() throws 
             store: fixture.store, credentials: keychain.credentials, service: service)
     }
     #expect(keychain.values.withLock { $0[agentConfiguration.credentialAccount] } == agentToken)
+    #expect(refreshes == 2)
 }
 
 @Test
@@ -75,7 +79,8 @@ func connectedAgentDoesNotReplaceStandaloneConfigurationOrDifferentRecoveryIdent
     let standalone = fixture.store.directory.appendingPathComponent("agent.json")
     try Data("original".utf8).write(to: standalone)
     let keychain = FakeAgentKeychain()
-    let service = LocalAgentService(status: { .notRegistered }, register: { Issue.record("Must not register") }, unregister: {})
+    let service = LocalAgentService(status: { .notRegistered }, register: { Issue.record("Must not register") },
+        unregister: {}, refreshBundleRegistration: { Issue.record("Must not refresh a conflicting enrollment") })
     #expect(throws: RunnerOwnershipError.previousLease) {
         try installConnectedAgent(configuration: agentConfiguration, token: agentToken, store: fixture.store,
             credentials: keychain.credentials, service: service)
