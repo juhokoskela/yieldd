@@ -13,7 +13,7 @@ permissions:
 jobs:
   swift:
     name: Swift build and tests
-    runs-on: macos-26
+    runs-on: yieldd-macos
     timeout-minutes: 20
     steps:
       - name: Check out
@@ -28,10 +28,14 @@ jobs:
           swift --version
 
       - name: Set up Go for the network relay
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: ./.github/actions/setup-ci-go
         with:
           go-version-file: Prototypes/RunnerNetwork/go.mod
-          cache-dependency-path: Prototypes/RunnerNetwork/go.sum
+
+      - name: Keep Swift and helper builds on the native disk
+        run: |
+          mkdir -p "$YIELDD_CACHE_PATH/yieldd-build"
+          ln -s "$YIELDD_CACHE_PATH/yieldd-build" .build
 
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
@@ -58,7 +62,7 @@ jobs:
 
   bootstrap:
     name: Bootstrap contract
-    runs-on: ubuntu-24.04-arm
+    runs-on: yieldd
     timeout-minutes: 5
     steps:
       - name: Check out
@@ -74,7 +78,7 @@ jobs:
 
   coordinator:
     name: Coordinator contract
-    runs-on: ubuntu-24.04-arm
+    runs-on: yieldd
     timeout-minutes: 10
     defaults:
       run:
@@ -85,10 +89,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: ./.github/actions/setup-ci-go
         with:
           go-version-file: Server/go.mod
-          cache-dependency-path: Server/go.sum
       - name: Test and vet
         run: |
           go test -race ./...
