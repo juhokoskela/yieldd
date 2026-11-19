@@ -2,9 +2,11 @@ name: macOS runner test
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/macos-runner-test.yml
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   macos:
@@ -12,13 +14,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check Xcode
-        run: xcodebuild -version
+        run: |
+          sw_vers
+          test "$(uname -m)" = arm64
+          xcodebuild -version
       - name: Check Swift
         run: xcrun swift --version
       - name: Boot a compatible iPhone simulator and capture its screen
         shell: bash
         run: |
           set -euo pipefail
+          test "$(stat -f %Su /dev/console)" = "$(id -un)"
+          launchctl print "gui/$(id -u)" >/dev/null
           xcrun simctl list runtimes --json > "$RUNNER_TEMP/runtimes.json"
           selection="$(/usr/bin/osascript -l JavaScript - "$RUNNER_TEMP/runtimes.json" <<'JAVASCRIPT'
           ObjC.import('Foundation');
@@ -41,6 +48,7 @@ jobs:
           )"
           read -r runtime device_type <<< "$selection"
           device="$(xcrun simctl create yieldd-workflow-test "$device_type" "$runtime")"
+          trap 'xcrun simctl shutdown "$device" >/dev/null 2>&1 || true; xcrun simctl delete "$device"' EXIT
           xcrun simctl bootstatus "$device" -b
           xcrun simctl io "$device" screenshot "$RUNNER_TEMP/screenshot.png"
           test -s "$RUNNER_TEMP/screenshot.png"
