@@ -66,8 +66,10 @@ elif sys.argv[1]=="work":
         assert len(report["input_images"])==4,report["input_images"]
         run("docker","run","--pull=never","-d","--name","glasseq-postgres","--network","host","-e","POSTGRES_PASSWORD=glasseq","-e","POSTGRES_USER=glasseq","-e","POSTGRES_DB=glasseq",pg)
         for _ in range(45):
-            if subprocess.run(["docker","exec","glasseq-postgres","psql","-U","glasseq","-d","glasseq","-Atc","select 1"],capture_output=True).returncode==0:break
+            if subprocess.run(["docker","exec","-e","PGPASSWORD=glasseq","glasseq-postgres","psql","-U","glasseq","-d","glasseq","-h","127.0.0.1","-Atc","select 1"],env={**os.environ},capture_output=True).returncode==0:break
             time.sleep(1)
+        # The runner creates private checkouts. Goose reads the public SQL as an unprivileged container user.
+        run("chmod","-R","a+rX",str(root/"migrations"))
         run("docker","run","--pull=never","--rm","--network","host","-v",str(root/"migrations")+":/migrations:ro","-e","GOOSE_DRIVER=postgres","-e","GOOSE_DBSTRING="+os.environ["GLASSEQ_TEST_DATABASE_URL"],goose,"up")
         report["migration"]=capture("docker","exec","glasseq-postgres","psql","-U","glasseq","-d","glasseq","-Atc","SELECT version_id FROM goose_db_version ORDER BY id DESC LIMIT 1")
         assert report["migration"]=="8"
