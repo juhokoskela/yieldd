@@ -1,7 +1,7 @@
 name: Single-use ARM64 compute pilot
 on:
   push:
-    branches: [bench/ec2-arm64-fbbd1ede-c6c]
+    branches: [bench/phoenix-arm-30a35adb-1]
 permissions:
   contents: read
 jobs:
@@ -11,9 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: GitHub ARM64, runner: ubuntu-24.04-arm}
-          - {host: Graviton5, runner: yd-ec2-fbbd1ede-c6c}
-          - {host: Existing fallback, runner: yd-fallback-fbbd1ede-c6c}
+          - {host: Altra slot 0, runner: yd-pnap-30a35adb-1-0}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
