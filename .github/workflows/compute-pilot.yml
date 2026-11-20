@@ -1,7 +1,7 @@
 name: Single-use ARM64 compute pilot
 on:
   push:
-    branches: [bench/ec2-arm64-fbbd1ede-c6c]
+    branches: [bench/phoenix-arm-bf972cf3-15]
 permissions:
   contents: read
 jobs:
@@ -11,9 +11,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: GitHub ARM64, runner: ubuntu-24.04-arm}
-          - {host: Graviton5, runner: yd-ec2-fbbd1ede-c6c}
-          - {host: Existing fallback, runner: yd-fallback-fbbd1ede-c6c}
+          - {host: Altra slot 0, runner: yd-pnap-bf972cf3-15-0}
+          - {host: Altra slot 1, runner: yd-pnap-bf972cf3-15-1}
+          - {host: Altra slot 2, runner: yd-pnap-bf972cf3-15-2}
+          - {host: Altra slot 3, runner: yd-pnap-bf972cf3-15-3}
+          - {host: Altra slot 4, runner: yd-pnap-bf972cf3-15-4}
+          - {host: Altra slot 5, runner: yd-pnap-bf972cf3-15-5}
+          - {host: Altra slot 6, runner: yd-pnap-bf972cf3-15-6}
+          - {host: Altra slot 7, runner: yd-pnap-bf972cf3-15-7}
+          - {host: Altra slot 8, runner: yd-pnap-bf972cf3-15-8}
+          - {host: Altra slot 9, runner: yd-pnap-bf972cf3-15-9}
+          - {host: Altra slot 10, runner: yd-pnap-bf972cf3-15-10}
+          - {host: Altra slot 11, runner: yd-pnap-bf972cf3-15-11}
+          - {host: Altra slot 12, runner: yd-pnap-bf972cf3-15-12}
+          - {host: Altra slot 13, runner: yd-pnap-bf972cf3-15-13}
+          - {host: Altra slot 14, runner: yd-pnap-bf972cf3-15-14}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
