@@ -1,0 +1,76 @@
+name: Single-use ARM64 compute pilot
+on:
+  push:
+    branches: [bench/ec2-arm64-fbbd1ede-c6c]
+permissions:
+  contents: read
+jobs:
+  glasseq:
+    name: GlassEQServer / ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {host: GitHub ARM64, runner: ubuntu-24.04-arm}
+          - {host: Graviton5, runner: yd-ec2-fbbd1ede-c6c}
+          - {host: Existing fallback, runner: yd-fallback-fbbd1ede-c6c}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 18
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      GLASSEQ_TEST_DATABASE_URL: postgres://glasseq:glasseq@127.0.0.1:5432/glasseq?sslmode=disable
+    steps:
+      - name: Record host
+        run: |
+          set -eu
+          test "$(uname -m)" = aarch64
+          echo "Runner $RUNNER_NAME"; nproc; grep MemTotal /proc/meminfo
+          lscpu | grep -E 'Model name|Architecture|CPU.s.:'
+          docker version --format '{{.Server.Version}}'
+          echo "GOCACHE=$RUNNER_TEMP/pilot-gobuild" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/pilot-modules" >> "$GITHUB_ENV"
+      - name: Check out pinned GlassEQServer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: juhokoskela/GlassEQServer
+          ref: 87cd5a17938c2b9b6036a4d37b0b583406989261
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Restore and save Go modules
+        id: module-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ runner.temp }}/pilot-modules
+          key: yieldd-pilot-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.runner }}
+      - name: Start PostgreSQL and apply migrations
+        run: |
+          set -euo pipefail
+          test "${{ steps.module-cache.outputs.cache-hit }}" != true
+          docker run -d --name pilot-postgres -p 127.0.0.1:5432:5432 -e POSTGRES_DB=glasseq -e POSTGRES_USER=glasseq -e POSTGRES_PASSWORD=glasseq postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+          for i in $(seq 60); do docker exec pilot-postgres pg_isready -h 127.0.0.1 -U glasseq && break; sleep 1; done
+          chmod -R a+rX migrations
+          docker run --rm --network host -v "$PWD/migrations:/migrations:ro" -e GOOSE_DRIVER=postgres -e GOOSE_DBSTRING="$GLASSEQ_TEST_DATABASE_URL" juhokoskela/goose:v3.27.3@sha256:db4be381f2173bfd8994b9ca03e2fa2f8d7692ac3cef4aa5e2059db3e760cc3d up
+      - name: Test with race detection
+        run: |
+          set -eu
+          go test -json -race -p 1 -count=1 ./... > "$RUNNER_TEMP/tests.jsonl" || { tail -40 "$RUNNER_TEMP/tests.jsonl"; exit 1; }
+          jq -s '{passed:map(select(.Action=="pass" and .Test))|length, postgres:map(select(.Action=="pass" and (.Test // ""|contains("PostgreSQL"))))|length}' "$RUNNER_TEMP/tests.jsonl"
+      - name: Vet
+        run: go vet ./...
+      - name: Build and verify service image
+        run: |
+          set -euo pipefail
+          docker build --progress=plain --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" -t local/glasseq-pilot .
+          cid=$(docker create local/glasseq-pilot)
+          docker cp "$cid:/usr/local/bin/glasseqserver" "$RUNNER_TEMP/glasseqserver"
+          docker rm "$cid"
+          sha256sum "$RUNNER_TEMP/glasseqserver"
+          result=0
+          docker run --rm --network none local/glasseq-pilot __yieldd_invalid__ >"$RUNNER_TEMP/diagnostic" 2>&1 || result=$?
+          test "$result" = 1
+          tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.msg=="invalid command"'
