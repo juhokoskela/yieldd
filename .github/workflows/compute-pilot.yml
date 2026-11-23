@@ -11,8 +11,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: primeA, runner: yd-e65f8b1a9e-prep-primeA, seed: A}
-          - {host: primeB, runner: yd-e65f8b1a9e-prep-primeB, seed: B}
+          - {host: primeA, runner: yd-e65f8b1a9e-prep2-primeA, seed: A}
+          - {host: primeB, runner: yd-e65f8b1a9e-prep2-primeB, seed: B}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
