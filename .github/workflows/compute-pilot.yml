@@ -11,7 +11,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: primeC, runner: yd-c883c8257c-producerC-primeC, seed: C}
+          - {host: cold, runner: yd-c883c8257c-upgrade-cold, seed: B}
+          - {host: seeded, runner: yd-c883c8257c-upgrade-seeded, seed: B}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
@@ -40,6 +41,34 @@ jobs:
           repository: juhokoskela/GlassEQServer
           ref: 87cd5a17938c2b9b6036a4d37b0b583406989261
           persist-credentials: false
+      - name: Restore exact archive
+        if: matrix.host == 'archive'
+        id: restore
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            /mnt/yd/go-build
+            /mnt/yd/go-modules
+            /opt/hostedtoolcache/go
+          key: yd-ebs-c883c8257c-${{ matrix.seed }}
+          fail-on-cache-miss: true
+      - name: Verify cache inputs
+        env:
+          ARM: ${{ matrix.host }}
+          EXACT: ${{ steps.restore.outputs.cache-hit }}
+        run: |
+          /usr/local/bin/yd-io
+          test ! -e /mnt/yd/go-build/consumer-only
+          echo "$GITHUB_RUN_ID" > /mnt/yd/go-build/consumer-only
+          if test "$ARM" = cold; then
+            test ! -e /mnt/yd/go-build/seed-marker
+            test ! -e /mnt/yd/primed
+          else
+            test "$(cat /mnt/yd/go-build/seed-marker)" = "${{ matrix.seed }}"
+            test -f /mnt/yd/primed
+          fi
+          if test "$ARM" = archive; then test "$EXACT" = true; fi
+          echo VERIFIED_CACHE_INPUTS_"$ARM"
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
@@ -96,5 +125,3 @@ jobs:
           docker run --rm --network none local/glasseq-pilot:job-$GITHUB_RUN_ID __yieldd_invalid__ >"$RUNNER_TEMP/diagnostic" 2>&1 || result=$?
           test "$result" = 1
           tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.msg=="invalid command"'
-      - name: Stamp verified cache input
-        run: echo "${{ matrix.seed }}" > /mnt/yd/go-build/seed-marker
