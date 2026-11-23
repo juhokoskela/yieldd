@@ -11,9 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: seeded, runner: yd-e65f8b1a9e-r2-seeded, seed: B}
-          - {host: cold, runner: yd-e65f8b1a9e-r2-cold, seed: B}
-          - {host: archive, runner: yd-e65f8b1a9e-r2-archive, seed: B}
+          - {host: cold, runner: yd-e65f8b1a9e-r3-cold, seed: A}
+          - {host: archive, runner: yd-e65f8b1a9e-r3-archive, seed: A}
+          - {host: seeded, runner: yd-e65f8b1a9e-r3-seeded, seed: A}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
