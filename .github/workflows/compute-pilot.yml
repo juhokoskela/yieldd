@@ -11,7 +11,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: primeS2, runner: yd-712aff327d-producerS2-primeS2, seed: S2}
+          - {host: seeded001, runner: yd-712aff327d-b00-leaf-seeded001, seed: S1}
+          - {host: seeded003, runner: yd-712aff327d-b00-leaf-seeded003, seed: S3}
+          - {host: seeded005, runner: yd-712aff327d-b00-leaf-seeded005, seed: S2}
+          - {host: seeded007, runner: yd-712aff327d-b00-leaf-seeded007, seed: S1}
+          - {host: seeded009, runner: yd-712aff327d-b00-leaf-seeded009, seed: S3}
+          - {host: seeded011, runner: yd-712aff327d-b00-leaf-seeded011, seed: S2}
+          - {host: seeded013, runner: yd-712aff327d-b00-leaf-seeded013, seed: S1}
+          - {host: seeded015, runner: yd-712aff327d-b00-leaf-seeded015, seed: S3}
+          - {host: seeded017, runner: yd-712aff327d-b00-leaf-seeded017, seed: S2}
+          - {host: seeded019, runner: yd-712aff327d-b00-leaf-seeded019, seed: S1}
+          - {host: seeded021, runner: yd-712aff327d-b00-leaf-seeded021, seed: S3}
+          - {host: seeded023, runner: yd-712aff327d-b00-leaf-seeded023, seed: S2}
+          - {host: seeded025, runner: yd-712aff327d-b00-leaf-seeded025, seed: S1}
+          - {host: seeded027, runner: yd-712aff327d-b00-leaf-seeded027, seed: S3}
+          - {host: seeded029, runner: yd-712aff327d-b00-leaf-seeded029, seed: S2}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
@@ -40,6 +54,34 @@ jobs:
           repository: juhokoskela/GlassEQServer
           ref: 87cd5a17938c2b9b6036a4d37b0b583406989261
           persist-credentials: false
+      - name: Restore exact archive
+        if: matrix.host == 'archive'
+        id: restore
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            /mnt/yd/go-build
+            /mnt/yd/go-modules
+            /opt/hostedtoolcache/go
+          key: yd-ebs-712aff327d-${{ matrix.seed }}
+          fail-on-cache-miss: true
+      - name: Verify cache inputs
+        env:
+          ARM: ${{ matrix.host }}
+          EXACT: ${{ steps.restore.outputs.cache-hit }}
+        run: |
+          /usr/local/bin/yd-io
+          test ! -e /mnt/yd/go-build/consumer-only
+          echo "$GITHUB_RUN_ID" > /mnt/yd/go-build/consumer-only
+          if test "$ARM" = cold; then
+            test ! -e /mnt/yd/go-build/seed-marker
+            test ! -e /mnt/yd/primed
+          else
+            test "$(cat /mnt/yd/go-build/seed-marker)" = "${{ matrix.seed }}"
+            test -f /mnt/yd/primed
+          fi
+          if test "$ARM" = archive; then test "$EXACT" = true; fi
+          echo VERIFIED_CACHE_INPUTS_"$ARM"
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
@@ -57,6 +99,12 @@ jobs:
           for i in $(seq 60); do docker exec pilot-postgres pg_isready -h 127.0.0.1 -U glasseq && break; sleep 1; done
           chmod -R a+rX migrations
           docker run --rm --network host -v "$PWD/migrations:/migrations:ro" -e GOOSE_DRIVER=postgres -e GOOSE_DBSTRING="$GLASSEQ_TEST_DATABASE_URL" juhokoskela/goose:v3.27.3@sha256:db4be381f2173bfd8994b9ca03e2fa2f8d7692ac3cef4aa5e2059db3e760cc3d up
+      - name: Change the command usage in this checkout
+        run: |
+          /usr/local/bin/yd-io
+          set -eu
+          sed -i 's/usage: glasseqserver \[check-stripe-catalog\]/usage: glasseqserver [check-stripe-catalog] (cache probe)/' cmd/glasseqserver/main.go
+          grep -Fq '(cache probe)' cmd/glasseqserver/main.go
       - name: Test with race detection
         run: |
           /usr/local/bin/yd-io
@@ -96,5 +144,4 @@ jobs:
           docker run --rm --network none local/glasseq-pilot:job-$GITHUB_RUN_ID __yieldd_invalid__ >"$RUNNER_TEMP/diagnostic" 2>&1 || result=$?
           test "$result" = 1
           tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.msg=="invalid command"'
-      - name: Stamp verified cache input
-        run: echo "${{ matrix.seed }}" > /mnt/yd/go-build/seed-marker
+          tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.error | endswith("(cache probe)")'
