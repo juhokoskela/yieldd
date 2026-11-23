@@ -11,7 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: primeA, runner: yd-c883c8257c-producerA-primeA, seed: A}
+          - {host: primeB, runner: yd-c883c8257c-producerB-primeB, seed: B}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           repository: juhokoskela/GlassEQServer
-          ref: 55079e302f1cc450559882a63230c6e9521435ac
+          ref: 6d00d6d855651bcd11af1e496a36891a85f8d5b5
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
