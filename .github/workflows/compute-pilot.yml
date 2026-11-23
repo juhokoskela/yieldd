@@ -11,21 +11,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: seeded002, runner: yd-712aff327d-b00-internal-seeded002, seed: S2}
-          - {host: seeded004, runner: yd-712aff327d-b00-internal-seeded004, seed: S1}
-          - {host: seeded006, runner: yd-712aff327d-b00-internal-seeded006, seed: S3}
-          - {host: seeded008, runner: yd-712aff327d-b00-internal-seeded008, seed: S2}
-          - {host: seeded010, runner: yd-712aff327d-b00-internal-seeded010, seed: S1}
-          - {host: seeded012, runner: yd-712aff327d-b00-internal-seeded012, seed: S3}
-          - {host: seeded014, runner: yd-712aff327d-b00-internal-seeded014, seed: S2}
-          - {host: seeded016, runner: yd-712aff327d-b00-internal-seeded016, seed: S1}
-          - {host: seeded018, runner: yd-712aff327d-b00-internal-seeded018, seed: S3}
-          - {host: seeded020, runner: yd-712aff327d-b00-internal-seeded020, seed: S2}
-          - {host: seeded022, runner: yd-712aff327d-b00-internal-seeded022, seed: S1}
-          - {host: seeded024, runner: yd-712aff327d-b00-internal-seeded024, seed: S3}
-          - {host: seeded026, runner: yd-712aff327d-b00-internal-seeded026, seed: S2}
-          - {host: seeded028, runner: yd-712aff327d-b00-internal-seeded028, seed: S1}
-          - {host: seeded030, runner: yd-712aff327d-b00-internal-seeded030, seed: S3}
+          - {host: seeded031, runner: yd-712aff327d-b01-leaf-seeded031, seed: S1}
+          - {host: seeded033, runner: yd-712aff327d-b01-leaf-seeded033, seed: S3}
+          - {host: seeded035, runner: yd-712aff327d-b01-leaf-seeded035, seed: S2}
+          - {host: seeded037, runner: yd-712aff327d-b01-leaf-seeded037, seed: S1}
+          - {host: seeded039, runner: yd-712aff327d-b01-leaf-seeded039, seed: S3}
+          - {host: seeded041, runner: yd-712aff327d-b01-leaf-seeded041, seed: S2}
+          - {host: seeded043, runner: yd-712aff327d-b01-leaf-seeded043, seed: S1}
+          - {host: seeded045, runner: yd-712aff327d-b01-leaf-seeded045, seed: S3}
+          - {host: seeded047, runner: yd-712aff327d-b01-leaf-seeded047, seed: S2}
+          - {host: seeded049, runner: yd-712aff327d-b01-leaf-seeded049, seed: S1}
+          - {host: seeded051, runner: yd-712aff327d-b01-leaf-seeded051, seed: S3}
+          - {host: seeded053, runner: yd-712aff327d-b01-leaf-seeded053, seed: S2}
+          - {host: seeded055, runner: yd-712aff327d-b01-leaf-seeded055, seed: S1}
+          - {host: seeded057, runner: yd-712aff327d-b01-leaf-seeded057, seed: S3}
+          - {host: seeded059, runner: yd-712aff327d-b01-leaf-seeded059, seed: S2}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
@@ -99,11 +99,12 @@ jobs:
           for i in $(seq 60); do docker exec pilot-postgres pg_isready -h 127.0.0.1 -U glasseq && break; sleep 1; done
           chmod -R a+rX migrations
           docker run --rm --network host -v "$PWD/migrations:/migrations:ro" -e GOOSE_DRIVER=postgres -e GOOSE_DBSTRING="$GLASSEQ_TEST_DATABASE_URL" juhokoskela/goose:v3.27.3@sha256:db4be381f2173bfd8994b9ca03e2fa2f8d7692ac3cef4aa5e2059db3e760cc3d up
-      - name: Change the shared entitlement package
+      - name: Change the command usage in this checkout
         run: |
+          /usr/local/bin/yd-io
           set -eu
-          sed -i 's/entitlement issue time must not be negative/entitlement issue time must be nonnegative (canary)/' internal/entitlement/issuer.go
-          grep -Fq '(canary)' internal/entitlement/issuer.go
+          sed -i 's/usage: glasseqserver \[check-stripe-catalog\]/usage: glasseqserver [check-stripe-catalog] (cache probe)/' cmd/glasseqserver/main.go
+          grep -Fq '(cache probe)' cmd/glasseqserver/main.go
       - name: Test with race detection
         run: |
           /usr/local/bin/yd-io
@@ -143,4 +144,4 @@ jobs:
           docker run --rm --network none local/glasseq-pilot:job-$GITHUB_RUN_ID __yieldd_invalid__ >"$RUNNER_TEMP/diagnostic" 2>&1 || result=$?
           test "$result" = 1
           tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.msg=="invalid command"'
-          grep -aFq 'entitlement issue time must be nonnegative (canary)' "$RUNNER_TEMP/glasseqserver"
+          tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.error | endswith("(cache probe)")'
