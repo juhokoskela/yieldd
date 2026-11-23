@@ -1,7 +1,7 @@
 name: Single-use ARM64 compute pilot
 on:
   push:
-    branches: [bench/phoenix-arm-b11c27e3-15]
+    branches: [bench/m9g-seeded-canary-c883c8257c]
 permissions:
   contents: read
 jobs:
@@ -11,74 +11,55 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: Altra slot 0, runner: yd-pnap-b11c27e3-15-0}
-          - {host: Altra slot 1, runner: yd-pnap-b11c27e3-15-1}
-          - {host: Altra slot 2, runner: yd-pnap-b11c27e3-15-2}
-          - {host: Altra slot 3, runner: yd-pnap-b11c27e3-15-3}
-          - {host: Altra slot 4, runner: yd-pnap-b11c27e3-15-4}
-          - {host: Altra slot 5, runner: yd-pnap-b11c27e3-15-5}
-          - {host: Altra slot 6, runner: yd-pnap-b11c27e3-15-6}
-          - {host: Altra slot 7, runner: yd-pnap-b11c27e3-15-7}
-          - {host: Altra slot 8, runner: yd-pnap-b11c27e3-15-8}
-          - {host: Altra slot 9, runner: yd-pnap-b11c27e3-15-9}
-          - {host: Altra slot 10, runner: yd-pnap-b11c27e3-15-10}
-          - {host: Altra slot 11, runner: yd-pnap-b11c27e3-15-11}
-          - {host: Altra slot 12, runner: yd-pnap-b11c27e3-15-12}
-          - {host: Altra slot 13, runner: yd-pnap-b11c27e3-15-13}
-          - {host: Altra slot 14, runner: yd-pnap-b11c27e3-15-14}
+          - {host: primeA, runner: yd-c883c8257c-producerA-primeA, seed: A}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
-      GOPROXY: "off"
       GOTOOLCHAIN: local
       GOWORK: 'off'
       GLASSEQ_TEST_DATABASE_URL: postgres://glasseq:glasseq@127.0.0.1:5432/glasseq?sslmode=disable
     steps:
       - name: Record host
         run: |
+          /usr/local/bin/yd-io
           set -eu
+          df -h /mnt/yd
           test "$(uname -m)" = aarch64
           echo "Runner $RUNNER_NAME"; nproc; grep MemTotal /proc/meminfo
           lscpu | grep -E 'Model name|Architecture|CPU.s.:'
           docker version --format '{{.Server.Version}}'
-          echo "GOCACHE=/opt/yieldd-warm/go-build" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=/opt/yieldd-warm/go-modules" >> "$GITHUB_ENV"
-          git init -q "$GITHUB_WORKSPACE"
-          echo /opt/yieldd-warm/source.git/objects > "$GITHUB_WORKSPACE/.git/objects/info/alternates"
-          if test -f /opt/yieldd-warm/source.git/shallow; then cp /opt/yieldd-warm/source.git/shallow "$GITHUB_WORKSPACE/.git/shallow"; fi
-          git -C "$GITHUB_WORKSPACE" remote add origin https://github.com/juhokoskela/GlassEQServer
-          git -C "$GITHUB_WORKSPACE" reset --hard 87cd5a17938c2b9b6036a4d37b0b583406989261
+          echo "GOCACHE=/mnt/yd/go-build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=/mnt/yd/go-modules" >> "$GITHUB_ENV"
+          grep -q '/pilot.slice/' /proc/self/cgroup
+          test "$(cat /sys/fs/cgroup/pilot.slice/memory.max)" = 12884901888
+          test "$(nproc)" = 4
+          echo VERIFIED_RUNNER_4CPU_12G
       - name: Check out pinned GlassEQServer
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           repository: juhokoskela/GlassEQServer
-          ref: 87cd5a17938c2b9b6036a4d37b0b583406989261
+          ref: 55079e302f1cc450559882a63230c6e9521435ac
           persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: '1.27.4'
+          go-version-file: go.mod
           cache: false
       - name: Start PostgreSQL and apply migrations
         run: |
+          /usr/local/bin/yd-io
           set -euo pipefail
-          test -s "$GITHUB_WORKSPACE/.git/objects/info/alternates"
-          for action in "$RUNNER_WORKSPACE/../_actions/actions/"*/*; do test -L "$action"; done
-          test -s /opt/hostedtoolcache/go/1.27.4/arm64/VERSION
-          echo "WARM_INPUTS verified"
           test -z "$(docker ps -aq)"
           test -z "$(docker volume ls -q)"
           docker run -d --name pilot-postgres -p 127.0.0.1:5432:5432 -e POSTGRES_DB=glasseq -e POSTGRES_USER=glasseq -e POSTGRES_PASSWORD=glasseq postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+          grep -q '/pilot.slice/' "/proc/$(docker inspect -f '{{.State.Pid}}' pilot-postgres)/cgroup"
+          echo VERIFIED_CONTAINER_SLICE
           for i in $(seq 60); do docker exec pilot-postgres pg_isready -h 127.0.0.1 -U glasseq && break; sleep 1; done
           chmod -R a+rX migrations
           docker run --rm --network host -v "$PWD/migrations:/migrations:ro" -e GOOSE_DRIVER=postgres -e GOOSE_DBSTRING="$GLASSEQ_TEST_DATABASE_URL" juhokoskela/goose:v3.27.3@sha256:db4be381f2173bfd8994b9ca03e2fa2f8d7692ac3cef4aa5e2059db3e760cc3d up
-      - name: Change the command usage in this checkout
-        run: |
-          set -eu
-          sed -i 's/usage: glasseqserver \[check-stripe-catalog\]/usage: glasseqserver [check-stripe-catalog] (cache probe)/' cmd/glasseqserver/main.go
-          grep -Fq '(cache probe)' cmd/glasseqserver/main.go
       - name: Test with race detection
         run: |
+          /usr/local/bin/yd-io
           set -eu
           go test -x -json -race -p 1 -count=1 ./... > "$RUNNER_TEMP/tests.jsonl" 2>"$RUNNER_TEMP/race-trace" || { jq -c 'select(.Action=="fail" or .Action=="build-fail") | {Package, Test, Action}' "$RUNNER_TEMP/tests.jsonl"
             jq -rs 'map(select(.Action=="fail" and .Test) | [.Package,.Test]) as $failed | .[] | select(.Action=="output" and ([.Package,.Test] as $p | $failed | index($p))) | .Output' "$RUNNER_TEMP/tests.jsonl" | tail -100
@@ -87,23 +68,33 @@ jobs:
           echo "RACE_COMPILER_INVOCATIONS=$(grep -cE '/pkg/tool/linux_arm64/compile ' "$RUNNER_TEMP/race-trace" || true)"
           awk '/(compile|tool[.]compile)[[:space:]].*-o / {print "GO_COMPILE_EXAMPLE " substr($0,1,180); if (++n==2) exit}' "$RUNNER_TEMP/race-trace"
           grep -E '^(WORK=|[^#].*(pkg/tool|/compile | tool .*compile))' "$RUNNER_TEMP/race-trace" | cut -c1-145 | head -5 || true
+          jq -r 'select(.Action=="pass" and .Test) | [.Package,.Test] | @tsv' "$RUNNER_TEMP/tests.jsonl" | LC_ALL=C sort | sha256sum | awk '{print "TEST_SET_SHA=" $1}'
           echo "RACE_TEST_STARTS=$(jq -s '[.[] | select(.Action=="run" and .Test)] | length' "$RUNNER_TEMP/tests.jsonl")"
           jq -s '{passed:map(select(.Action=="pass" and .Test))|length, postgres:map(select(.Action=="pass" and (.Test // ""|contains("PostgreSQL"))))|length}' "$RUNNER_TEMP/tests.jsonl"
       - name: Vet
         run: |
+          /usr/local/bin/yd-io
           go vet -x ./... 2>"$RUNNER_TEMP/vet-trace" || { tail -40 "$RUNNER_TEMP/vet-trace"; exit 1; }
           echo "VET_COMPILER_INVOCATIONS=$(grep -cE '/pkg/tool/linux_arm64/compile ' "$RUNNER_TEMP/vet-trace" || true)"
       - name: Build and verify service image
         run: |
+          /usr/local/bin/yd-io
           set -euo pipefail
           sed 's@^RUN CGO_ENABLED=0 go build@RUN --mount=type=cache,id=glasseq-go1274-alpine-arm64,target=/root/.cache/go-build CGO_ENABLED=0 go build@' Dockerfile > "$RUNNER_TEMP/Dockerfile.yieldd"
           docker build --progress=plain -f "$RUNNER_TEMP/Dockerfile.yieldd" --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" -t local/glasseq-pilot:job-$GITHUB_RUN_ID .
           cid=$(docker create local/glasseq-pilot:job-$GITHUB_RUN_ID)
           docker cp "$cid:/usr/local/bin/glasseqserver" "$RUNNER_TEMP/glasseqserver"
+          docker cp "$cid:/etc/ssl/certs/ca-certificates.crt" "$RUNNER_TEMP/certificates"
+          docker cp "$cid:/usr/share/licenses/GlassEQServer/LICENSE" "$RUNNER_TEMP/license"
+          (cd "$RUNNER_TEMP" && sha256sum glasseqserver certificates license) | sha256sum | awk '{print "PAYLOAD_SHA=" $1}'
+          echo "SOURCE_SHA=$(git rev-parse HEAD)"
+          echo "SOURCE_DIFF=$(git diff --binary | sha256sum | cut -d' ' -f1)"
           docker rm "$cid"
+
           sha256sum "$RUNNER_TEMP/glasseqserver"
           result=0
           docker run --rm --network none local/glasseq-pilot:job-$GITHUB_RUN_ID __yieldd_invalid__ >"$RUNNER_TEMP/diagnostic" 2>&1 || result=$?
           test "$result" = 1
           tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.msg=="invalid command"'
-          tail -1 "$RUNNER_TEMP/diagnostic" | jq -e '.error | endswith("(cache probe)")'
+      - name: Stamp verified cache input
+        run: echo "${{ matrix.seed }}" > /mnt/yd/go-build/seed-marker
