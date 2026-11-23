@@ -11,8 +11,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: cold, runner: yd-c883c8257c-internal-cold, seed: C}
-          - {host: seeded, runner: yd-c883c8257c-internal-seeded, seed: C}
+          - {host: cold, runner: yd-c883c8257c-verify-cold, seed: C}
+          - {host: seeded, runner: yd-c883c8257c-verify-seeded, seed: C}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
@@ -95,7 +95,7 @@ jobs:
         run: |
           /usr/local/bin/yd-io
           set -eu
-          go test -x -json -race -p 1 -count=1 ./... > "$RUNNER_TEMP/tests.jsonl" 2>"$RUNNER_TEMP/race-trace" || { jq -c 'select(.Action=="fail" or .Action=="build-fail") | {Package, Test, Action}' "$RUNNER_TEMP/tests.jsonl"
+          GODEBUG=gocacheverify=1 go test -x -json -race -p 1 -count=1 ./... > "$RUNNER_TEMP/tests.jsonl" 2>"$RUNNER_TEMP/race-trace" || { jq -c 'select(.Action=="fail" or .Action=="build-fail") | {Package, Test, Action}' "$RUNNER_TEMP/tests.jsonl"
             jq -rs 'map(select(.Action=="fail" and .Test) | [.Package,.Test]) as $failed | .[] | select(.Action=="output" and ([.Package,.Test] as $p | $failed | index($p))) | .Output' "$RUNNER_TEMP/tests.jsonl" | tail -100
             tail -20 "$RUNNER_TEMP/race-trace"; exit 1; }
           jq -r 'select(.Action == "build-output") | .Output' "$RUNNER_TEMP/tests.jsonl" >> "$RUNNER_TEMP/race-trace"
