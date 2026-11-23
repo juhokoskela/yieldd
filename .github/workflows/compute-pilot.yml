@@ -11,8 +11,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {host: cold, runner: yd-c883c8257c-upgrade-cold, seed: B}
-          - {host: seeded, runner: yd-c883c8257c-upgrade-seeded, seed: B}
+          - {host: cold, runner: yd-c883c8257c-unchanged-cold, seed: C}
+          - {host: seeded, runner: yd-c883c8257c-unchanged-seeded, seed: C}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 18
     env:
