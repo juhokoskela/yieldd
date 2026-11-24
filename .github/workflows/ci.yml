@@ -29,26 +29,23 @@ jobs:
           swift --version
           echo "id=$({ xcodebuild -version; swift --version; } | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Go for the network relay
+      - name: Set up Go for the relay and coordinator fixture
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: Prototypes/RunnerNetwork/go.mod
-          cache-dependency-path: Prototypes/RunnerNetwork/go.sum
+          cache-dependency-path: |
+            Prototypes/RunnerNetwork/go.sum
+            Server/go.sum
 
       - name: Restore and save build cache
-        id: build-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        env:
+          CACHE_PREFIX: yieldd-build-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Cache/**', 'Scripts/build-cache-server.sh', 'Prototypes/RunnerNetwork/go.sum', 'Prototypes/RunnerNetwork/gvproxy.patch', 'Prototypes/RunnerNetwork/source-paths.sh') }}
         with:
           path: .build
-          key: yieldd-build-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Cache/**', 'Scripts/build-cache-server.sh', 'Prototypes/RunnerNetwork/go.sum', 'Prototypes/RunnerNetwork/gvproxy.patch') }}-${{ github.sha }}
+          key: ${{ env.CACHE_PREFIX }}-${{ github.sha }}
           restore-keys: |
-            yieldd-build-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Cache/**', 'Scripts/build-cache-server.sh', 'Prototypes/RunnerNetwork/go.sum', 'Prototypes/RunnerNetwork/gvproxy.patch') }}-
-
-      - name: Verify restored build products
-        if: steps.build-cache.outputs.cache-hit == 'true'
-        run: |
-          test -x .build/release/yieldd
-          test -x .build/yieldd.app/Contents/Helpers/yieldd-cache-server
+            ${{ env.CACHE_PREFIX }}-
 
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
