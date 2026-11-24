@@ -301,6 +301,10 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, nil
 	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
+	if a.fleet != nil {
+		err := a.provisionEC2(ctx, l)
+		return a.lease == nil, err
+	}
 	if err := a.saveLocal(nil); err != nil {
 		return false, err
 	}

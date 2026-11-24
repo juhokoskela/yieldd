@@ -22,10 +22,15 @@ type fakeFleet struct {
 	instance                        ec2Host
 	launched, terminated, published int
 	selected                        string
+	seedCalls                       int
+	seedErr                         error
 	lostReply                       bool
 }
 
-func (f *fakeFleet) seed(context.Context) (string, error) { return f.selected, nil }
+func (f *fakeFleet) seed(context.Context) (string, error) {
+	f.seedCalls++
+	return f.selected, f.seedErr
+}
 func (f *fakeFleet) launch(_ context.Context, l *lease) (ec2Host, error) {
 	f.launched++
 	f.instance = ec2Host{"i-1", "vol-2", "running"}
@@ -245,6 +250,30 @@ func TestEC2RecoversLostLaunchResponseFromJournal(t *testing.T) {
 	}
 }
 
+func TestEC2AdmissionBacksOffBeforeReserving(t *testing.T) {
+	c, w, _ := newFixture(t)
+	f := &fakeFleet{seedErr: &temporaryStatusError{fmt.Errorf("occupied")}}
+	c.fleet = f
+	saves := 0
+	save := c.save
+	c.save = func(s *state) error { saves++; return save(s) }
+	for n := 1; n <= 3; n++ {
+		for range 2 {
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if f.seedCalls != n || c.ec2RetryDelay != cleanupRetryDelay<<(n-1) || saves != 0 || len(w.events) != 0 || c.paused != nil {
+			t.Fatal("unexpected admission work", f.seedCalls, c.ec2RetryDelay, saves, w.events, c.paused)
+		}
+		c.ec2RetryAt = time.Now().Add(-time.Second)
+	}
+	f.seedErr = nil
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || f.launched != 1 || !c.ec2RetryAt.IsZero() || c.ec2RetryDelay != 0 {
+		t.Fatal("failed to admit runner after capacity returned", err)
+	}
+}
+
 func TestEC2RechecksDemandBeforeLaunchReplay(t *testing.T) {
 	for _, demand := range []struct{ listener, github, launches int }{{0, 1, 1}, {1, 0, 1}, {1, 1, 2}} {
 		c, w, _ := newFixture(t)
@@ -319,6 +348,9 @@ func TestEC2CompletedRunnerRetiresWithoutListenerPoll(t *testing.T) {
 	}()
 	select {
 	case <-cleaned:
+		if err := loop.invoke(t.Context(), func(context.Context) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(2 * cleanupRetryDelay):
 		t.Fatal("completed runner retained until the next listener poll")
 	}

@@ -45,6 +45,9 @@ func (s *coordinatorLoop) run() error {
 		var expired <-chan time.Time
 
 		deadline := s.worker.demandRetryAt
+		if when := s.worker.ec2RetryAt; s.demandObserved && !s.worker.demandUnavailable && s.desiredCount > 0 && !when.IsZero() && (deadline.IsZero() || when.Before(deadline)) {
+			deadline = when
+		}
 		retryPending := false
 		if s.worker.verificationPaused() && (deadline.IsZero() || s.worker.verificationRetryAt.Before(deadline)) {
 			deadline = s.worker.verificationRetryAt

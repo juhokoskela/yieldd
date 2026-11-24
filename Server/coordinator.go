@@ -46,6 +46,8 @@ type coordinator struct {
 	fleet                  ec2Fleet
 	ec2Auth                []byte
 	ec2Owner               string
+	ec2RetryAt             time.Time
+	ec2RetryDelay          time.Duration
 	seedAllowed            func(context.Context, int64) (bool, error)
 	state                  *state
 	save                   func(*state) error
@@ -276,6 +278,9 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if !time.Now().Before(c.ec2RetryAt) {
+		c.ec2RetryAt = time.Time{}
+	}
 	if c.fallbackCount() != 0 {
 		// A queue already using fallback must not hold FIFO priority while
 		// blocked on GitHub. Rejoin after reconciliation if it still needs a Mac.
@@ -497,6 +502,9 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		return nil
 	}
 	a := &assignment{coordinator: c}
+	if !local && c.fleet != nil {
+		return a.provisionEC2(ctx, l)
+	}
 	if err := a.replace(l); err != nil {
 		return err
 	}
@@ -593,9 +601,6 @@ func (a *assignment) recoveryTarget() string {
 func (a *assignment) provisionHosted(ctx context.Context) error {
 	if a.state.Config.LocalOnly {
 		return errors.New("local-only queues cannot dispatch fallback runners")
-	}
-	if a.fleet != nil {
-		return a.provisionEC2(ctx)
 	}
 	l := a.lease
 	generated, err := a.generateRegistration(ctx)

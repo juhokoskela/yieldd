@@ -116,18 +116,42 @@ func ec2Key() ([]byte, error) {
 	return b, nil
 }
 
-func (a *assignment) provisionEC2(ctx context.Context) error {
-	seed, err := a.fleet.seed(ctx)
-	if err != nil {
-		return err
+func (a *assignment) provisionEC2(ctx context.Context, l *lease) error {
+	if !time.Now().Before(a.ec2RetryAt) {
+		seed, err := a.fleet.seed(ctx)
+		if err == nil {
+			a.ec2RetryAt, a.ec2RetryDelay = time.Time{}, 0
+			next := *l
+			next.Local = nil
+			next.DispatchIntent = true
+			next.EC2 = &ec2Lease{Seed: seed, KeyID: ec2KeyID(a.ec2Auth)}
+			if err := a.replace(&next); err != nil {
+				return err
+			}
+			if err := a.launchEC2(ctx); err != nil {
+				return err
+			}
+			a.device.redrive(a.state.Owner)
+			return nil
+		}
+		if !retryableBootstrapVerification(err) {
+			return err
+		}
+		a.ec2RetryDelay = min(max(cleanupRetryDelay, a.ec2RetryDelay*2), verificationMaximumRetryDelay)
+		a.ec2RetryAt = time.Now().Add(a.ec2RetryDelay)
+		a.logger.Warn("EC2 admission deferred", "retry_delay", a.ec2RetryDelay, "error", err)
 	}
-	next := *a.lease
-	next.DispatchIntent = true
-	next.EC2 = &ec2Lease{Seed: seed, KeyID: ec2KeyID(a.ec2Auth)}
-	if err := a.replace(&next); err != nil {
-		return err
+	// An expired Mac offer has no registration to clean up. A new hosted
+	// assignment needs no journal entry until EC2 admission succeeds.
+	if a.lease != nil {
+		if err := a.replace(nil); err != nil {
+			return err
+		}
 	}
-	return a.launchEC2(ctx)
+	if a.state.Config.DeviceID != "" {
+		a.device.wait(a.state.Owner)
+	}
+	return nil
 }
 
 func (a *assignment) launchEC2(ctx context.Context) error {
