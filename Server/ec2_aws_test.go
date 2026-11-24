@@ -12,6 +12,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 )
 
+func testEC2Client(endpoint string) *ec2.Client {
+	return ec2.New(ec2.Options{BaseEndpoint: aws.String(endpoint), Region: "eu-central-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{AccessKeyID: "local", SecretAccessKey: "local"}, nil
+	})})
+}
+
 func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 	var deleted []string
 	created := 0
@@ -60,9 +66,7 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	api := ec2.New(ec2.Options{BaseEndpoint: aws.String(srv.URL), Region: "eu-central-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
-		return aws.Credentials{AccessKeyID: "local", SecretAccessKey: "local"}, nil
-	})})
+	api := testEC2Client(srv.URL)
 	f := awsFleet{api: api, cfg: exampleEC2(), owner: "test"}
 	seed, err := f.seed(t.Context())
 	if err != nil || seed != "snap-3" || strings.Join(deleted, ",") != "snap-1,snap-0" {
@@ -82,5 +86,44 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 	busy = true
 	if _, err := f.seed(t.Context()); !retryableBootstrapVerification(err) {
 		t.Fatal("occupied fleet", err)
+	}
+}
+
+func TestEC2RetirementWaitsOnlyForActionableDisks(t *testing.T) {
+	for _, tc := range []struct {
+		states   []string
+		retiring bool
+		deletes  int
+	}{
+		{nil, true, 0},
+		{[]string{"deleted", "deleting"}, true, 0},
+		{[]string{"deleting", "in-use"}, false, 0},
+		{[]string{"deleting", "available"}, false, 1},
+		{[]string{"error"}, false, 0},
+	} {
+		t.Run(strings.Join(tc.states, "-"), func(t *testing.T) {
+			deletes := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.FormValue("Action") {
+				case "DescribeVolumes":
+					fmt.Fprint(w, "<DescribeVolumesResponse><volumeSet>")
+					for i, s := range tc.states {
+						fmt.Fprintf(w, "<item><volumeId>vol-%d</volumeId><status>%s</status></item>", i, s)
+					}
+					fmt.Fprint(w, "</volumeSet></DescribeVolumesResponse>")
+				case "DeleteVolume":
+					deletes++
+					fmt.Fprint(w, "<DeleteVolumeResponse><return>true</return></DeleteVolumeResponse>")
+				default:
+					t.Error("unexpected EC2 action")
+				}
+			}))
+			defer srv.Close()
+			f := awsFleet{api: testEC2Client(srv.URL), cfg: exampleEC2(), owner: "canary"}
+			got, err := f.disksRetiring(t.Context(), &lease{Name: fixtureRunner})
+			if err != nil || got != tc.retiring || deletes != tc.deletes {
+				t.Fatal(got, deletes, err)
+			}
+		})
 	}
 }

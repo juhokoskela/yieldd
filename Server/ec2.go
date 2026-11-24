@@ -91,7 +91,7 @@ type ec2Fleet interface {
 	launch(context.Context, *lease) (ec2Host, error)
 	host(context.Context, *lease) (ec2Host, error)
 	terminate(context.Context, string) error
-	disksGone(context.Context, *lease) (bool, error)
+	disksRetiring(context.Context, *lease) (bool, error)
 	publish(context.Context, *lease) error
 }
 
@@ -179,8 +179,8 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 		}
 		fallthrough
 	case "terminated":
-		gone, err := a.fleet.disksGone(ctx, l)
-		if err != nil || !gone {
+		retiring, err := a.fleet.disksRetiring(ctx, l)
+		if err != nil || !retiring {
 			return false, err
 		}
 		if !recoverOnly && !e.Completed {

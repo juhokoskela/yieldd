@@ -40,8 +40,8 @@ func (f *fakeFleet) terminate(context.Context, string) error {
 	f.instance.state = "shutting-down"
 	return nil
 }
-func (f *fakeFleet) disksGone(context.Context, *lease) (bool, error) { return !f.pendingDisk, nil }
-func (f *fakeFleet) publish(context.Context, *lease) error           { f.published++; return nil }
+func (f *fakeFleet) disksRetiring(context.Context, *lease) (bool, error) { return !f.pendingDisk, nil }
+func (f *fakeFleet) publish(context.Context, *lease) error               { f.published++; return nil }
 
 func exampleEC2() ec2Config {
 	return ec2Config{Repository: testConfig.Repository, Account: "111111111111", Region: "eu-central-1", Image: "ami-0123456789abcdef0", Subnet: "subnet-0123456789abcdef0", Group: "sg-0123456789abcdef0", Endpoint: "https://runner.example.test", Workflow: ".github/workflows/ci.yml", Job: "build"}

@@ -219,16 +219,21 @@ func (f *awsFleet) terminate(ctx context.Context, id string) error {
 	return nil
 }
 
-// EC2 normally deletes both disks on termination. Keep the lease while that
-// completes and remove an available disk left behind by an interrupted detach.
-func (f *awsFleet) disksGone(ctx context.Context, l *lease) (bool, error) {
+// A terminated instance consumes no slot once EBS owns deletion of every disk.
+// EBS can report deleting for minutes after completing the cache snapshot.
+func (f *awsFleet) disksRetiring(ctx context.Context, l *lease) (bool, error) {
 	p, err := f.api.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{Filters: []types.Filter{
 		filter("tag:YielddOwner", f.owner), filter("tag:YielddLease", l.Name), filter("tag:YielddRepository", f.cfg.Repository),
 	}})
 	if err != nil {
 		return false, awsFailure("check runner disks", err)
 	}
+	retiring := true
 	for _, v := range p.Volumes {
+		if v.State == types.VolumeStateDeleting || v.State == types.VolumeStateDeleted {
+			continue
+		}
+		retiring = false
 		if v.State == types.VolumeStateAvailable && len(v.Attachments) == 0 {
 			_, err := f.api.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: v.VolumeId})
 			if err != nil {
@@ -239,7 +244,7 @@ func (f *awsFleet) disksGone(ctx context.Context, l *lease) (bool, error) {
 			}
 		}
 	}
-	return len(p.Volumes) == 0, nil
+	return retiring, nil
 }
 
 func (f *awsFleet) publish(ctx context.Context, l *lease) error {
