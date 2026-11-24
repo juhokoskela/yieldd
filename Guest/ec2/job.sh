@@ -1,13 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 umask 077
-trap 'systemctl --no-block poweroff' EXIT
+trap 'rm -f /run/yieldd-ec2-auth; systemctl --no-block poweroff' EXIT
 # Journald records both wall-clock and monotonic time for each marker.
 mark() { printf 'yieldd-startup %s\n' "$1"; }
 mark bootstrap-start
 endpoint=$1/v1/ec2/$2
-auth="Authorization: Bearer $3"
-mode=$4
+mode=$3
 [[ $(nproc) == 4 ]]
 # Nitro assigns NVMe device numbers independently of the requested EBS mapping.
 cache_device() {
@@ -55,7 +54,7 @@ mark docker-started
 
 # The runner consumes the credential from its process environment. Keep the file on tmpfs.
 mark register-start
-jit=$(curl -fsS --retry 5 --max-time 45 -X POST -H "$auth" "$endpoint/register")
+jit=$(curl -fsS --retry 5 --max-time 45 -X POST --header @/run/yieldd-ec2-auth "$endpoint/register")
 [[ -n $jit && $jit != *$'\n'* ]]
 mark register-complete
 printf 'ACTIONS_RUNNER_INPUT_JITCONFIG=%s\n' "$jit" > /run/yieldd-jit
@@ -75,7 +74,9 @@ umount "$cache"
 # A clean unmount flushes the EBS disk. The coordinator authorizes promotion.
 until_second=$((SECONDS + 60))
 while (( SECONDS < until_second )); do
-    code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -X POST -H "$auth" "$endpoint/quiesced") || break
-    [[ $code == 202 || $code == 503 ]] || break
+    remaining=$((until_second - SECONDS))
+    (( remaining > 0 )) || break
+    code=$(curl -sS --max-time "$remaining" -o /dev/null -w '%{http_code}' -X POST --header @/run/yieldd-ec2-auth "$endpoint/quiesced") || code=000
+    [[ $code == 202 || $code == 503 || $code == 000 ]] || break
     sleep 2
 done

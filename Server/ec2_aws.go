@@ -106,7 +106,14 @@ func (f *awsFleet) launchInput(l *lease) *ec2.RunInstancesInput {
 		mode = "seeded"
 	}
 	// Keep this request stable across restart. An ambiguous reply reuses the same client token.
-	data := fmt.Sprintf("#!/bin/sh\nexec systemd-run --quiet --unit=yieldd-bootstrap /usr/local/sbin/yieldd-ec2-job '%s' '%s' '%s' '%s'\n", f.cfg.Endpoint, l.Name, bootstrapToken(f.key, f.owner, l.Name), mode)
+	data := fmt.Sprintf(`#!/bin/sh
+set -eu
+umask 077
+cat >/run/yieldd-ec2-auth <<'HEADER'
+Authorization: Bearer %s
+HEADER
+exec systemd-run --quiet --unit=yieldd-bootstrap /usr/local/sbin/yieldd-ec2-job '%s' '%s' '%s'
+`, bootstrapToken(f.key, f.owner, l.Name), f.cfg.Endpoint, l.Name, mode)
 	tags := append(f.lineage(), tag("YielddLease", l.Name))
 	return &ec2.RunInstancesInput{
 		ClientToken:                       aws.String(l.Name),

@@ -516,7 +516,7 @@ func TestEC2LaunchIsPrivateAndReplayable(t *testing.T) {
 			t.Fatal("incorrect cache disk")
 		}
 		data, err := base64.StdEncoding.DecodeString(*in.UserData)
-		if err != nil || !strings.Contains(string(data), bootstrapToken(f.key, f.owner, l.Name)) || strings.Contains(string(data), "private-jit") {
+		if err != nil || !strings.Contains(string(data), "\nAuthorization: Bearer "+bootstrapToken(f.key, f.owner, l.Name)+"\nHEADER\n") || strings.Count(string(data), bootstrapToken(f.key, f.owner, l.Name)) != 1 || strings.Contains(string(data), "private-jit") {
 			t.Fatal("unexpected bootstrap envelope")
 		}
 	}
