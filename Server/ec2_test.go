@@ -107,7 +107,8 @@ func TestEC2Lifecycle(t *testing.T) {
 	if l.EC2.Instance != "" || l.EC2.Seed != "snap-1" || w.dispatched != 0 || w.runner != nil || f.launched != 1 {
 		t.Fatal(l, w.events)
 	}
-	c.verificationRetryAt = time.Time{} // Allow the first reconciliation after the lost launch reply.
+	l.Created = time.Now().Add(-6 * time.Minute) // A retried launch may boot after the five-minute replay window.
+	c.verificationRetryAt = time.Time{}          // Allow the first reconciliation after the lost launch reply.
 	loop := newCoordinatorLoop(t.Context(), c)
 	done := make(chan struct{})
 	go func() { defer close(done); _ = loop.run() }()
@@ -125,6 +126,16 @@ func TestEC2Lifecycle(t *testing.T) {
 	}
 	if request("register", "wrong").Code != 403 {
 		t.Fatal("accepted invalid credential")
+	}
+	offer := &lease{Local: &localLease{Phase: localOffered, Expires: time.Now().Add(offerLifetime)}}
+	if err := loop.invoke(t.Context(), func(context.Context) error { c.state.Leases["offered"] = offer; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := request("register", token).Code; got != http.StatusServiceUnavailable || l.EC2.Issuing || w.runner != nil {
+		t.Fatal("registration consumed a live Mac offer", got)
+	}
+	if err := loop.invoke(t.Context(), func(context.Context) error { delete(c.state.Leases, "offered"); return nil }); err != nil {
+		t.Fatal(err)
 	}
 	f.instance.volume = ""
 	first := request("register", token)
@@ -231,6 +242,85 @@ func TestEC2RecoversLostLaunchResponseFromJournal(t *testing.T) {
 	a := c.assigned(l.Name)
 	if _, err = a.reconcile(t.Context(), true); err != nil || a.lease.EC2.Instance != "i-1" || f.terminated != 1 || f.launched != 1 {
 		t.Fatal("ambiguous launch recovery", err)
+	}
+}
+
+func TestEC2RechecksDemandBeforeLaunchReplay(t *testing.T) {
+	for _, demand := range []struct{ listener, github, launches int }{{0, 1, 1}, {1, 0, 1}, {1, 1, 2}} {
+		c, w, _ := newFixture(t)
+		c.state.Config.EC2 = exampleEC2()
+		f := &fakeFleet{lostReply: true}
+		c.fleet = f
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		f.instance = ec2Host{}
+		c.verificationRetryAt = time.Time{}
+		w.assignedJobs = demand.github
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), demand.listener); err != nil || f.launched != demand.launches {
+			t.Fatal("unexpected launch replay", demand, f.launched, err)
+		}
+	}
+}
+
+func TestEC2ReleasesUnfulfilledOrUnusedRunner(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		c, _, _ := newFixture(t)
+		c.state.Config.EC2 = exampleEC2()
+		f := &fakeFleet{lostReply: !registered}
+		c.fleet = f
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		l := singleLease(c.state)
+		if registered {
+			l.EC2.Issuing, l.RunnerID = true, 7
+			f.instance.state = "terminated"
+		} else {
+			f.instance = ec2Host{}
+			l.Created = time.Now().Add(-11 * time.Minute)
+			c.verificationRetryAt = time.Time{}
+		}
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 0); err != nil || len(c.state.Leases) != 0 || f.launched != 1 {
+			t.Fatal("idle runner retained", registered, err)
+		}
+	}
+}
+
+func TestEC2CompletedRunnerRetiresWithoutListenerPoll(t *testing.T) {
+	c, _, _ := newFixture(t)
+	c.state.Config.EC2 = exampleEC2()
+	f := &fakeFleet{}
+	c.fleet = f
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	l := singleLease(c.state)
+	l.EC2.Issuing, l.EC2.Completed = true, true
+	f.instance.state = "terminated"
+	cleaned := make(chan struct{})
+	save := c.save
+	c.save = func(s *state) error {
+		err := save(s)
+		if err == nil && len(s.Leases) == 0 {
+			close(cleaned)
+		}
+		return err
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	loop := newCoordinatorLoop(ctx, c)
+	done := make(chan error, 1)
+	go func() { done <- loop.run() }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-cleaned:
+	case <-time.After(2 * cleanupRetryDelay):
+		t.Fatal("completed runner retained until the next listener poll")
 	}
 }
 

@@ -74,6 +74,8 @@ func configureEC2(configs []config, raw string) error {
 	return errors.New("EC2 requires a configured Mac-connected Linux repository with hosted fallback")
 }
 
+const ec2RegistrationWindow = 10 * time.Minute
+
 type ec2Lease struct {
 	KeyID             string `json:"key_id"`
 	Seed              string `json:"seed,omitempty"`
@@ -156,8 +158,13 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 		return false, err
 	}
 	age := time.Since(l.Created)
-	if h.id == "" && e.Instance == "" && !recoverOnly && age < 5*time.Minute {
-		// EC2 deduplicates the exact launch request, including after a lost reply.
+	if h.id == "" && e.Instance == "" && a.retryEC2Launch && !recoverOnly && age < 5*time.Minute {
+		// The listener can repeat a cached count. Only replay an ambiguous
+		// launch when current GitHub demand still needs this runner.
+		count, err := a.readPlacementDemand(ctx)
+		if err != nil || count < len(a.state.Leases) {
+			return false, err
+		}
 		return false, a.launchEC2(ctx)
 	}
 	// Allow EC2 discovery to converge after an ambiguous launch.
@@ -183,10 +190,10 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 		if err != nil || !retiring {
 			return false, err
 		}
-		if !recoverOnly && !e.Completed {
+		if !recoverOnly && !e.Issuing && (e.Instance != "" || h.id != "") {
 			// Preserve the reservation across automatic service restarts. A bad
 			// image must not repeatedly launch for the same queued demand.
-			return false, fmt.Errorf("EC2 runner ended without a job completion event; inspect the instance and use --recover %s", a.recoveryTarget())
+			return false, fmt.Errorf("EC2 runner ended before requesting registration; inspect the instance and use --recover %s", a.recoveryTarget())
 		}
 		if err := a.beginCleanup(""); err != nil {
 			return false, err
@@ -197,7 +204,7 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 	case "stopped", "stopping":
 		recoverOnly = true
 	}
-	if recoverOnly || age > 6*time.Hour || (l.RunnerID == 0 && age > 10*time.Minute) {
+	if recoverOnly || age > 6*time.Hour || (l.RunnerID == 0 && age >= ec2RegistrationWindow) {
 		return false, a.fleet.terminate(ctx, h.id)
 	}
 	return false, nil
@@ -234,6 +241,17 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		e := *l.EC2
+		if op == "register" {
+			if e.Issuing || time.Since(l.Created) >= ec2RegistrationWindow {
+				return nil
+			}
+			for _, sibling := range c.state.Leases {
+				if sibling.Local != nil && sibling.Local.Phase == localOffered && !sibling.CleanupIntent && !sibling.Local.expired() {
+					status = http.StatusServiceUnavailable
+					return nil
+				}
+			}
+		}
 		needsVolume := op == "quiesced" && e.ProducerRun > 0 && e.Volume == ""
 		if e.Instance == "" || needsVolume {
 			h, err := a.fleet.host(ctx, l)
@@ -250,9 +268,6 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if op == "register" {
-			if e.Issuing || time.Since(l.Created) > 5*time.Minute {
-				return nil
-			}
 			e.Issuing = true
 			if err := a.saveEC2(e); err != nil {
 				return err

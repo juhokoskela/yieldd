@@ -55,7 +55,7 @@ mark docker-started
 
 # The runner consumes the credential from its process environment. Keep the file on tmpfs.
 mark register-start
-jit=$(curl -fsS --retry 2 --max-time 45 -X POST -H "$auth" "$endpoint/register")
+jit=$(curl -fsS --retry 5 --max-time 45 -X POST -H "$auth" "$endpoint/register")
 [[ -n $jit && $jit != *$'\n'* ]]
 mark register-complete
 printf 'ACTIONS_RUNNER_INPUT_JITCONFIG=%s\n' "$jit" > /run/yieldd-jit
@@ -76,6 +76,6 @@ umount "$cache"
 until_second=$((SECONDS + 60))
 while (( SECONDS < until_second )); do
     code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -X POST -H "$auth" "$endpoint/quiesced") || break
-    [[ $code == 202 ]] || break
+    [[ $code == 202 || $code == 503 ]] || break
     sleep 2
 done

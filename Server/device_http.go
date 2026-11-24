@@ -63,6 +63,9 @@ func (s *coordinatorLoop) run() error {
 				continue
 			}
 			if l.Local == nil {
+				if l.EC2 != nil && l.EC2.Completed {
+					retryPending = true
+				}
 				continue
 			}
 			if l.Local.Phase == localAccepted || (s.worker.demandRetryAt.IsZero() && (l.Local.Phase == localDeclined || (s.demandObserved && l.Local.Phase == localOffered))) {

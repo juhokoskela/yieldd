@@ -69,6 +69,7 @@ type assignment struct {
 	*coordinator
 	lease              *lease
 	deferHostedCleanup bool
+	retryEC2Launch     bool
 }
 
 type journalWriteError struct{ cause error }
@@ -379,6 +380,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 			}
 		}
 		recoverOnly := (surplus[name] || provisioningPaused || c.demandUnavailable) && !l.DispatchIntent && (local == nil || local.Phase != localIssued)
+		a.retryEC2Launch = count > 0 && !c.demandUnavailable && (c.paused == nil || c.verificationPaused())
 		done, err := a.reconcileWithRun(ctx, recoverOnly, runs[name])
 		if local == nil && !a.deferHostedCleanup && (done || a.lease != nil && a.lease.CleanupIntent) {
 			hostedCleanupAttempted, hostedCleanupCompleted = true, done
