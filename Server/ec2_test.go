@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -370,6 +371,43 @@ func TestEC2CompletedRunnerRetiresWithoutListenerPoll(t *testing.T) {
 		}
 	case <-time.After(2 * cleanupRetryDelay):
 		t.Fatal("completed runner retained until the next listener poll")
+	}
+}
+
+func TestEC2ExpiryDuringListenerOutage(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			c, _, _ := newFixture(t)
+			c.demandUnavailable = true
+			c.state.Config.EC2 = exampleEC2()
+			l := &lease{Name: fixtureRunner, Created: time.Now(), DispatchIntent: true, EC2: &ec2Lease{Instance: "i-1", Issuing: registered}}
+			timeout := ec2RegistrationWindow
+			if registered {
+				l.RunnerID = 7
+				timeout = 6 * time.Hour
+			}
+			c.state.Leases = map[string]*lease{l.Name: l}
+			f := &fakeFleet{instance: ec2Host{id: "i-1", state: "running"}}
+			c.fleet = f
+			ctx, cancel := context.WithCancel(t.Context())
+			loop := newCoordinatorLoop(ctx, c)
+			startLoops(t, cancel, []*coordinatorLoop{loop})
+			time.Sleep(timeout - time.Millisecond)
+			synctest.Wait()
+			if err := loop.invoke(t.Context(), func(context.Context) error {
+				if f.terminated != 0 {
+					return fmt.Errorf("terminated early")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(time.Millisecond)
+			synctest.Wait()
+			if f.terminated != 1 || f.launched != 0 {
+				t.Fatal("deadline missed during outage", registered, f.terminated)
+			}
+		})
 	}
 }
 

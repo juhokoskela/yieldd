@@ -40,9 +40,13 @@ func (s *coordinatorLoop) run() error {
 	timer := time.NewTimer(0)
 	timer.Stop()
 	defer timer.Stop()
-	var retryAt time.Time
+	expiryTimer := time.NewTimer(0)
+	expiryTimer.Stop()
+	defer expiryTimer.Stop()
+	var retryAt, expiryRetryAt time.Time
 	for {
-		var expired <-chan time.Time
+		var expired, ec2Expired <-chan time.Time
+		var expiring *lease
 
 		deadline := s.worker.demandRetryAt
 		if when := s.worker.ec2RetryAt; s.demandObserved && !s.worker.demandUnavailable && s.desiredCount > 0 && !when.IsZero() && (deadline.IsZero() || when.Before(deadline)) {
@@ -54,6 +58,9 @@ func (s *coordinatorLoop) run() error {
 		}
 		protectDevices := s.protectColdDevices()
 		for _, l := range s.worker.state.Leases {
+			if l.EC2 != nil && !l.CleanupIntent {
+				expiring = l // Each queue has at most one EC2 assignment.
+			}
 			if protectDevices && l.Local == nil {
 				continue
 			}
@@ -96,7 +103,24 @@ func (s *coordinatorLoop) run() error {
 			expired = timer.C
 		}
 
+		if expiring != nil {
+			when := expiring.ec2Deadline()
+			if expiryRetryAt.After(when) {
+				when = expiryRetryAt
+			}
+			expiryTimer.Reset(time.Until(when))
+			ec2Expired = expiryTimer.C
+		}
+
 		select {
+		case <-ec2Expired:
+			ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+			err := s.worker.assigned(expiring.Name).expireEC2(ctx)
+			cancel()
+			if err != nil {
+				s.worker.logger.Warn("EC2 expiry check failed", "runner", expiring.Name, "error", err)
+			}
+			expiryRetryAt = time.Now().Add(cleanupRetryDelay)
 		case <-s.ctx.Done():
 			return nil
 		case <-s.capacityChanged:
@@ -129,6 +153,7 @@ func (s *coordinatorLoop) run() error {
 			}
 		}
 		timer.Stop()
+		expiryTimer.Stop()
 	}
 }
 

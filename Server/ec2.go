@@ -172,6 +172,25 @@ func (a *assignment) saveEC2(e ec2Lease) error {
 	return a.replace(&next)
 }
 
+func (l *lease) ec2Deadline() time.Time {
+	if l.RunnerID == 0 {
+		return l.Created.Add(ec2RegistrationWindow)
+	}
+	return l.Created.Add(6 * time.Hour)
+}
+
+// Enforce the spending deadline even while GitHub demand and cleanup are unavailable.
+func (a *assignment) expireEC2(ctx context.Context) error {
+	host, err := a.fleet.host(ctx, a.lease)
+	if err != nil || host.id == "" || host.state == "terminated" || host.state == "shutting-down" {
+		return err
+	}
+	if host.state == "" {
+		return errors.New("EC2 omitted instance state")
+	}
+	return a.fleet.terminate(ctx, host.id)
+}
+
 func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, error) {
 	l := a.lease
 	e := l.EC2
@@ -226,7 +245,7 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 	case "stopped", "stopping":
 		recoverOnly = true
 	}
-	if recoverOnly || age > 6*time.Hour || (l.RunnerID == 0 && age >= ec2RegistrationWindow) {
+	if recoverOnly || !time.Now().Before(l.ec2Deadline()) {
 		return false, a.fleet.terminate(ctx, h.id)
 	}
 	return false, nil
