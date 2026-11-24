@@ -283,102 +283,149 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", 403)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	var status int
+	var jit string
+	var err error
+	if op == "register" {
+		jit, status, err = s.registerEC2(r.Context(), name)
+	} else {
+		status, err = s.quiescedEC2(r.Context(), name)
+	}
+	if err != nil {
+		c.logger.Warn("EC2 bootstrap request failed", "operation", op, "error", err)
+		http.Error(w, "bootstrap unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(status)
+	if jit != "" {
+		_, _ = io.WriteString(w, jit)
+	}
+}
+
+func (s *coordinatorLoop) registerEC2(ctx context.Context, name string) (string, int, error) {
 	var jit string
 	status := http.StatusGone
 	received := time.Now()
-	err := s.invoke(r.Context(), func(ctx context.Context) error {
+	err := s.invoke(ctx, func(ctx context.Context) error {
 		queueWait := time.Since(received)
+		c := s.worker
 		a := c.assigned(name)
 		l := a.lease
-		if l == nil || l.CleanupIntent || l.EC2 == nil {
+		if l == nil || l.CleanupIntent || l.EC2 == nil || l.EC2.Issuing || time.Since(l.Created) >= ec2RegistrationWindow {
 			return nil
 		}
-		e := *l.EC2
-		if op == "register" {
-			if e.Issuing || time.Since(l.Created) >= ec2RegistrationWindow {
+		for _, sibling := range c.state.Leases {
+			if sibling.Local != nil && sibling.Local.Phase == localOffered && !sibling.CleanupIntent && !sibling.Local.expired() {
+				status = http.StatusServiceUnavailable
 				return nil
 			}
-			for _, sibling := range c.state.Leases {
-				if sibling.Local != nil && sibling.Local.Phase == localOffered && !sibling.CleanupIntent && !sibling.Local.expired() {
-					status = http.StatusServiceUnavailable
-					return nil
-				}
-			}
 		}
-		needsVolume := op == "quiesced" && e.ProducerRun > 0 && e.Volume == ""
-		if e.Instance == "" || needsVolume {
+		e := *l.EC2
+		if e.Instance == "" {
 			h, err := a.fleet.host(ctx, l)
 			if err != nil {
 				return err
 			}
-			if h.id == "" || (needsVolume && h.volume == "") {
+			if h.id == "" {
 				status = http.StatusServiceUnavailable
 				return nil
 			}
 			e.Instance, e.Volume = h.id, h.volume
-			if err := a.saveEC2(e); err != nil {
-				return err
-			}
 		}
-		if op == "register" {
-			e.Issuing = true
-			if err := a.saveEC2(e); err != nil {
-				return err
-			}
-			started := time.Now()
-			g, err := a.generateRegistration(ctx)
-			githubTime := time.Since(started)
-			if err != nil {
-				return err
-			}
-			next := *a.lease
-			next.RunnerID = g.Runner.ID
-			if err := a.replace(&next); err != nil {
-				return err
-			}
-			c.logger.Info("EC2 runner registered", "runner", name, "queue_wait", queueWait, "github_jit", githubTime, "total", time.Since(received))
-			jit = g.EncodedJITConfig
-			status = 200
+		e.Issuing = true
+		if err := a.saveEC2(e); err != nil {
+			return err
+		}
+		started := time.Now()
+		g, err := a.generateRegistration(ctx)
+		githubTime := time.Since(started)
+		if err != nil {
+			return err
+		}
+		next := *a.lease
+		next.RunnerID = g.Runner.ID
+		if err := a.replace(&next); err != nil {
+			return err
+		}
+		c.logger.Info("EC2 runner registered", "runner", name, "queue_wait", queueWait, "github_jit", githubTime, "total", time.Since(received))
+		jit, status = g.EncodedJITConfig, http.StatusOK
+		return nil
+	})
+	return jit, status, err
+}
+
+func (s *coordinatorLoop) quiescedEC2(ctx context.Context, name string) (int, error) {
+	select {
+	case s.ec2Publishing <- struct{}{}:
+		defer func() { <-s.ec2Publishing }()
+	default:
+		return http.StatusServiceUnavailable, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	var producer *lease
+	var cfg ec2Config
+	c := s.worker
+	status := http.StatusGone
+	err := s.invoke(ctx, func(context.Context) error {
+		l := c.state.Leases[name]
+		if l == nil || l.CleanupIntent || l.EC2 == nil || l.RunnerID == 0 {
 			return nil
 		}
-		if l.RunnerID == 0 {
-			return nil
-		}
-		if !e.Completed {
+		if !l.EC2.Completed {
 			status = http.StatusAccepted
 			return nil
 		}
 		status = http.StatusNoContent
-		if e.ProducerRun == 0 || e.SnapshotAttempted || e.Volume == "" {
+		if l.EC2.ProducerRun > 0 && !l.EC2.SnapshotAttempted {
+			// Journal updates replace the lease. Readers may retain this version.
+			producer, cfg = l, c.state.Config.EC2
+		}
+		return nil
+	})
+	if err != nil || producer == nil {
+		return status, err
+	}
+	volume := producer.EC2.Volume
+	if volume == "" {
+		h, err := c.fleet.host(ctx, producer)
+		if err != nil || h.volume == "" {
+			return http.StatusServiceUnavailable, err
+		}
+		volume = h.volume
+	}
+	retire, due, err := c.fleet.planSnapshot(ctx)
+	if err != nil || !due {
+		return status, err
+	}
+	allowed, err := c.bootstrap.trustedSeed(ctx, cfg, producer.EC2.ProducerRun, producer.EC2.ProducerBranch)
+	if err != nil || !allowed {
+		return status, err
+	}
+	err = s.invoke(ctx, func(ctx context.Context) error {
+		a := c.assigned(name)
+		l := a.lease
+		if l == nil || l.CleanupIntent {
+			status = http.StatusGone
 			return nil
 		}
-		retire, due, err := a.fleet.planSnapshot(ctx)
-		if err != nil || !due {
-			return err
-		}
-		allowed, err := c.bootstrap.trustedSeed(ctx, c.state.Config.EC2, e.ProducerRun, e.ProducerBranch)
-		if err != nil || !allowed {
-			return err
+		e := *l.EC2
+		if e.SnapshotAttempted {
+			return nil
 		}
 		if err := a.fleet.prune(ctx, retire); err != nil {
 			return err
 		}
-		e.SnapshotAttempted = true
+		e.Volume, e.SnapshotAttempted = volume, true
 		if err := a.saveEC2(e); err != nil {
 			return err
 		}
 		return a.fleet.publish(ctx, a.lease)
 	})
-	w.Header().Set("Cache-Control", "no-store")
-	if err != nil {
-		c.logger.Warn("EC2 bootstrap request failed", "operation", op, "error", err)
-		http.Error(w, "bootstrap unavailable", 503)
-		return
-	}
-	w.WriteHeader(status)
-	if status == 200 {
-		_, _ = io.WriteString(w, jit)
-	}
+	return status, err
 }
 
 func (g *githubAPI) trustedSeed(ctx context.Context, c ec2Config, id int64, branch string) (bool, error) {

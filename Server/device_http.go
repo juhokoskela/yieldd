@@ -28,12 +28,13 @@ type coordinatorLoop struct {
 	ctx             context.Context
 	calls           chan coordinatorCall
 	capacityChanged chan struct{}
+	ec2Publishing   chan struct{}
 	demandObserved  bool
 	desiredCount    int
 }
 
 func newCoordinatorLoop(ctx context.Context, worker *coordinator) *coordinatorLoop {
-	return &coordinatorLoop{worker: worker, ctx: ctx, calls: make(chan coordinatorCall), capacityChanged: make(chan struct{}, 1)}
+	return &coordinatorLoop{worker: worker, ctx: ctx, calls: make(chan coordinatorCall), capacityChanged: make(chan struct{}, 1), ec2Publishing: make(chan struct{}, 1)}
 }
 
 func (s *coordinatorLoop) run() error {

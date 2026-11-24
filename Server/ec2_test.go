@@ -564,3 +564,55 @@ func TestEC2BootFailureHoldsSlotAcrossRestart(t *testing.T) {
 		t.Fatal("explicit recovery", err)
 	}
 }
+
+type delayedSeedCheck struct {
+	bootstrapAPI
+	started, release chan struct{}
+}
+
+func (d delayedSeedCheck) trustedSeed(ctx context.Context, _ ec2Config, _ int64, _ string) (bool, error) {
+	close(d.started)
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-d.release:
+		return true, nil
+	}
+}
+
+func TestEC2ProvenanceReadDoesNotBlockQueue(t *testing.T) {
+	c, w, _ := newFixture(t)
+	f := &fakeFleet{}
+	c.fleet = f
+	l := &lease{Name: fixtureRunner, Created: time.Now(), RunnerID: 7, DispatchIntent: true, EC2: &ec2Lease{Issuing: true, Completed: true, Volume: "vol-2", ProducerRun: 23, ProducerBranch: "main"}}
+	c.state.Leases = map[string]*lease{l.Name: l}
+	check := delayedSeedCheck{w, make(chan struct{}), make(chan struct{})}
+	c.bootstrap = check
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	loop := newCoordinatorLoop(ctx, c)
+	startLoops(t, cancel, []*coordinatorLoop{loop})
+	result := make(chan int, 1)
+	go func() {
+		code, err := loop.quiescedEC2(ctx, l.Name)
+		if err != nil {
+			code = 0
+		}
+		result <- code
+	}()
+	select {
+	case <-check.started:
+	case <-ctx.Done():
+		t.Fatal("verification did not start")
+	}
+	if code, err := loop.quiescedEC2(ctx, l.Name); code != 503 || err != nil {
+		t.Fatal(code, err)
+	}
+	if err := loop.invoke(ctx, func(context.Context) error { return c.assigned(l.Name).beginCleanup("") }); err != nil {
+		t.Fatal(err)
+	}
+	close(check.release)
+	if code := <-result; code != 410 || f.published != 0 {
+		t.Fatal("stale verification published", code, f.published)
+	}
+}
