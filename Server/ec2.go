@@ -120,7 +120,6 @@ func (a *assignment) provisionEC2(ctx context.Context, l *lease) error {
 	if !time.Now().Before(a.ec2RetryAt) {
 		seed, err := a.fleet.seed(ctx)
 		if err == nil {
-			a.ec2RetryAt, a.ec2RetryDelay = time.Time{}, 0
 			next := *l
 			next.Local = nil
 			next.DispatchIntent = true
@@ -128,11 +127,16 @@ func (a *assignment) provisionEC2(ctx context.Context, l *lease) error {
 			if err := a.replace(&next); err != nil {
 				return err
 			}
-			if err := a.launchEC2(ctx); err != nil {
+			err = a.launchEC2(ctx)
+			if err == nil {
+				a.ec2RetryAt, a.ec2RetryDelay = time.Time{}, 0
+				return nil
+			}
+			// Only a rejection of the first, single-attempt request proves
+			// that this lease never launched. Preserve all ambiguous intents.
+			if !errors.Is(err, ec2CapacityRejected) {
 				return err
 			}
-			a.device.redrive(a.state.Owner)
-			return nil
 		}
 		if !retryableBootstrapVerification(err) {
 			return err

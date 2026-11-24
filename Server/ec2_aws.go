@@ -162,12 +162,16 @@ func (f *awsFleet) launch(ctx context.Context, l *lease) (ec2Host, error) {
 }
 
 // AWS response messages may include submitted user data. Log only the error code.
+var ec2CapacityRejected = errors.New("EC2 capacity unavailable")
+
 func awsFailure(op string, err error) error {
 	var api smithy.APIError
 	if errors.As(err, &api) {
 		safe := fmt.Errorf("EC2 %s: %s", op, api.ErrorCode())
 		switch api.ErrorCode() {
-		case "InsufficientInstanceCapacity", "VcpuLimitExceeded", "InstanceLimitExceeded", "ExpiredToken", "RequestExpired", "RequestLimitExceeded":
+		case "InsufficientInstanceCapacity", "VcpuLimitExceeded", "InstanceLimitExceeded":
+			return &temporaryStatusError{fmt.Errorf("%w: %s", ec2CapacityRejected, api.ErrorCode())}
+		case "ExpiredToken", "RequestExpired", "RequestLimitExceeded":
 			return &temporaryStatusError{safe}
 		}
 		if retry.NewStandard().IsErrorRetryable(err) {

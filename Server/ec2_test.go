@@ -26,7 +26,7 @@ type fakeFleet struct {
 	launched, terminated, published int
 	selected                        string
 	seedCalls                       int
-	seedErr                         error
+	seedErr, launchErr              error
 	lostReply                       bool
 }
 
@@ -36,6 +36,9 @@ func (f *fakeFleet) seed(context.Context) (string, error) {
 }
 func (f *fakeFleet) launch(_ context.Context, l *lease) (ec2Host, error) {
 	f.launched++
+	if f.launchErr != nil {
+		return ec2Host{}, f.launchErr
+	}
 	f.instance = ec2Host{"i-1", "vol-2", "running"}
 	if f.lostReply {
 		return ec2Host{}, &temporaryStatusError{fmt.Errorf("launch reply lost")}
@@ -300,6 +303,21 @@ func TestEC2AdmissionBacksOffBeforeReserving(t *testing.T) {
 	f.seedErr = nil
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || f.launched != 1 || !c.ec2RetryAt.IsZero() || c.ec2RetryDelay != 0 {
 		t.Fatal("failed to admit runner after capacity returned", err)
+	}
+}
+
+func TestEC2CapacityRejectionReleasesLeaseForMac(t *testing.T) {
+	c, _, _ := newFixture(t)
+	c.state.Config.DeviceID = testDevice
+	c.state.Config.EC2 = exampleEC2()
+	f := &fakeFleet{launchErr: &temporaryStatusError{ec2CapacityRejected}}
+	c.fleet = f
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || len(c.state.Leases) != 0 || f.launched != 1 || c.ec2RetryAt.IsZero() {
+		t.Fatal("held rejected launch", err)
+	}
+	c.device.pollNow(0)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || singleLease(c.state).Local == nil || f.launched != 1 {
+		t.Fatal("Mac did not receive offer", err)
 	}
 }
 

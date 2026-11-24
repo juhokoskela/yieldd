@@ -507,7 +507,16 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	a := &assignment{coordinator: c}
 	if !local && c.fleet != nil {
-		return a.provisionEC2(ctx, l)
+		if err := a.provisionEC2(ctx, l); err != nil {
+			return err
+		}
+		if countsAgree {
+			c.refreshDemand = false
+		}
+		if c.state.Config.DeviceID != "" && count > len(c.state.Leases) {
+			c.device.wait(c.state.Owner)
+		}
+		return nil
 	}
 	if err := a.replace(l); err != nil {
 		return err
