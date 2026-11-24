@@ -37,15 +37,24 @@ jobs:
             Prototypes/RunnerNetwork/go.sum
             Server/go.sum
 
-      - name: Restore and save build cache
+      - name: Cache SwiftPM build products and dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        env:
-          CACHE_PREFIX: yieldd-build-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Cache/**', 'Scripts/build-cache-server.sh', 'Prototypes/RunnerNetwork/go.sum', 'Prototypes/RunnerNetwork/gvproxy.patch', 'Prototypes/RunnerNetwork/source-paths.sh') }}
         with:
-          path: .build
-          key: ${{ env.CACHE_PREFIX }}-${{ github.sha }}
-          restore-keys: |
-            ${{ env.CACHE_PREFIX }}-
+          path: |
+            .build/out
+            .build/arm64-apple-macosx
+            .build/checkouts
+            .build/repositories
+            .build/artifacts
+            .build/workspace-state.json
+          key: yieldd-swift-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+
+      - name: Cache Rust build products
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .build/cache-server-target
+          key: yieldd-cargo-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Scripts/build-cache-server.sh', 'Cache/cache-server.patch') }}
+          restore-keys: yieldd-cargo-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-
 
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
