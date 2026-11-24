@@ -69,6 +69,28 @@ func TestEC2ScopesOneLinuxRoute(t *testing.T) {
 	}
 }
 
+func TestEC2RouteIgnoresWorkflowFallback(t *testing.T) {
+	saved := testConfig
+	saved.EC2 = exampleEC2()
+	changed := saved
+	changed.Fallback = `"another-runner"`
+	changed.Infrastructure = "example/other-infrastructure"
+	if !saved.sameRoute(changed) {
+		t.Fatal("workflow fallback settings changed the EC2 route")
+	}
+	changed.EC2.Image = "ami-00000000000000001"
+	if saved.sameRoute(changed) {
+		t.Fatal("accepted a different AMI")
+	}
+	if saved.sameRoute(testConfig) || testConfig.sameRoute(saved) {
+		t.Fatal("accepted switching between EC2 and workflow routes")
+	}
+	changed.EC2 = ec2Config{}
+	if testConfig.sameRoute(changed) {
+		t.Fatal("accepted a different fallback workflow route")
+	}
+}
+
 func TestEC2Lifecycle(t *testing.T) {
 	c, w, store := newFixture(t)
 	c.state.Config.EC2 = exampleEC2()

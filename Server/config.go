@@ -88,6 +88,11 @@ func fallbackLabels(value string) ([]string, error) {
 }
 
 func (c config) sameRoute(other config) bool {
+	if c.EC2.Repository != "" {
+		// EC2 queues never dispatch the shared fallback workflow.
+		c.Infrastructure, c.Fallback = other.Infrastructure, other.Fallback
+		return c == other
+	}
 	if c == other {
 		return true
 	}
