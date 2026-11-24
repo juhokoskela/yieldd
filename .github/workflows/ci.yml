@@ -22,20 +22,30 @@ jobs:
           persist-credentials: false
 
       - name: Show runner and toolchain
+        id: toolchain
         run: |
           echo "Runner: $RUNNER_NAME"
           xcodebuild -version
           swift --version
+          echo "id=$({ xcodebuild -version; swift --version; } | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go for the network relay
-        uses: ./.github/actions/setup-ci-go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: Prototypes/RunnerNetwork/go.mod
+          cache-dependency-path: Prototypes/RunnerNetwork/go.sum
 
-      - name: Keep Swift and helper builds on the native disk
-        run: |
-          mkdir -p "$YIELDD_CACHE_PATH/yieldd-build"
-          ln -s "$YIELDD_CACHE_PATH/yieldd-build" .build
+      - name: Restore and save SwiftPM build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .build/arm64-apple-macosx
+            .build/checkouts
+            .build/repositories
+            .build/workspace-state.json
+          key: swiftpm-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            swiftpm-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
 
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
@@ -89,9 +99,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: ./.github/actions/setup-ci-go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: Server/go.mod
+          cache-dependency-path: Server/go.sum
       - name: Test and vet
         run: |
           go test -race ./...
