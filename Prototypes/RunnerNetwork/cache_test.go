@@ -125,8 +125,8 @@ func TestArchiveRouting(t *testing.T) {
 		return rec.Body.Bytes()
 	}
 	newGuest := func(bearer string) *relayCache {
-		c := newRelayCache(socket, dir, results)
-		t.Cleanup(c.client.CloseIdleConnections)
+		c := newRelayCache(socket, results)
+		t.Cleanup(c.transport.CloseIdleConnections)
 		request(c, "POST", "/yieldd/bind", bearer, "", 204)
 		return c
 	}
@@ -150,24 +150,22 @@ func TestArchiveRouting(t *testing.T) {
 	reader := token("456", "refs/heads/master", 1)
 	writer := newGuest(primary)
 	request(writer, "POST", "/yieldd/bind", reader, "", 409)
-	unbound := newRelayCache(socket, dir, results)
-	t.Cleanup(unbound.client.CloseIdleConnections)
+	unbound := newRelayCache(socket, results)
+	t.Cleanup(unbound.transport.CloseIdleConnections)
 	request(unbound, "POST", "/yieldd/bind", "", "", 401)
 	noAccess := newGuest("invalid")
 	rpc(noAccess, "GetCacheEntryDownloadURL", "invalid", 401)
 	rpc(noAccess, "CreateCacheEntry", "invalid", 401)
-	request(noAccess, "POST", "/yieldd/native/open", "invalid", "", 403)
 	artifactOnly := token("123", "refs/heads/main", 0)
 	artifactGuest := newGuest(artifactOnly)
-	offline := newRelayCache(filepath.Join(dir, "missing-archive.sock"), dir, results)
-	t.Cleanup(offline.client.CloseIdleConnections)
+	offline := newRelayCache(filepath.Join(dir, "missing-archive.sock"), results)
+	t.Cleanup(offline.transport.CloseIdleConnections)
 	request(offline, "POST", "/yieldd/bind", artifactOnly, "", 204)
 	request(offline, "POST", cacheRPC+"CreateCacheEntry", artifactOnly, "{}", 502)
 	if got := request(offline, "POST", artifactRPC+"CreateArtifact", artifactOnly, "{}", 200); string(got) != "fixture artifact" {
 		t.Fatal("artifact-only job could not use GitHub")
 	}
 	rpc(artifactGuest, "CreateCacheEntry", artifactOnly, 401)
-	request(artifactGuest, "POST", "/yieldd/native/open", artifactOnly, "", 403)
 	request(writer, "POST", "/yieldd/verify", primary, "", 404)
 	request(writer, "GET", "/management-api/cache-entries", primary, "", 404)
 	rpc(writer, "CreateCacheEntry", reader, 401)
@@ -211,50 +209,6 @@ func fixtureResultsTransport(t *testing.T, origin *httptest.Server) *http.Transp
 	return results
 }
 
-func TestVerifyWhileArchiveTransfersAreBusy(t *testing.T) {
-	dir := socketTestDirectory(t)
-	socket := filepath.Join(dir, "archive.sock")
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release := make(chan struct{})
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/yieldd/verify" {
-			io.WriteString(w, `{"repository_id":"123"}`)
-			return
-		}
-		w.Header().Set("Content-Length", "1")
-		w.WriteHeader(http.StatusOK)
-		w.(http.Flusher).Flush()
-		<-release
-		io.WriteString(w, "x")
-	})}
-	go server.Serve(listener)
-	defer server.Close()
-	defer close(release)
-
-	cache := newRelayCache(socket, dir, nil)
-	defer cache.client.CloseIdleConnections()
-	for range 8 {
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://cache/download/fixture", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp, err := cache.proxy.Transport.RoundTrip(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
-	grants, err := cache.verify(ctx, "Bearer fixture")
-	if err != nil || grants.RepositoryID != "123" {
-		t.Fatalf("verify with all archive connections busy: grants=%+v err=%v", grants, err)
-	}
-}
-
 func TestArtifactMetadataRequiresBoundTokenAndPinnedOrigin(t *testing.T) {
 	dir := t.TempDir()
 	var calls atomic.Int32
@@ -270,8 +224,8 @@ func TestArtifactMetadataRequiresBoundTokenAndPinnedOrigin(t *testing.T) {
 		io.WriteString(w, "artifact metadata")
 	}))
 	defer origin.Close()
-	c := newRelayCache(filepath.Join(dir, "absent.sock"), dir, fixtureResultsTransport(t, origin))
-	t.Cleanup(c.client.CloseIdleConnections)
+	c := newRelayCache(filepath.Join(dir, "absent.sock"), fixtureResultsTransport(t, origin))
+	t.Cleanup(c.transport.CloseIdleConnections)
 	request := func(route, token string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", route, strings.NewReader("{}"))
 		r.Host = "guest.invalid"

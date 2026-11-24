@@ -51,12 +51,12 @@ func connectedSwiftClientUsesGoRouterAcrossPlatformsAndWorkers() throws {
     }
     #expect(active.count == 4)
     for (client, offer) in active {
-        #expect(try client.renew(offer, checkDeadline: {}) == .active)
+        #expect(try client.renew(offer, checkDeadline: {}) == true)
     }
     try active[0].0.complete(active[0].1)
-    #expect(try active[0].0.renew(active[0].1, checkDeadline: {}) == .revoked)
+    #expect(try active[0].0.renew(active[0].1, checkDeadline: {}) == false)
     for (client, offer) in active.dropFirst() {
-        #expect(try client.renew(offer, checkDeadline: {}) == .active)
+        #expect(try client.renew(offer, checkDeadline: {}) == true)
         try client.complete(offer)
     }
     try active[0].0.complete(active[0].1)

@@ -17,10 +17,6 @@ RUN apt-get update \
         curl \
         dbus \
         docker.io \
-        e2fsprogs \
-        fuse3 \
-        libnbd-bin \
-        util-linux \
         git \
         jq \
         sudo \
@@ -40,7 +36,6 @@ RUN apt-get update \
     && rm -f /tmp/gh.tar.gz \
     && rm -rf /var/lib/apt/lists/*
 
-COPY native-cache /usr/local/bin/yieldd-native-cache
 COPY configure-runner /usr/local/bin/yieldd-configure-runner
 COPY runner-control /usr/local/bin/yieldd-runner-control
 COPY yieldd.slice /etc/systemd/system/yieldd.slice

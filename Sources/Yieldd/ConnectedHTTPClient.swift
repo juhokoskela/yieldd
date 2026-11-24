@@ -73,37 +73,13 @@ final class ConnectedHTTPClient {
         _ = try request("decline", offer: offer, checkCancellation: checkCancellation)
     }
 
-    func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> ExecutionRenewal {
-        struct Authorization: Decodable {
-            let `continue`: Bool
-            let jobSucceeded: Bool?
-
-            enum CodingKeys: String, CodingKey {
-                case `continue`
-                case jobSucceeded = "job_succeeded"
-            }
-        }
+    func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> Bool {
+        struct Authorization: Decodable { let `continue`: Bool }
         let (_, data) = try request("renew", offer: offer, checkCancellation: {
             try self.checkCancellation()
             try checkDeadline()
         })
-        let authorization = try JSONDecoder().decode(Authorization.self, from: data)
-        if authorization.continue { return .active }
-        return authorization.jobSucceeded == true ? .jobSucceeded : .revoked
-    }
-
-    func jobResult(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> FinalJobResult {
-        struct Response: Decodable { let result: FinalJobResult }
-        do {
-            let (_, data) = try request("job-result", offer: offer, checkCancellation: {
-                try self.checkCancellation()
-                try checkDeadline()
-            })
-            return try JSONDecoder().decode(Response.self, from: data).result
-        } catch ConnectedRunnerError.http(404, _, _) {
-            // Older coordinators can run jobs without confirming native cache publication.
-            return .unavailable
-        }
+        return try JSONDecoder().decode(Authorization.self, from: data).continue
     }
 
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {
@@ -112,8 +88,7 @@ final class ConnectedHTTPClient {
             connectionChanged(.connected, nil)
             return result
         } catch {
-            let status = (error as? ConnectedRunnerError)?.httpStatus
-            if status == 410 || (action == "job-result" && status == 404) {
+            if (error as? ConnectedRunnerError)?.httpStatus == 410 {
                 connectionChanged(.connected, nil)
             } else if !isCancellation(error) {
                 connectionChanged(isTransientConnectedFailure(error) ? .retrying : .failed, describeError(error))

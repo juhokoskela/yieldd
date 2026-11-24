@@ -87,7 +87,7 @@ jobs:
         with:
           node-version: '24'
       - name: Test without GitHub credentials or runner registration
-        run: node --test .github/actions/bootstrap-runner/index.test.cjs actions/native-cache/action.test.cjs
+        run: node --test .github/actions/bootstrap-runner/index.test.cjs
 
   coordinator:
     name: Coordinator contract

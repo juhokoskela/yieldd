@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -18,25 +17,23 @@ import (
 )
 
 const (
-	cacheAddress      = gatewayIP + ":7341"
-	nativeDiskAddress = gatewayIP + ":7342"
-	cacheRPC          = "/twirp/github.actions.results.api.v1.CacheService/"
-	artifactRPC       = "/twirp/github.actions.results.api.v1.ArtifactService/"
-	maxTransferPaths  = 4096
+	cacheAddress     = gatewayIP + ":7341"
+	cacheRPC         = "/twirp/github.actions.results.api.v1.CacheService/"
+	artifactRPC      = "/twirp/github.actions.results.api.v1.ArtifactService/"
+	maxTransferPaths = 4096
 )
 
 type relayCache struct {
-	client    *http.Client
+	transport *http.Transport
 	proxy     *httputil.ReverseProxy
 	artifacts *httputil.ReverseProxy
-	native    http.Handler
 	mu        sync.Mutex
 	bound     bool
 	digest    [sha256.Size]byte
 	transfers map[string]struct{}
 }
 
-func newRelayCache(socket, directory string, results *http.Transport) *relayCache {
+func newRelayCache(socket string, results *http.Transport) *relayCache {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -44,12 +41,7 @@ func newRelayCache(socket, directory string, results *http.Transport) *relayCach
 		},
 		MaxConnsPerHost: 8, MaxIdleConnsPerHost: 8, IdleConnTimeout: time.Minute, ResponseHeaderTimeout: time.Minute,
 	}
-	// A job may open its native disk while all eight archive connections are streaming.
-	verifyTransport := transport.Clone()
-	verifyTransport.MaxConnsPerHost = 1
-	verifyTransport.MaxIdleConnsPerHost = 1
-	c := &relayCache{client: &http.Client{Transport: verifyTransport, Timeout: 10 * time.Second}, transfers: make(map[string]struct{})}
-	c.native = nativeCacheHandler(directory, c.verify)
+	c := &relayCache{transport: transport, transfers: make(map[string]struct{})}
 	c.proxy = &httputil.ReverseProxy{
 		Transport: transport,
 		ErrorLog:  log.New(io.Discard, "", 0), // Backend errors can contain signed blob URLs.
@@ -122,8 +114,6 @@ func (c *relayCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case artifactRPC + "CreateArtifact", artifactRPC + "FinalizeArtifact", artifactRPC + "ListArtifacts",
 		artifactRPC + "GetSignedArtifactURL", artifactRPC + "DeleteArtifact":
 		upstream = c.artifacts
-	case "/yieldd/native/open", "/yieldd/native/save":
-		upstream = c.native
 	}
 	if upstream == nil || r.Method != http.MethodPost || r.URL.RawQuery != "" {
 		http.NotFound(w, r)
@@ -190,23 +180,4 @@ func (c *relayCache) bind(w http.ResponseWriter, r *http.Request) {
 	// An artifact-only job may have a valid runtime token with no cache grants.
 	c.bound, c.digest = true, digest
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (c *relayCache) verify(ctx context.Context, authorization string) (nativeCacheGrants, error) {
-	var grants nativeCacheGrants
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://cache/yieldd/verify", nil)
-	if err != nil {
-		return grants, err
-	}
-	req.Header.Set("Authorization", authorization)
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return grants, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return grants, errors.New("job token rejected")
-	}
-	err = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&grants)
-	return grants, err
 }
