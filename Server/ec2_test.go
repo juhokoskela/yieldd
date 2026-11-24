@@ -19,6 +19,7 @@ import (
 
 type fakeFleet struct {
 	pendingDisk                     bool
+	freshSeed                       bool
 	instance                        ec2Host
 	launched, terminated, published int
 	selected                        string
@@ -46,7 +47,10 @@ func (f *fakeFleet) terminate(context.Context, string) error {
 	return nil
 }
 func (f *fakeFleet) disksRetiring(context.Context, *lease) (bool, error) { return !f.pendingDisk, nil }
-func (f *fakeFleet) publish(context.Context, *lease) error               { f.published++; return nil }
+func (f *fakeFleet) planSnapshot(context.Context) ([]string, bool, error) {
+	return nil, !f.freshSeed, nil
+}
+func (f *fakeFleet) publish(context.Context, *lease, []string) error { f.published++; return nil }
 
 func exampleEC2() ec2Config {
 	return ec2Config{Repository: testConfig.Repository, Account: "111111111111", Region: "eu-central-1", Image: "ami-0123456789abcdef0", Subnet: "subnet-0123456789abcdef0", Group: "sg-0123456789abcdef0", Endpoint: "https://runner.example.test", Workflow: ".github/workflows/ci.yml", Job: "build"}
@@ -104,7 +108,7 @@ func TestEC2Lifecycle(t *testing.T) {
 	c.fleet = f
 	c.ec2Auth = []byte("test")
 	c.ec2Owner = c.state.Owner
-	c.seedAllowed = func(_ context.Context, id int64) (bool, error) { return id == 23, nil }
+
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +162,11 @@ func TestEC2Lifecycle(t *testing.T) {
 		t.Fatal("published without discovering the cache volume", got)
 	}
 	f.instance.volume = "vol-2"
+	f.freshSeed = true
+	if request("quiesced", token).Code != 204 || f.published != 0 || singleLease(c.state).EC2.SnapshotAttempted || w.seedVerifications != 0 {
+		t.Fatal("fresh snapshot triggered publication work")
+	}
+	f.freshSeed = false
 	for range 2 {
 		if request("quiesced", token).Code != 204 {
 			t.Fatal("failed to acknowledge unmount")

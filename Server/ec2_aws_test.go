@@ -21,7 +21,7 @@ func testEC2Client(endpoint string) *ec2.Client {
 func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 	var deleted []string
 	created := 0
-	var busy, empty, denyDelete bool
+	var busy, empty, denyDelete, pending bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Error(err)
@@ -48,7 +48,10 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 			fmt.Fprint(w, "<DescribeSnapshotsResponse><snapshotSet>")
 			if !empty {
 				for i, s := range []string{"completed", "error", "completed", "completed", "pending"} {
-					fmt.Fprintf(w, "<item><snapshotId>snap-%d</snapshotId><startTime>2026-11-%02dT00:00:00Z</startTime><status>%s</status><encrypted>true</encrypted><volumeSize>12</volumeSize></item>", i, i+1, s)
+					if s == "pending" && !pending {
+						continue
+					}
+					fmt.Fprintf(w, "<item><snapshotId>snap-%d</snapshotId><startTime>2000-11-%02dT00:00:00Z</startTime><status>%s</status><encrypted>true</encrypted><volumeSize>12</volumeSize></item>", i, i+1, s)
 				}
 			}
 			fmt.Fprint(w, "</snapshotSet></DescribeSnapshotsResponse>")
@@ -78,19 +81,25 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 		t.Fatal("selection and retention", seed, deleted, err)
 	}
 	l := &lease{Name: fixtureRunner, EC2: &ec2Lease{Volume: "vol-cache", ProducerRun: 23}}
-	if err := f.publish(t.Context(), l); err == nil || created != 0 {
+	pending = true
+	if retire, due, err := f.planSnapshot(t.Context()); err != nil || due || len(retire) != 0 {
+		t.Fatal("planned publication with a pending snapshot", retire, due, err)
+	}
+	pending = false
+	retire, due, err := f.planSnapshot(t.Context())
+	if err != nil || !due || strings.Join(retire, ",") != "snap-1,snap-0" {
+		t.Fatal("incorrect retention plan", retire, due, err)
+	}
+	if err := f.publish(t.Context(), l, retire); err == nil || created != 0 {
 		t.Fatal("ignored snapshot retention failure", err)
 	}
 	denyDelete = false
-	if err := f.publish(t.Context(), l); err != nil || created != 0 || strings.Join(deleted, ",") != "snap-1,snap-0" {
-		t.Fatal("published with a snapshot pending", err)
+	if err := f.publish(t.Context(), l, retire); err != nil || created != 1 || strings.Join(deleted, ",") != "snap-1,snap-0" {
+		t.Fatal("failed to submit snapshot", deleted, created, err)
 	}
 	empty = true
 	if seed, err := f.seed(t.Context()); err != nil || seed != "" {
 		t.Fatal("cold start", seed, err)
-	}
-	if err := f.publish(t.Context(), l); err != nil || created != 1 {
-		t.Fatal("failed to submit snapshot", err)
 	}
 	busy = true
 	if _, err := f.seed(t.Context()); !retryableBootstrapVerification(err) {

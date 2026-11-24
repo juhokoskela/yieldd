@@ -232,21 +232,19 @@ func (f *awsFleet) disksRetiring(ctx context.Context, l *lease) (bool, error) {
 	return retiring, nil
 }
 
-func (f *awsFleet) publish(ctx context.Context, l *lease) error {
+func (f *awsFleet) planSnapshot(ctx context.Context) (retire []string, due bool, err error) {
 	entries, err := f.snapshots(ctx)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	kept := 0
-	skip := false
 	for _, s := range entries {
 		switch s.State {
 		case types.SnapshotStatePending:
-			skip = true
-			continue
+			return nil, false, nil
 		case types.SnapshotStateCompleted:
 			if time.Since(aws.ToTime(s.StartTime)) < 24*time.Hour {
-				skip = true
+				return nil, false, nil
 			}
 			if kept < 2 {
 				kept++
@@ -256,18 +254,22 @@ func (f *awsFleet) publish(ctx context.Context, l *lease) error {
 		default:
 			continue
 		}
-		if _, err := f.api.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: s.SnapshotId}); err != nil {
+		retire = append(retire, aws.ToString(s.SnapshotId))
+	}
+	return retire, true, nil
+}
+
+func (f *awsFleet) publish(ctx context.Context, l *lease, retire []string) error {
+	for _, id := range retire {
+		if _, err := f.api.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(id)}); err != nil {
 			return awsFailure("expire cache snapshot", err)
 		}
-	}
-	if skip {
-		return nil
 	}
 	tags := append(f.lineage(), tag("YielddLease", l.Name), tag("YielddRun", fmt.Sprint(l.EC2.ProducerRun)))
 	snapshot, err := f.api.CreateSnapshot(ctx, &ec2.CreateSnapshotInput{VolumeId: &l.EC2.Volume, Description: aws.String("yieldd build cache"), TagSpecifications: []types.TagSpecification{{ResourceType: types.ResourceTypeSnapshot, Tags: tags}}}, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
 	if err != nil {
 		return awsFailure("create cache snapshot", err)
 	}
-	slog.Info("EC2 cache snapshot requested", "repository", f.cfg.Repository, "run", l.EC2.ProducerRun, "snapshot", aws.ToString(snapshot.SnapshotId))
+	slog.Info("EC2 cache snapshot requested", "repository", f.cfg.Repository, "platform", "linux", "runner", l.Name, "run", l.EC2.ProducerRun, "snapshot", aws.ToString(snapshot.SnapshotId))
 	return nil
 }

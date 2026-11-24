@@ -147,7 +147,6 @@ func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRu
 			return nil, err
 		}
 		worker.ec2Auth, worker.ec2Owner = key, saved.Owner
-		worker.seedAllowed = func(ctx context.Context, id int64) (bool, error) { return api.trustedSeed(ctx, cfg.EC2, id) }
 		worker.maxFallbackRunners = 1
 	}
 	return worker, nil

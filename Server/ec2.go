@@ -94,7 +94,8 @@ type ec2Fleet interface {
 	host(context.Context, *lease) (ec2Host, error)
 	terminate(context.Context, string) error
 	disksRetiring(context.Context, *lease) (bool, error)
-	publish(context.Context, *lease) error
+	planSnapshot(context.Context) (retire []string, due bool, err error)
+	publish(context.Context, *lease, []string) error
 }
 
 func bootstrapToken(key []byte, owner, name string) string {
@@ -323,7 +324,11 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 		if e.ProducerRun == 0 || e.SnapshotAttempted || e.Volume == "" {
 			return nil
 		}
-		allowed, err := c.seedAllowed(ctx, e.ProducerRun)
+		retire, due, err := a.fleet.planSnapshot(ctx)
+		if err != nil || !due {
+			return err
+		}
+		allowed, err := c.bootstrap.trustedSeed(ctx, c.state.Config.EC2, e.ProducerRun)
 		if err != nil || !allowed {
 			return err
 		}
@@ -331,7 +336,7 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 		if err := a.saveEC2(e); err != nil {
 			return err
 		}
-		return a.fleet.publish(ctx, a.lease)
+		return a.fleet.publish(ctx, a.lease, retire)
 	})
 	w.Header().Set("Cache-Control", "no-store")
 	if err != nil {

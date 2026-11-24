@@ -31,6 +31,7 @@ type bootstrapAPI interface {
 	getRun(context.Context, int64) (*workflowRun, error)
 	cancelRun(context.Context, int64) error
 	runnerBusy(context.Context, string, int) (bool, error)
+	trustedSeed(context.Context, ec2Config, int64) (bool, error)
 }
 
 const (
@@ -48,7 +49,6 @@ type coordinator struct {
 	ec2Owner               string
 	ec2RetryAt             time.Time
 	ec2RetryDelay          time.Duration
-	seedAllowed            func(context.Context, int64) (bool, error)
 	state                  *state
 	save                   func(*state) error
 	runners                runnerAPI

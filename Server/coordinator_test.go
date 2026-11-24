@@ -21,6 +21,7 @@ import (
 var testConfig = config{Repository: "example/application", Infrastructure: "example/infrastructure", Fallback: `"ubuntu-24.04"`}
 
 type fakeWorld struct {
+	seedVerifications                              int
 	getRunMu                                       sync.Mutex
 	events                                         []string
 	runner                                         *scaleset.RunnerReference
@@ -127,6 +128,10 @@ func (f *fakeWorld) cancelRun(context.Context, int64) error {
 		f.beforeCancel()
 	}
 	return f.cancelErr
+}
+func (f *fakeWorld) trustedSeed(_ context.Context, _ ec2Config, id int64) (bool, error) {
+	f.seedVerifications++
+	return id == 23, nil
 }
 func (f *fakeWorld) runnerBusy(context.Context, string, int) (bool, error) { return f.busy, nil }
 
