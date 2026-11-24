@@ -21,7 +21,7 @@ func testEC2Client(endpoint string) *ec2.Client {
 func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 	var deleted []string
 	created := 0
-	var busy, empty bool
+	var busy, empty, denyDelete bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Error(err)
@@ -59,6 +59,10 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 			created++
 			fmt.Fprint(w, "<CreateSnapshotResponse><snapshotId>snap-new</snapshotId><status>pending</status></CreateSnapshotResponse>")
 		case "DeleteSnapshot":
+			if denyDelete {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
 			deleted = append(deleted, r.Form.Get("SnapshotId"))
 			fmt.Fprint(w, "<DeleteSnapshotResponse><return>true</return></DeleteSnapshotResponse>")
 		default:
@@ -68,12 +72,17 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 	defer srv.Close()
 	api := testEC2Client(srv.URL)
 	f := awsFleet{api: api, cfg: exampleEC2(), owner: "test"}
+	denyDelete = true
 	seed, err := f.seed(t.Context())
-	if err != nil || seed != "snap-3" || strings.Join(deleted, ",") != "snap-1,snap-0" {
+	if err != nil || seed != "snap-3" || len(deleted) != 0 {
 		t.Fatal("selection and retention", seed, deleted, err)
 	}
 	l := &lease{Name: fixtureRunner, EC2: &ec2Lease{Volume: "vol-cache", ProducerRun: 23}}
-	if err := f.publish(t.Context(), l); err != nil || created != 0 {
+	if err := f.publish(t.Context(), l); err == nil || created != 0 {
+		t.Fatal("ignored snapshot retention failure", err)
+	}
+	denyDelete = false
+	if err := f.publish(t.Context(), l); err != nil || created != 0 || strings.Join(deleted, ",") != "snap-1,snap-0" {
 		t.Fatal("published with a snapshot pending", err)
 	}
 	empty = true

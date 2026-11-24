@@ -87,30 +87,15 @@ func (f *awsFleet) seed(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var seed string
-	kept := 0
 	for _, s := range entries {
-		switch s.State {
-		case types.SnapshotStateCompleted:
+		if s.State == types.SnapshotStateCompleted {
 			if !aws.ToBool(s.Encrypted) || aws.ToInt32(s.VolumeSize) != 12 {
 				return "", errors.New("incompatible EBS cache snapshot in lineage")
 			}
-			if kept < 2 {
-				if kept == 0 {
-					seed = aws.ToString(s.SnapshotId)
-				}
-				kept++
-				continue
-			}
-		case types.SnapshotStateError:
-		default:
-			continue
-		}
-		if _, err := f.api.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: s.SnapshotId}); err != nil {
-			return "", awsFailure("expire cache snapshot", err)
+			return aws.ToString(s.SnapshotId), nil
 		}
 	}
-	return seed, nil
+	return "", nil
 }
 
 func (f *awsFleet) launchInput(l *lease) *ec2.RunInstancesInput {
@@ -252,10 +237,31 @@ func (f *awsFleet) publish(ctx context.Context, l *lease) error {
 	if err != nil {
 		return err
 	}
+	kept := 0
+	skip := false
 	for _, s := range entries {
-		if s.State == types.SnapshotStatePending || (s.State == types.SnapshotStateCompleted && time.Since(aws.ToTime(s.StartTime)) < 24*time.Hour) {
-			return nil
+		switch s.State {
+		case types.SnapshotStatePending:
+			skip = true
+			continue
+		case types.SnapshotStateCompleted:
+			if time.Since(aws.ToTime(s.StartTime)) < 24*time.Hour {
+				skip = true
+			}
+			if kept < 2 {
+				kept++
+				continue
+			}
+		case types.SnapshotStateError:
+		default:
+			continue
 		}
+		if _, err := f.api.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: s.SnapshotId}); err != nil {
+			return awsFailure("expire cache snapshot", err)
+		}
+	}
+	if skip {
+		return nil
 	}
 	tags := append(f.lineage(), tag("YielddLease", l.Name), tag("YielddRun", fmt.Sprint(l.EC2.ProducerRun)))
 	snapshot, err := f.api.CreateSnapshot(ctx, &ec2.CreateSnapshotInput{VolumeId: &l.EC2.Volume, Description: aws.String("yieldd build cache"), TagSpecifications: []types.TagSpecification{{ResourceType: types.ResourceTypeSnapshot, Tags: tags}}}, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
