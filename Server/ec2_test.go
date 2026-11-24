@@ -68,6 +68,14 @@ func TestEC2ScopesOneLinuxRoute(t *testing.T) {
 	if err := configureEC2(configs, string(raw)); err != nil || configs[0].EC2.Repository != "" || configs[1].EC2 != cfg {
 		t.Fatal(configs, err)
 	}
+	for _, endpoint := range []string{"https://host/", "https://host?", "https://host'", "https://:443", "https://host#"} {
+		bad := cfg
+		bad.Endpoint = endpoint
+		raw, _ := json.Marshal(bad)
+		if configureEC2(configs, string(raw)) == nil {
+			t.Fatal("accepted invalid callback origin", endpoint)
+		}
+	}
 	for _, mutate := range []func(*ec2Config){func(c *ec2Config) { c.Repository = "other/repo" }, func(c *ec2Config) { c.Endpoint = "http://host" }, func(c *ec2Config) { c.Endpoint = "https://user:pass@host" }, func(c *ec2Config) { c.Workflow = "../ci.yml" }} {
 		bad := cfg
 		mutate(&bad)
@@ -217,7 +225,7 @@ func TestEC2RecoveryWithoutBootstrapKey(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "local")
 	t.Setenv("AWS_ENDPOINT_URL_STS", srv.URL)
 	t.Setenv("YIELDD_EC2_BOOTSTRAP_KEY", "")
-	worker, err := newQueueWorker(c.state, store, "test", 1, true)
+	worker, err := newQueueWorker(t.Context(), c.state, store, "test", 1, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +235,7 @@ func TestEC2RecoveryWithoutBootstrapKey(t *testing.T) {
 		t.Fatal("did not retire the instance", done, err)
 	}
 	t.Setenv("YIELDD_EC2_BOOTSTRAP_KEY", strings.Repeat("ab", 32))
-	if _, err := newQueueWorker(c.state, store, "test", 1, false); err == nil || !strings.Contains(err.Error(), "restore the EC2 bootstrap key") {
+	if _, err := newQueueWorker(t.Context(), c.state, store, "test", 1, false); err == nil || !strings.Contains(err.Error(), "restore the EC2 bootstrap key") {
 		t.Fatal("normal startup accepted a changed key", err)
 	}
 	fleet.instance.state = "terminated"

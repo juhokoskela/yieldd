@@ -230,7 +230,7 @@ func recoverAssignment(ctx context.Context, directory string, configs []config, 
 		if !saved.Config.sameRoute(cfg) {
 			return errors.New("recover with the original queue configuration")
 		}
-		c, err := newQueueWorker(saved, store, token, 0, true)
+		c, err := newQueueWorker(ctx, saved, store, token, 0, true)
 		if err != nil {
 			return err
 		}

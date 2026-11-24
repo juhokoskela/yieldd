@@ -53,7 +53,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if err != nil {
 		return nil, err
 	}
-	worker, err := newQueueWorker(saved, store, token, maxFallbackRunners, recoverOnly)
+	worker, err := newQueueWorker(ctx, saved, store, token, maxFallbackRunners, recoverOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (p *platformCoordinator) recordScaleSetID(ctx context.Context, id int) erro
 	})
 }
 
-func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRunners int, recoverOnly bool) (*coordinator, error) {
+func newQueueWorker(ctx context.Context, saved *state, store *stateStore, token string, maxFallbackRunners int, recoverOnly bool) (*coordinator, error) {
 	cfg := saved.Config
 	logger := slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())
 	client, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
@@ -140,7 +140,7 @@ func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRu
 				}
 			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		worker.fleet, err = newAWSFleet(ctx, cfg.EC2, saved.Owner, key)
 		if err != nil {

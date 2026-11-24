@@ -44,14 +44,11 @@ func configureEC2(configs []config, raw string) error {
 	if dec.Decode(new(any)) != io.EOF {
 		return errors.New("unexpected trailing EC2 configuration")
 	}
-	u, err := url.Parse(cfg.Endpoint)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.String() != "https://"+u.Host {
-		return errors.New("EC2 endpoint must be an HTTPS origin")
-	}
-	if !regexp.MustCompile(`^[A-Za-z0-9.-]+(:[0-9]+)?$`).MatchString(u.Host) || strings.TrimSpace(cfg.Job) == "" || len(cfg.Job) > 128 || strings.ContainsAny(cfg.Job, "*?\\\r\n") {
-		return errors.New("invalid EC2 callback host or seed job name")
+	if strings.TrimSpace(cfg.Job) == "" || len(cfg.Job) > 128 || strings.ContainsAny(cfg.Job, "*?\\\r\n") {
+		return errors.New("invalid EC2 seed job name")
 	}
 	fields := []struct{ name, value, pattern string }{
+		{"endpoint", cfg.Endpoint, `^https://[A-Za-z0-9.-]+(:[0-9]+)?$`},
 		{"region", cfg.Region, "^[a-z0-9-]+$"},
 		{"account", cfg.Account, "^[0-9]{12}$"},
 		{"image", cfg.Image, "^ami-[a-f0-9]{17}$"},
