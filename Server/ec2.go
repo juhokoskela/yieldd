@@ -79,6 +79,7 @@ type ec2Lease struct {
 	Instance          string `json:"instance,omitempty"`
 	Volume            string `json:"volume,omitempty"`
 	Issuing           bool   `json:"issuing,omitempty"`
+	Started           bool   `json:"started,omitempty"`
 	Completed         bool   `json:"completed,omitempty"`
 	ProducerBranch    string `json:"producer_branch,omitempty"`
 	ProducerRun       int64  `json:"producer_run,omitempty"`
@@ -237,10 +238,10 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 		if err != nil || !retiring {
 			return false, err
 		}
-		if !recoverOnly && !e.Issuing && (e.Instance != "" || h.id != "") {
+		if !recoverOnly && !e.Completed && (e.Started || !e.Issuing) && (e.Instance != "" || h.id != "") {
 			// Preserve the reservation across automatic service restarts. A bad
 			// image must not repeatedly launch for the same queued demand.
-			return false, fmt.Errorf("EC2 runner ended before requesting registration; inspect the instance and use --recover %s", a.recoveryTarget())
+			return false, fmt.Errorf("EC2 runner failed during startup or job execution; inspect the instance and use --recover %s", a.recoveryTarget())
 		}
 		if err := a.beginCleanup(""); err != nil {
 			return false, err
@@ -255,6 +256,16 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 		return false, a.fleet.terminate(ctx, h.id)
 	}
 	return false, nil
+}
+
+func (c *coordinator) recordEC2Start(job *scaleset.JobStarted) error {
+	a := c.assigned(job.RunnerName)
+	if a.lease == nil || a.lease.EC2 == nil || a.lease.RunnerID <= 0 || a.lease.RunnerID != job.RunnerID || a.lease.EC2.Started || a.lease.EC2.Completed {
+		return nil
+	}
+	e := *a.lease.EC2
+	e.Started = true
+	return a.saveEC2(e)
 }
 
 func (c *coordinator) recordEC2Job(job *scaleset.JobCompleted, success bool) error {

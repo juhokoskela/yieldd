@@ -19,10 +19,15 @@ type shutdownAwareListenerClient struct {
 // completions on receipt so a failed write leaves the message with GitHub.
 func (c shutdownAwareListenerClient) GetMessage(ctx context.Context, lastID, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
 	msg, err := c.Client.GetMessage(ctx, lastID, capacity)
-	if err != nil || msg == nil || len(msg.JobCompletedMessages) == 0 || c.loop.worker.fleet == nil {
+	if err != nil || msg == nil || (len(msg.JobCompletedMessages) == 0 && len(msg.JobStartedMessages) == 0) || c.loop.worker.fleet == nil {
 		return msg, err
 	}
 	err = c.loop.invoke(ctx, func(context.Context) error {
+		for _, job := range msg.JobStartedMessages {
+			if err := c.loop.worker.recordEC2Start(job); err != nil {
+				return err
+			}
+		}
 		for _, job := range msg.JobCompletedMessages {
 			if err := c.loop.worker.recordEC2Job(job, jobSucceededResult(job.Result)); err != nil {
 				return err

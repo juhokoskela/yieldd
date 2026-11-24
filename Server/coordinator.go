@@ -204,6 +204,9 @@ func (a *assignment) replace(nextLease *lease) error {
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
+	if err := c.recordEC2Start(job); err != nil {
+		return err
+	}
 	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, jobStarted); err != nil {
 		return err
 	}

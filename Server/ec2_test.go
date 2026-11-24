@@ -447,6 +447,21 @@ func TestEC2ExpiryDuringListenerOutage(t *testing.T) {
 	}
 }
 
+func TestEC2RetainsInterruptedExecution(t *testing.T) {
+	c, _, _ := newFixture(t)
+	c.state.Config.EC2 = exampleEC2()
+	f := &fakeFleet{instance: ec2Host{id: "i-1", state: "terminated"}}
+	c.fleet = f
+	l := &lease{Name: fixtureRunner, Created: time.Now(), RunnerID: 7, DispatchIntent: true, EC2: &ec2Lease{Instance: "i-1", Issuing: true}}
+	c.state.Leases = map[string]*lease{l.Name: l}
+	if err := c.HandleJobStarted(t.Context(), &scaleset.JobStarted{RunnerName: l.Name, RunnerID: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 0); err == nil || !strings.Contains(err.Error(), "--recover") || f.launched != 0 || len(c.state.Leases) != 1 {
+		t.Fatal("interrupted execution was released", err)
+	}
+}
+
 func TestEC2PromotesOnlySelectedJob(t *testing.T) {
 	for _, v := range []struct {
 		event, name, owner string
