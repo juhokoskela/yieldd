@@ -11,12 +11,13 @@ import (
 )
 
 type config struct {
-	Repository     string `json:"repository"`
-	Infrastructure string `json:"infrastructure"`
-	Fallback       string `json:"fallback"`
-	DeviceID       string `json:"device_id,omitempty"`
-	Platform       string `json:"platform,omitempty"`
-	LocalOnly      bool   `json:"local_only,omitempty"`
+	EC2            ec2Config `json:"ec2,omitzero"`
+	Repository     string    `json:"repository"`
+	Infrastructure string    `json:"infrastructure"`
+	Fallback       string    `json:"fallback"`
+	DeviceID       string    `json:"device_id,omitempty"`
+	Platform       string    `json:"platform,omitempty"`
+	LocalOnly      bool      `json:"local_only,omitempty"`
 }
 
 func (c config) platform() string {

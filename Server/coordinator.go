@@ -43,6 +43,10 @@ var bootstrapIdentityMismatch = errors.New("bootstrap run identity does not matc
 
 // One event loop owns every assignment in a repository/platform queue.
 type coordinator struct {
+	fleet                  ec2Fleet
+	ec2Auth                []byte
+	ec2Owner               string
+	seedAllowed            func(context.Context, int64) (bool, error)
 	state                  *state
 	save                   func(*state) error
 	runners                runnerAPI
@@ -208,6 +212,9 @@ func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCom
 	event := jobUnsuccessful
 	if strings.EqualFold(job.Result, "succeeded") || strings.EqualFold(job.Result, "success") {
 		event = jobSucceeded
+	}
+	if err := c.recordEC2Job(job, event == jobSucceeded); err != nil {
+		return err
 	}
 	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, event); err != nil {
 		return err
@@ -585,6 +592,9 @@ func (a *assignment) provisionHosted(ctx context.Context) error {
 	if a.state.Config.LocalOnly {
 		return errors.New("local-only queues cannot dispatch fallback runners")
 	}
+	if a.fleet != nil {
+		return a.provisionEC2(ctx)
+	}
 	l := a.lease
 	generated, err := a.generateRegistration(ctx)
 	if err != nil {
@@ -641,6 +651,9 @@ func (a *assignment) reconcileWithRun(ctx context.Context, recoverOnly bool, obs
 	}
 	if l.Local != nil {
 		return a.reconcileLocal(ctx, recoverOnly)
+	}
+	if l.EC2 != nil {
+		return a.reconcileEC2(ctx, recoverOnly)
 	}
 	if !l.DispatchIntent {
 		if err := a.beginCleanup(""); err != nil {
@@ -791,7 +804,7 @@ func (a *assignment) cleanup(ctx context.Context) error {
 			return &sdkError{"remove runner", err}
 		}
 	}
-	if l.Local == nil {
+	if l.Local == nil && a.fleet == nil {
 		if err := a.bootstrap.deleteSecret(ctx, l.secretName()); err != nil {
 			return err
 		}

@@ -6,6 +6,8 @@ Each repository/platform queue can hold up to 16 assignments. A [connected Mac](
 
 The coordinator uses [actions/scaleset v0.4.0](https://github.com/actions/scaleset/tree/v0.4.0). It scales from GitHub's assigned-job count, not individual job notifications. GitHub chooses which queued job a runner receives.
 
+To use a disposable M9g runner with a private EBS build cache for one Linux repository, see [EC2 overflow](../Docs/ec2-overflow.md).
+
 ## Setup
 
 Use a Linux or macOS coordinator with Go 1.27.4 or newer. Run one coordinator for the configured repositories and infrastructure workflow, with a dedicated private state directory. Do not run another scale-set controller or legacy standalone `yieldd` service against the same repository's label during the experiment.

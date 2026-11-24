@@ -15,6 +15,7 @@ import (
 )
 
 type lease struct {
+	EC2            *ec2Lease   `json:"ec2,omitempty"`
 	Name           string      `json:"name"`
 	Created        time.Time   `json:"created"`
 	RunnerID       int         `json:"runner_id,omitempty"`
@@ -35,6 +36,13 @@ func (l *lease) validateTransition(next *lease) error {
 	}
 	if (l.CleanupIntent && !next.CleanupIntent) || (l.DispatchIntent && !next.DispatchIntent) {
 		return errors.New("persisted cleanup or dispatch intent cannot be revoked")
+	}
+	if e, n := l.EC2, next.EC2; e != nil && (n == nil || e.Seed != n.Seed || e.KeyID != n.KeyID ||
+		(e.Instance != "" && e.Instance != n.Instance) || (e.Volume != "" && e.Volume != n.Volume) ||
+		(e.Issuing && !n.Issuing) ||
+		(e.Completed && (!n.Completed || e.ProducerRun != n.ProducerRun)) ||
+		(e.SnapshotAttempted && !n.SnapshotAttempted)) {
+		return errors.New("EC2 assignment identity and progress cannot change")
 	}
 	if l.Local == nil {
 		if next.Local != nil {
@@ -187,7 +195,10 @@ func (s *stateStore) read() (*state, error) {
 		if value.Config.LocalOnly && l.Local == nil {
 			return nil, errors.New("local-only queue contains a fallback lease")
 		}
-		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0) || (l.Conclusion != "" && !l.CleanupIntent) {
+		if l.EC2 != nil && (value.Config.EC2.Repository == "" || l.Local != nil || !l.DispatchIntent || l.RunID != 0 || (l.RunnerID != 0 && !l.EC2.Issuing)) {
+			return nil, errors.New("invalid EC2 assignment")
+		}
+		if !runnerNamePattern.MatchString(l.Name) || l.Created.IsZero() || l.RunnerID < 0 || l.RunID < 0 || (l.RunID != 0 && !l.DispatchIntent) || (l.DispatchIntent && l.RunnerID == 0 && l.EC2 == nil) || (l.Conclusion != "" && !l.CleanupIntent) {
 			return nil, errors.New("invalid provisioning lease")
 		}
 		if err := l.validateLocal(value.Config.DeviceID); err != nil {

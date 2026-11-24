@@ -126,7 +126,28 @@ func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRu
 	api := &githubAPI{base: "https://api.github.com", token: token, infrastructure: cfg.Infrastructure, client: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
-	return &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: maxFallbackRunners}, nil
+	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: maxFallbackRunners}
+	if cfg.EC2.Repository != "" {
+		key, err := ec2Key()
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range saved.Leases {
+			if l.EC2 != nil && l.EC2.KeyID != ec2KeyID(key) {
+				return nil, errors.New("restore the EC2 bootstrap key used by the outstanding assignment")
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		worker.fleet, err = newAWSFleet(ctx, cfg.EC2, saved.Owner, key)
+		if err != nil {
+			return nil, err
+		}
+		worker.ec2Auth, worker.ec2Owner = key, saved.Owner
+		worker.seedAllowed = func(ctx context.Context, id int64) (bool, error) { return api.trustedSeed(ctx, cfg.EC2, id) }
+		worker.maxFallbackRunners = 1
+	}
+	return worker, nil
 }
 
 func newScaleSetClient(configURL, token string) (*scaleset.Client, error) {

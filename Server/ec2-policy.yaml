@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Permissions for one yieldd coordinator to run single-use M9g workers.
+Parameters:
+  CoordinatorRole:
+    Type: String
+  Repository:
+    Type: String
+    Description: Lowercase owner/repository
+  Image:
+    Type: AWS::EC2::Image::Id
+  Subnet:
+    Type: AWS::EC2::Subnet::Id
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+Resources:
+  RunnerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Roles: [!Ref CoordinatorRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: [ec2:DescribeInstances, ec2:DescribeSnapshots, ec2:DescribeVolumes]
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref AWS::Region
+          - Effect: Allow
+            Action: ec2:RunInstances
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::image/${Image}
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${Subnet}
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${SecurityGroup}
+          - Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+            Condition:
+              ArnEquals:
+                ec2:Subnet: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${Subnet}
+          - Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ec2:InstanceType: m9g.xlarge
+                aws:RequestTag/YielddRepository: !Ref Repository
+          - Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
+            Condition:
+              StringEquals:
+                aws:RequestTag/YielddRepository: !Ref Repository
+              Bool:
+                ec2:Encrypted: 'true'
+          - Effect: Allow
+            Action: ec2:CreateSnapshot
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*
+            Condition:
+              StringEquals:
+                aws:RequestTag/YielddRepository: !Ref Repository
+          - Effect: Allow
+            Action: [ec2:DeleteVolume, ec2:CreateSnapshot]
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/YielddRepository: !Ref Repository
+          - Effect: Allow
+            Action: ec2:TerminateInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/YielddRepository: !Ref Repository
+          - Effect: Allow
+            Action: ec2:DeleteSnapshot
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/YielddRepository: !Ref Repository
+          - Effect: Allow
+            Action: ec2:CreateTags
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: [RunInstances, CreateSnapshot]
+                aws:RequestTag/YielddRepository: !Ref Repository

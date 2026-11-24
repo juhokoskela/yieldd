@@ -63,6 +63,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := configureEC2(configs, os.Getenv("YIELDD_EC2")); err != nil {
+		return err
+	}
 	if !filepath.IsAbs(directory) {
 		return errors.New("state directory must be absolute")
 	}
@@ -104,6 +107,9 @@ func run() error {
 			return err
 		}
 		workers = append(workers, worker)
+		if c.EC2.Repository != "" {
+			mux.HandleFunc("POST /v1/ec2/{runner}/{op}", worker.loop.ec2Handler)
+		}
 		platforms[c.platform()] = append(platforms[c.platform()], worker.loop)
 	}
 	for _, platform := range []string{"linux", "macos"} {
