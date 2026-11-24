@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -314,5 +315,61 @@ func TestEC2CompletionSurvivesFailedJournalBeforeAcknowledgement(t *testing.T) {
 		if failWrite != isJournalWrite(err) || acknowledged == failWrite {
 			t.Fatal("incorrect acknowledgement after write", failWrite, acknowledged, err)
 		}
+	}
+}
+
+func TestEC2ReconnectProcessesQueuedJobsBeforeRetirement(t *testing.T) {
+	for _, tc := range []struct {
+		name                                   string
+		started, queuedStart, queuedCompletion bool
+	}{
+		{name: "idle"},
+		{name: "queued start", queuedStart: true},
+		{name: "queued completion", started: true, queuedCompletion: true},
+		{name: "queued start then completion", queuedStart: true, queuedCompletion: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newFixture(t)
+			c.state.Config.EC2 = exampleEC2()
+			c.fleet = &fakeFleet{instance: ec2Host{id: "i-1", state: "terminated"}}
+			l := &lease{Name: fixtureRunner, Created: time.Now(), RunnerID: 7, DispatchIntent: true, EC2: &ec2Lease{Instance: "i-1", Issuing: true, Started: tc.started}}
+			if err := c.assigned(l.Name).replace(l); err != nil {
+				t.Fatal(err)
+			}
+			stats := &scaleset.RunnerScaleSetStatistic{}
+			var messages []*scaleset.RunnerScaleSetMessage
+			if tc.queuedStart {
+				messages = append(messages, &scaleset.RunnerScaleSetMessage{MessageID: 1, Statistics: stats, JobStartedMessages: []*scaleset.JobStarted{{RunnerName: l.Name, RunnerID: 7}}})
+			}
+			if tc.queuedCompletion {
+				messages = append(messages, &scaleset.RunnerScaleSetMessage{MessageID: 2, Statistics: stats, JobCompletedMessages: []*scaleset.JobCompleted{{RunnerName: l.Name, RunnerID: 7, Result: "success"}}})
+			}
+			messages = append(messages, nil)
+			polls, acks := 0, 0
+			stream := &controlledMessages{get: func(context.Context) (*scaleset.RunnerScaleSetMessage, error) {
+				if polls == len(messages) {
+					return nil, context.Canceled
+				}
+				polls++
+				return messages[polls-1], nil
+			}, delete: func(context.Context) error { acks++; return nil }}
+			p := testPlatform(t, t.Context(), c, stream)
+			done := make(chan error, 1)
+			go func() { done <- p.loop.run() }()
+			err := p.messages.Run(t.Context(), p.loop)
+			p.cancel()
+			<-done
+			held := tc.queuedStart && !tc.queuedCompletion
+			if polls != len(messages) || acks != len(messages)-1 || (len(c.state.Leases) == 1) != held {
+				t.Fatal("incomplete listener reconciliation", polls, acks, len(c.state.Leases), err)
+			}
+			if held {
+				if err == nil || !strings.Contains(err.Error(), "--recover") || !singleLease(c.state).EC2.Started {
+					t.Fatal("lost interrupted job", err)
+				}
+			} else if !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+		})
 	}
 }

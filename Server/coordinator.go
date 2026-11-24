@@ -47,6 +47,9 @@ type coordinator struct {
 	fleet                  ec2Fleet
 	ec2Auth                []byte
 	ec2Owner               string
+	ec2TerminalRunner      string
+	ec2TerminalAt          time.Time
+	ec2EmptyPoll           time.Time
 	ec2RetryAt             time.Time
 	ec2RetryDelay          time.Duration
 	state                  *state

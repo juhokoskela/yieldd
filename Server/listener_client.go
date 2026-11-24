@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -16,13 +17,18 @@ type shutdownAwareListenerClient struct {
 }
 
 // The SDK acknowledges a message before invoking job callbacks. Journal EC2
-// completions on receipt so a failed write leaves the message with GitHub.
+// job events on receipt so a failed write leaves the message with GitHub.
 func (c shutdownAwareListenerClient) GetMessage(ctx context.Context, lastID, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	started := time.Now()
 	msg, err := c.Client.GetMessage(ctx, lastID, capacity)
-	if err != nil || msg == nil || (len(msg.JobCompletedMessages) == 0 && len(msg.JobStartedMessages) == 0) || c.loop.worker.fleet == nil {
+	if err != nil || c.loop.worker.fleet == nil || (msg != nil && len(msg.JobCompletedMessages) == 0 && len(msg.JobStartedMessages) == 0) {
 		return msg, err
 	}
 	err = c.loop.invoke(ctx, func(context.Context) error {
+		if msg == nil {
+			c.loop.worker.ec2EmptyPoll = started
+			return nil
+		}
 		for _, job := range msg.JobStartedMessages {
 			if err := c.loop.worker.recordEC2Start(job); err != nil {
 				return err

@@ -219,6 +219,7 @@ func (s *coordinatorLoop) HandleDesiredRunnerCount(ctx context.Context, count in
 func (s *coordinatorLoop) suspendProvisioning() error {
 	return s.invoke(s.ctx, func(context.Context) error {
 		s.worker.demandUnavailable = true
+		s.worker.ec2EmptyPoll = time.Time{}
 		s.worker.device.forget(s.worker.state.Owner)
 		return nil
 	})

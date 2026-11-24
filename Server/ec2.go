@@ -238,10 +238,21 @@ func (a *assignment) reconcileEC2(ctx context.Context, recoverOnly bool) (bool, 
 		if err != nil || !retiring {
 			return false, err
 		}
-		if !recoverOnly && !e.Completed && (e.Started || !e.Issuing) && (e.Instance != "" || h.id != "") {
-			// Preserve the reservation across automatic service restarts. A bad
-			// image must not repeatedly launch for the same queued demand.
-			return false, fmt.Errorf("EC2 runner failed during startup or job execution; inspect the instance and use --recover %s", a.recoveryTarget())
+		if !recoverOnly && !e.Completed && (e.Instance != "" || h.id != "") {
+			// Initial demand arrives before queued job events after a reconnect.
+			// For a registered guest, wait for a poll begun after termination
+			// to drain the listener before classifying missing job events.
+			if l.RunnerID > 0 {
+				if a.ec2TerminalRunner != l.Name {
+					a.ec2TerminalRunner, a.ec2TerminalAt = l.Name, time.Now()
+				}
+				if !a.ec2EmptyPoll.After(a.ec2TerminalAt) {
+					return false, nil
+				}
+			}
+			if l.RunnerID == 0 || e.Started {
+				return false, fmt.Errorf("EC2 runner failed during startup or job execution; inspect the instance and use --recover %s", a.recoveryTarget())
+			}
 		}
 		if err := a.beginCleanup(""); err != nil {
 			return false, err

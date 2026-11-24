@@ -359,6 +359,10 @@ func TestEC2ReleasesUnfulfilledOrUnusedRunner(t *testing.T) {
 		if registered {
 			l.EC2.Issuing, l.RunnerID = true, 7
 			f.instance.state = "terminated"
+			if _, err := c.HandleDesiredRunnerCount(t.Context(), 0); err != nil || len(c.state.Leases) != 1 {
+				t.Fatal("classified registered runner before pending events", err)
+			}
+			c.ec2EmptyPoll = time.Now()
 		} else {
 			f.instance = ec2Host{}
 			l.Created = time.Now().Add(-11 * time.Minute)
@@ -457,8 +461,42 @@ func TestEC2RetainsInterruptedExecution(t *testing.T) {
 	if err := c.HandleJobStarted(t.Context(), &scaleset.JobStarted{RunnerName: l.Name, RunnerID: 7}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 0); err != nil || len(c.state.Leases) != 1 {
+		t.Fatal("classified interruption before pending events", err)
+	}
+	c.ec2EmptyPoll = time.Now()
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 0); err == nil || !strings.Contains(err.Error(), "--recover") || f.launched != 0 || len(c.state.Leases) != 1 {
 		t.Fatal("interrupted execution was released", err)
+	}
+}
+
+func TestEC2FailedRegistrationHoldsCapacity(t *testing.T) {
+	c, w, _ := newFixture(t)
+	c.state.Config.EC2 = exampleEC2()
+	f := &fakeFleet{}
+	c.fleet = f
+	w.generateErr = fmt.Errorf("registration forbidden")
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	l := singleLease(c.state)
+	ctx, cancel := context.WithCancel(t.Context())
+	loop := newCoordinatorLoop(ctx, c)
+	startLoops(t, cancel, []*coordinatorLoop{loop})
+	if jit, _, err := loop.registerEC2(ctx, l.Name); err == nil || jit != "" {
+		t.Fatal("unexpected registration result", err)
+	}
+	for range 2 {
+		if err := loop.invoke(ctx, func(ctx context.Context) error {
+			f.instance.state = "terminated"
+			_, err := c.HandleDesiredRunnerCount(ctx, 1)
+			if err == nil || !strings.Contains(err.Error(), "--recover") || len(c.state.Leases) != 1 || f.launched != 1 {
+				return fmt.Errorf("released failed registration: %v", err)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
