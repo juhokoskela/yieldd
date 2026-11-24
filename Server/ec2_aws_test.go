@@ -145,3 +145,31 @@ func TestEC2RetirementWaitsOnlyForActionableDisks(t *testing.T) {
 		})
 	}
 }
+
+func TestEC2ObservesTerminatedInstanceAfterTagRemoval(t *testing.T) {
+	for _, tc := range []struct {
+		state, owner, known string
+		want                bool
+	}{
+		{"terminated", "", "i-1", true}, {"terminated", "", "i-other", false},
+		{"terminated", "", "", false}, {"terminated", "other", "i-1", false},
+		{"running", "", "i-1", false}, {"running", "canary", "", true},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.FormValue("Filter.1.Name") != "client-token" || r.FormValue("Filter.1.Value.1") != fixtureRunner {
+				t.Error("missing lease filter")
+			}
+			fmt.Fprintf(w, "<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-1</instanceId><instanceState><name>%s</name></instanceState>", tc.state)
+			if tc.owner != "" {
+				fmt.Fprintf(w, "<tagSet><item><key>YielddOwner</key><value>%s</value></item></tagSet>", tc.owner)
+			}
+			fmt.Fprint(w, "</item></instancesSet></item></reservationSet></DescribeInstancesResponse>")
+		}))
+		f := awsFleet{api: testEC2Client(srv.URL), owner: "canary"}
+		h, err := f.host(t.Context(), &lease{Name: fixtureRunner, EC2: &ec2Lease{Instance: tc.known}})
+		srv.Close()
+		if (err == nil) != tc.want || (tc.want && h.id != "i-1") {
+			t.Fatal(tc, h, err)
+		}
+	}
+}

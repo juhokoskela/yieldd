@@ -185,12 +185,21 @@ func (f *awsFleet) host(ctx context.Context, l *lease) (ec2Host, error) {
 	var h ec2Host
 	for _, r := range out.Reservations {
 		for _, i := range r.Instances {
-			if h.id != "" || (l.EC2.Instance != "" && aws.ToString(i.InstanceId) != l.EC2.Instance) || !slices.ContainsFunc(i.Tags, func(t types.Tag) bool {
-				return aws.ToString(t.Key) == "YielddOwner" && aws.ToString(t.Value) == f.owner
-			}) {
+			observed := instanceHost(i)
+			if h.id != "" || observed.id == "" || (l.EC2.Instance != "" && observed.id != l.EC2.Instance) {
 				return ec2Host{}, errors.New("EC2 lease identity mismatch")
 			}
-			h = instanceHost(i)
+			owner := slices.IndexFunc(i.Tags, func(t types.Tag) bool { return aws.ToString(t.Key) == "YielddOwner" })
+			if owner >= 0 {
+				if aws.ToString(i.Tags[owner].Value) != f.owner {
+					return ec2Host{}, errors.New("EC2 lease owner mismatch")
+				}
+			} else if observed.state != "terminated" || observed.id != l.EC2.Instance {
+				// EC2 can remove tags from a terminated instance before it
+				// disappears from the client-token lookup.
+				return ec2Host{}, errors.New("EC2 lease owner missing")
+			}
+			h = observed
 		}
 	}
 	return h, nil
