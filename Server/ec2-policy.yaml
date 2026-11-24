@@ -54,6 +54,14 @@ Resources:
               Bool:
                 ec2:Encrypted: 'true'
           - Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*
+            Condition:
+              StringEquals:
+                ec2:Owner: !Ref AWS::AccountId
+                ec2:ResourceTag/YielddRepository: !Ref Repository
+                ec2:ResourceTag/YielddImage: !Ref Image
+          - Effect: Allow
             Action: ec2:CreateSnapshot
             Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::snapshot/*
             Condition:
