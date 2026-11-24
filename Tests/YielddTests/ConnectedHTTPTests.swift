@@ -187,16 +187,16 @@ func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatfor
     }
 }
 
-@Test(arguments: [RunnerPlatform.linux, .macOS])
-func connectedHTTPAuthorizationUsesIdentityAndDeadline(_ platform: RunnerPlatform) throws {
-    let body = #"{"continue":true}"#
+@Test(arguments: [RunnerPlatform.linux, .macOS], [true, false])
+func connectedHTTPAuthorizationUsesIdentityAndDeadline(_ platform: RunnerPlatform, authorized: Bool) throws {
+    let body = authorized ? #"{"continue":true}"# : #"{"continue":false,"job_succeeded":true}"#
     let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
     defer { server.close() }
     let client = ConnectedHTTPClient(server: server.client.server, deviceID: server.client.deviceID,
         token: server.token, platform: platform, checkCancellation: {})
     let offer = try ConnectedOffer(owner: client.deviceID, runner: "yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef",
         repository: "owner/repo", platform: platform == .linux ? "linux" : "macos", architecture: "arm64")
-    #expect(try client.renew(offer, checkDeadline: {}))
+    #expect(try client.renew(offer, checkDeadline: {}) == authorized)
     #expect(server.request.contains(platform == .linux ? "POST /v1/renew " : "POST /v1/macos/renew "))
     #expect(server.request.contains(offer.runner))
     #expect(server.request.contains(offer.owner))
