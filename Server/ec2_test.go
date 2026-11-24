@@ -21,6 +21,7 @@ import (
 type fakeFleet struct {
 	pendingDisk                     bool
 	freshSeed                       bool
+	planErr, publishErr             error
 	instance                        ec2Host
 	launched, terminated, published int
 	selected                        string
@@ -49,9 +50,10 @@ func (f *fakeFleet) terminate(context.Context, string) error {
 }
 func (f *fakeFleet) disksRetiring(context.Context, *lease) (bool, error) { return !f.pendingDisk, nil }
 func (f *fakeFleet) planSnapshot(context.Context) ([]string, bool, error) {
-	return nil, !f.freshSeed, nil
+	return nil, !f.freshSeed, f.planErr
 }
-func (f *fakeFleet) publish(context.Context, *lease, []string) error { f.published++; return nil }
+func (f *fakeFleet) prune(context.Context, []string) error { return nil }
+func (f *fakeFleet) publish(context.Context, *lease) error { f.published++; return f.publishErr }
 
 func exampleEC2() ec2Config {
 	return ec2Config{Repository: testConfig.Repository, Account: "111111111111", Region: "eu-central-1", Image: "ami-0123456789abcdef0", Subnet: "subnet-0123456789abcdef0", Group: "sg-0123456789abcdef0", Endpoint: "https://runner.example.test", Workflow: ".github/workflows/ci.yml", Job: "build"}
@@ -176,6 +178,15 @@ func TestEC2Lifecycle(t *testing.T) {
 		t.Fatal("fresh snapshot triggered publication work")
 	}
 	f.freshSeed = false
+	f.planErr = fmt.Errorf("temporary lookup failure")
+	if request("quiesced", token).Code != 503 || singleLease(c.state).EC2.SnapshotAttempted {
+		t.Fatal("lookup failure consumed publication attempt")
+	}
+	f.planErr = nil
+	f.publishErr = fmt.Errorf("create response lost")
+	if request("quiesced", token).Code != 503 || f.published != 1 {
+		t.Fatal("unexpected snapshot submission result")
+	}
 	for range 2 {
 		if request("quiesced", token).Code != 204 {
 			t.Fatal("failed to acknowledge unmount")

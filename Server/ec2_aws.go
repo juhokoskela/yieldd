@@ -268,12 +268,16 @@ func (f *awsFleet) planSnapshot(ctx context.Context) (retire []string, due bool,
 	return retire, true, nil
 }
 
-func (f *awsFleet) publish(ctx context.Context, l *lease, retire []string) error {
+func (f *awsFleet) prune(ctx context.Context, retire []string) error {
 	for _, id := range retire {
 		if _, err := f.api.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{SnapshotId: aws.String(id)}); err != nil {
 			return awsFailure("expire cache snapshot", err)
 		}
 	}
+	return nil
+}
+
+func (f *awsFleet) publish(ctx context.Context, l *lease) error {
 	tags := append(f.lineage(), tag("YielddLease", l.Name), tag("YielddRun", fmt.Sprint(l.EC2.ProducerRun)))
 	snapshot, err := f.api.CreateSnapshot(ctx, &ec2.CreateSnapshotInput{VolumeId: &l.EC2.Volume, Description: aws.String("yieldd build cache"), TagSpecifications: []types.TagSpecification{{ResourceType: types.ResourceTypeSnapshot, Tags: tags}}}, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
 	if err != nil {

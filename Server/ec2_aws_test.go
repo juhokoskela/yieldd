@@ -90,11 +90,14 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 	if err != nil || !due || strings.Join(retire, ",") != "snap-1,snap-0" {
 		t.Fatal("incorrect retention plan", retire, due, err)
 	}
-	if err := f.publish(t.Context(), l, retire); err == nil || created != 0 {
+	if err := f.prune(t.Context(), retire); err == nil || created != 0 {
 		t.Fatal("ignored snapshot retention failure", err)
 	}
 	denyDelete = false
-	if err := f.publish(t.Context(), l, retire); err != nil || created != 1 || strings.Join(deleted, ",") != "snap-1,snap-0" {
+	if err := f.prune(t.Context(), retire); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.publish(t.Context(), l); err != nil || created != 1 || strings.Join(deleted, ",") != "snap-1,snap-0" {
 		t.Fatal("failed to submit snapshot", deleted, created, err)
 	}
 	empty = true
