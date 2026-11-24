@@ -225,7 +225,9 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 	}
 	var jit string
 	status := http.StatusGone
+	received := time.Now()
 	err := s.invoke(r.Context(), func(ctx context.Context) error {
+		queueWait := time.Since(received)
 		a := c.assigned(name)
 		l := a.lease
 		if l == nil || l.CleanupIntent || l.EC2 == nil {
@@ -254,7 +256,9 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 			if err := a.saveEC2(e); err != nil {
 				return err
 			}
+			started := time.Now()
 			g, err := a.generateRegistration(ctx)
+			githubTime := time.Since(started)
 			if err != nil {
 				return err
 			}
@@ -263,6 +267,7 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 			if err := a.replace(&next); err != nil {
 				return err
 			}
+			c.logger.Info("EC2 runner registered", "runner", name, "queue_wait", queueWait, "github_jit", githubTime, "total", time.Since(received))
 			jit = g.EncodedJITConfig
 			status = 200
 			return nil
