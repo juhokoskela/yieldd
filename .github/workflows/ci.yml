@@ -35,17 +35,20 @@ jobs:
           go-version-file: Prototypes/RunnerNetwork/go.mod
           cache-dependency-path: Prototypes/RunnerNetwork/go.sum
 
-      - name: Restore and save SwiftPM build cache
+      - name: Restore and save build cache
+        id: build-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: |
-            .build/arm64-apple-macosx
-            .build/checkouts
-            .build/repositories
-            .build/workspace-state.json
-          key: swiftpm-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          path: .build
+          key: yieldd-build-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Cache/**', 'Scripts/build-cache-server.sh', 'Prototypes/RunnerNetwork/go.sum', 'Prototypes/RunnerNetwork/gvproxy.patch') }}-${{ github.sha }}
           restore-keys: |
-            swiftpm-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+            yieldd-build-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Cache/**', 'Scripts/build-cache-server.sh', 'Prototypes/RunnerNetwork/go.sum', 'Prototypes/RunnerNetwork/gvproxy.patch') }}-
+
+      - name: Verify restored build products
+        if: steps.build-cache.outputs.cache-hit == 'true'
+        run: |
+          test -x .build/release/yieldd
+          test -x .build/yieldd.app/Contents/Helpers/yieldd-cache-server
 
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
