@@ -63,12 +63,13 @@ func (s *controlledMessages) AcquireJobs(ctx context.Context, ids []int64) ([]in
 func testPlatform(t *testing.T, ctx context.Context, c *coordinator, stream *controlledMessages) *platformCoordinator {
 	t.Helper()
 	ctx, cancel := context.WithCancel(ctx)
-	messages, err := listener.New(shutdownAwareListenerClient{Client: stream, lifetime: ctx}, listener.Config{ScaleSetID: c.state.ScaleSetID, MaxRunners: maximumAssignments})
+	loop := newCoordinatorLoop(ctx, c)
+	messages, err := listener.New(shutdownAwareListenerClient{Client: stream, lifetime: ctx, loop: loop}, listener.Config{ScaleSetID: c.state.ScaleSetID, MaxRunners: maximumAssignments})
 	if err != nil {
 		cancel()
 		t.Fatal(err)
 	}
-	return &platformCoordinator{cancel: cancel, loop: newCoordinatorLoop(ctx, c), messages: messages, session: stream, scaleSetID: c.state.ScaleSetID,
+	return &platformCoordinator{cancel: cancel, loop: loop, messages: messages, session: stream, scaleSetID: c.state.ScaleSetID,
 		newSession: func(context.Context) (listenerSession, error) { return stream, nil }}
 }
 
@@ -268,5 +269,50 @@ func TestUncertainFirstScaleSetIDStopsQueueBeforeOpeningSession(t *testing.T) {
 	saved, err := store.load(c.state.Config)
 	if err != nil || saved.ScaleSetID != 42 || c.state.ScaleSetID != 0 {
 		t.Fatal(saved, err)
+	}
+}
+
+func TestEC2CompletionSurvivesFailedJournalBeforeAcknowledgement(t *testing.T) {
+	c, _, store := newFixture(t)
+	c.state.Config.EC2 = exampleEC2()
+	c.fleet = &fakeFleet{instance: ec2Host{id: "i-1", state: "running"}}
+	l := &lease{Name: fixtureRunner, Created: time.Now(), RunnerID: 7, DispatchIntent: true, EC2: &ec2Lease{Instance: "i-1", Issuing: true}}
+	if err := c.assigned(l.Name).replace(l); err != nil {
+		t.Fatal(err)
+	}
+	job := &scaleset.JobCompleted{RunnerName: l.Name, RunnerID: 7, Result: "success", JobMessageBase: scaleset.JobMessageBase{OwnerName: "example", RepositoryName: "application", JobDisplayName: "build", WorkflowRunID: 23, EventName: "push"}}
+	msg := &scaleset.RunnerScaleSetMessage{MessageID: 1, Statistics: &scaleset.RunnerScaleSetStatistic{}, JobCompletedMessages: []*scaleset.JobCompleted{job}}
+	for _, failWrite := range []bool{true, false} {
+		saved, err := store.read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.state = saved
+		c.save = store.save
+		if failWrite {
+			c.save = func(*state) error { return errors.New("journal unavailable") }
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		acknowledged := false
+		stream := &controlledMessages{messages: make(chan *scaleset.RunnerScaleSetMessage, 1), delete: func(context.Context) error {
+			acknowledged = true
+			saved, err := store.read()
+			if err != nil || !saved.Leases[l.Name].EC2.Completed || saved.Leases[l.Name].EC2.ProducerRun != 23 {
+				t.Fatal("acknowledged before persistence", err)
+			}
+			cancel()
+			return context.Canceled
+		}}
+		stream.messages <- msg
+		p := testPlatform(t, ctx, c, stream)
+		done := make(chan error, 1)
+		go func() { done <- p.loop.run() }()
+		err = p.messages.Run(ctx, p.loop)
+		cancel()
+		<-done
+		p.cancel()
+		if failWrite != isJournalWrite(err) || acknowledged == failWrite {
+			t.Fatal("incorrect acknowledgement after write", failWrite, acknowledged, err)
+		}
 	}
 }

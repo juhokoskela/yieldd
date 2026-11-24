@@ -211,9 +211,13 @@ func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStart
 	return nil
 }
 
+func jobSucceededResult(result string) bool {
+	return strings.EqualFold(result, "succeeded") || strings.EqualFold(result, "success")
+}
+
 func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCompleted) error {
 	event := jobUnsuccessful
-	if strings.EqualFold(job.Result, "succeeded") || strings.EqualFold(job.Result, "success") {
+	if jobSucceededResult(job.Result) {
 		event = jobSucceeded
 	}
 	if err := c.recordEC2Job(job, event == jobSucceeded); err != nil {

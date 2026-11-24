@@ -229,7 +229,7 @@ func (p *platformCoordinator) openMessages(ctx context.Context) error {
 		return &sdkError{"open message session", err}
 	}
 	p.session = session
-	p.messages, err = listener.New(shutdownAwareListenerClient{Client: session, lifetime: p.loop.ctx}, listener.Config{ScaleSetID: p.scaleSetID, MaxRunners: maximumAssignments})
+	p.messages, err = listener.New(shutdownAwareListenerClient{Client: session, lifetime: p.loop.ctx, loop: p.loop}, listener.Config{ScaleSetID: p.scaleSetID, MaxRunners: maximumAssignments})
 	return err
 }
 
