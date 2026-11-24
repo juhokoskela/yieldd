@@ -49,10 +49,13 @@ jobs:
             .build/workspace-state.json
           key: yieldd-swift-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
 
-      - name: Cache Rust build products
+      - name: Cache Rust build products and crate downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: .build/cache-server-target
+          path: |
+            .build/cache-server-target
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
           key: yieldd-cargo-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Scripts/build-cache-server.sh', 'Cache/cache-server.patch') }}
           restore-keys: yieldd-cargo-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-
 
