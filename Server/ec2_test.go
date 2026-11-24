@@ -73,7 +73,7 @@ func TestEC2Lifecycle(t *testing.T) {
 	c, w, store := newFixture(t)
 	c.state.Config.EC2 = exampleEC2()
 	checkJournalOmitsCredential(t, c, store)
-	f := &fakeFleet{selected: "snap-1"}
+	f := &fakeFleet{selected: "snap-1", lostReply: true}
 	c.fleet = f
 	c.ec2Auth = []byte("test")
 	c.ec2Owner = c.state.Owner
@@ -82,9 +82,10 @@ func TestEC2Lifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := singleLease(c.state)
-	if l.EC2.Seed != "snap-1" || w.dispatched != 0 || w.runner != nil || f.launched != 1 {
+	if l.EC2.Instance != "" || l.EC2.Seed != "snap-1" || w.dispatched != 0 || w.runner != nil || f.launched != 1 {
 		t.Fatal(l, w.events)
 	}
+	c.verificationRetryAt = time.Time{} // Allow the first reconciliation after the lost launch reply.
 	loop := newCoordinatorLoop(t.Context(), c)
 	done := make(chan struct{})
 	go func() { defer close(done); _ = loop.run() }()
@@ -103,6 +104,7 @@ func TestEC2Lifecycle(t *testing.T) {
 	if request("register", "wrong").Code != 403 {
 		t.Fatal("accepted invalid credential")
 	}
+	f.instance.volume = ""
 	first := request("register", token)
 	if first.Code != 200 || first.Body.String() != "private-jit" || request("register", token).Code != 410 {
 		t.Fatal("registration was not single-use")
@@ -114,6 +116,10 @@ func TestEC2Lifecycle(t *testing.T) {
 	if err := loop.HandleJobCompleted(t.Context(), job); err != nil {
 		t.Fatal(err)
 	}
+	if got := request("quiesced", token).Code; got != http.StatusServiceUnavailable || f.published != 0 {
+		t.Fatal("published without discovering the cache volume", got)
+	}
+	f.instance.volume = "vol-2"
 	for range 2 {
 		if request("quiesced", token).Code != 204 {
 			t.Fatal("failed to acknowledge unmount")

@@ -234,12 +234,13 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		e := *l.EC2
-		if e.Instance == "" || (op == "quiesced" && e.ProducerRun > 0 && e.Volume == "") {
+		needsVolume := op == "quiesced" && e.ProducerRun > 0 && e.Volume == ""
+		if e.Instance == "" || needsVolume {
 			h, err := a.fleet.host(ctx, l)
 			if err != nil {
 				return err
 			}
-			if h.id == "" || h.volume == "" {
+			if h.id == "" || (needsVolume && h.volume == "") {
 				status = http.StatusServiceUnavailable
 				return nil
 			}
