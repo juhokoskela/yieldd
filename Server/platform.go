@@ -53,7 +53,7 @@ func openPlatformCoordinator(ctx context.Context, cfg config, directory, token s
 	if err != nil {
 		return nil, err
 	}
-	worker, err := newQueueWorker(saved, store, token, maxFallbackRunners)
+	worker, err := newQueueWorker(saved, store, token, maxFallbackRunners, recoverOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (p *platformCoordinator) recordScaleSetID(ctx context.Context, id int) erro
 	})
 }
 
-func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRunners int) (*coordinator, error) {
+func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRunners int, recoverOnly bool) (*coordinator, error) {
 	cfg := saved.Config
 	logger := slog.Default().With("repository", cfg.Repository, "platform", cfg.platform())
 	client, err := newScaleSetClient("https://github.com/"+cfg.Repository, token)
@@ -128,13 +128,16 @@ func newQueueWorker(saved *state, store *stateStore, token string, maxFallbackRu
 	}}
 	worker := &coordinator{state: saved, save: store.save, runners: client, bootstrap: api, logger: logger, maxFallbackRunners: maxFallbackRunners}
 	if cfg.EC2.Repository != "" {
-		key, err := ec2Key()
-		if err != nil {
-			return nil, err
-		}
-		for _, l := range saved.Leases {
-			if l.EC2 != nil && l.EC2.KeyID != ec2KeyID(key) {
-				return nil, errors.New("restore the EC2 bootstrap key used by the outstanding assignment")
+		var key []byte
+		if !recoverOnly {
+			key, err = ec2Key()
+			if err != nil {
+				return nil, err
+			}
+			for _, l := range saved.Leases {
+				if l.EC2 != nil && l.EC2.KeyID != ec2KeyID(key) {
+					return nil, errors.New("restore the EC2 bootstrap key used by the outstanding assignment")
+				}
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

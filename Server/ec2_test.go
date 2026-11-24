@@ -142,6 +142,47 @@ func TestEC2Lifecycle(t *testing.T) {
 	}
 }
 
+func TestEC2RecoveryWithoutBootstrapKey(t *testing.T) {
+	c, world, store := newFixture(t)
+	c.state.Config.EC2 = exampleEC2()
+	fleet := &fakeFleet{}
+	c.fleet = fleet
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.FormValue("Action") != "GetCallerIdentity" {
+			t.Error("unexpected AWS request", r.FormValue("Action"))
+		}
+		fmt.Fprint(w, "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>111111111111</Account></GetCallerIdentityResult></GetCallerIdentityResponse>")
+	}))
+	defer srv.Close()
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_CONFIG_FILE", "/dev/null")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+	t.Setenv("AWS_ACCESS_KEY_ID", "local")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "local")
+	t.Setenv("AWS_ENDPOINT_URL_STS", srv.URL)
+	t.Setenv("YIELDD_EC2_BOOTSTRAP_KEY", "")
+	worker, err := newQueueWorker(c.state, store, "test", 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.fleet, worker.runners, worker.bootstrap = fleet, world, world
+	worker.device = c.device
+	if done, err := worker.reconcile(t.Context(), true); err != nil || done || fleet.terminated != 1 {
+		t.Fatal("did not retire the instance", done, err)
+	}
+	t.Setenv("YIELDD_EC2_BOOTSTRAP_KEY", strings.Repeat("ab", 32))
+	if _, err := newQueueWorker(c.state, store, "test", 1, false); err == nil || !strings.Contains(err.Error(), "restore the EC2 bootstrap key") {
+		t.Fatal("normal startup accepted a changed key", err)
+	}
+	fleet.instance.state = "terminated"
+	if done, err := worker.reconcile(t.Context(), true); err != nil || !done || len(worker.state.Leases) != 0 {
+		t.Fatal("did not release the lease", done, err)
+	}
+}
+
 func TestEC2RecoversLostLaunchResponseFromJournal(t *testing.T) {
 	c, _, store := newFixture(t)
 	c.state.Config.EC2 = exampleEC2()
