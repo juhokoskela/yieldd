@@ -101,7 +101,7 @@ struct RunnerNetworkDirectories {
         if !failures.isEmpty { throw RunnerSessionError.cleanupFailed(failures) }
     }
 
-    func directory(for id: RunnerID) throws -> URL {
+    private func directory(for id: RunnerID) throws -> URL {
         guard id.isValid else { throw RunnerLeaseError.invalidRunnerID(path: rootURL.path) }
         return rootURL.appendingPathComponent(Self.key(id.value), isDirectory: true)
     }
