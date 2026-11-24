@@ -51,10 +51,10 @@ func configureEC2(configs []config, raw string) error {
 		{"endpoint", cfg.Endpoint, `^https://[A-Za-z0-9.-]+(:[0-9]+)?$`},
 		{"region", cfg.Region, "^[a-z0-9-]+$"},
 		{"account", cfg.Account, "^[0-9]{12}$"},
-		{"image", cfg.Image, "^ami-[a-f0-9]{17}$"},
-		{"subnet", cfg.Subnet, "^subnet-[a-f0-9]{17}$"},
-		{"security_group", cfg.Group, "^sg-[a-f0-9]{17}$"},
-		{"seed_workflow", cfg.Workflow, `^\.github/workflows/[A-Za-z0-9_-]+\.ya?ml$`},
+		{"image", cfg.Image, "^ami-[a-f0-9]{8}([a-f0-9]{9})?$"},
+		{"subnet", cfg.Subnet, "^subnet-[a-f0-9]{8}([a-f0-9]{9})?$"},
+		{"security_group", cfg.Group, "^sg-[a-f0-9]{8}([a-f0-9]{9})?$"},
+		{"seed_workflow", cfg.Workflow, `^\.github/workflows/[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.ya?ml$`},
 	}
 	for _, f := range fields {
 		if ok, _ := regexp.MatchString(f.pattern, f.value); !ok {
@@ -88,7 +88,7 @@ type ec2Lease struct {
 type ec2Host struct{ id, volume, state string }
 type ec2Fleet interface {
 	seed(context.Context) (string, error)
-	launch(context.Context, *lease) (ec2Host, error)
+	launch(context.Context, *lease, string) (ec2Host, error)
 	host(context.Context, *lease) (ec2Host, error)
 	terminate(context.Context, string) error
 	disksRetiring(context.Context, *lease) (bool, error)
@@ -159,7 +159,7 @@ func (a *assignment) provisionEC2(ctx context.Context, l *lease) error {
 }
 
 func (a *assignment) launchEC2(ctx context.Context) error {
-	host, err := a.fleet.launch(ctx, a.lease)
+	host, err := a.fleet.launch(ctx, a.lease, bootstrapToken(a.ec2Auth, a.state.Owner, a.lease.Name))
 	if err != nil {
 		return err
 	}

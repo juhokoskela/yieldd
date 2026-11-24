@@ -142,7 +142,7 @@ func newQueueWorker(ctx context.Context, saved *state, store *stateStore, token 
 		}
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		worker.fleet, err = newAWSFleet(ctx, cfg.EC2, saved.Owner, key)
+		worker.fleet, err = newAWSFleet(ctx, cfg.EC2, saved.Owner)
 		if err != nil {
 			return nil, err
 		}

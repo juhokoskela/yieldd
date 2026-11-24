@@ -23,10 +23,9 @@ type awsFleet struct {
 	api   *ec2.Client
 	cfg   ec2Config
 	owner string
-	key   []byte
 }
 
-func newAWSFleet(ctx context.Context, c ec2Config, owner string, key []byte) (*awsFleet, error) {
+func newAWSFleet(ctx context.Context, c ec2Config, owner string) (*awsFleet, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(c.Region))
 	if err != nil {
 		return nil, err
@@ -38,7 +37,7 @@ func newAWSFleet(ctx context.Context, c ec2Config, owner string, key []byte) (*a
 	if aws.ToString(who.Account) != c.Account {
 		return nil, errors.New("EC2 credentials belong to a different AWS account")
 	}
-	return &awsFleet{ec2.NewFromConfig(cfg, ec2RequestLimits), c, owner, key}, nil
+	return &awsFleet{ec2.NewFromConfig(cfg, ec2RequestLimits), c, owner}, nil
 }
 
 // The coordinator owns retries so the serialized queue does not sleep inside the SDK.
@@ -108,7 +107,7 @@ func (f *awsFleet) seed(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-func (f *awsFleet) launchInput(l *lease) *ec2.RunInstancesInput {
+func (f *awsFleet) launchInput(l *lease, token string) *ec2.RunInstancesInput {
 	disk := &types.EbsBlockDevice{VolumeSize: aws.Int32(12), VolumeType: types.VolumeTypeGp3, DeleteOnTermination: aws.Bool(true), Encrypted: aws.Bool(true)}
 	mode := "blank"
 	if l.EC2.Seed != "" {
@@ -123,7 +122,7 @@ cat >/run/yieldd-ec2-auth <<'HEADER'
 Authorization: Bearer %s
 HEADER
 exec systemd-run --quiet --unit=yieldd-bootstrap /usr/local/sbin/yieldd-ec2-job '%s' '%s' '%s'
-`, bootstrapToken(f.key, f.owner, l.Name), f.cfg.Endpoint, l.Name, mode)
+`, token, f.cfg.Endpoint, l.Name, mode)
 	tags := append(f.lineage(), tag("YielddLease", l.Name))
 	return &ec2.RunInstancesInput{
 		ClientToken:                       aws.String(l.Name),
@@ -150,8 +149,8 @@ exec systemd-run --quiet --unit=yieldd-bootstrap /usr/local/sbin/yieldd-ec2-job 
 	}
 }
 
-func (f *awsFleet) launch(ctx context.Context, l *lease) (ec2Host, error) {
-	out, err := f.api.RunInstances(ctx, f.launchInput(l))
+func (f *awsFleet) launch(ctx context.Context, l *lease, token string) (ec2Host, error) {
+	out, err := f.api.RunInstances(ctx, f.launchInput(l, token))
 	if err != nil {
 		return ec2Host{}, awsFailure("launch", err)
 	}

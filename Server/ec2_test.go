@@ -34,7 +34,7 @@ func (f *fakeFleet) seed(context.Context) (string, error) {
 	f.seedCalls++
 	return f.selected, f.seedErr
 }
-func (f *fakeFleet) launch(_ context.Context, l *lease) (ec2Host, error) {
+func (f *fakeFleet) launch(_ context.Context, l *lease, _ string) (ec2Host, error) {
 	f.launched++
 	if f.launchErr != nil {
 		return ec2Host{}, f.launchErr
@@ -73,6 +73,13 @@ func TestEC2ScopesOneLinuxRoute(t *testing.T) {
 	configs := []config{mac, linux}
 	if err := configureEC2(configs, string(raw)); err != nil || configs[0].EC2.Repository != "" || configs[1].EC2 != cfg {
 		t.Fatal(configs, err)
+	}
+	short := cfg
+	short.Image, short.Subnet, short.Group = "ami-01234567", "subnet-01234567", "sg-01234567"
+	short.Workflow = ".github/workflows/ci.linux.yml"
+	raw, _ = json.Marshal(short)
+	if err := configureEC2(configs, string(raw)); err != nil {
+		t.Fatal(err)
 	}
 	for _, endpoint := range []string{"https://host/", "https://host?", "https://host'", "https://:443", "https://host#"} {
 		bad := cfg
@@ -522,19 +529,20 @@ func TestEC2VerifiesSeedOrigin(t *testing.T) {
 }
 
 func TestEC2LaunchIsPrivateAndReplayable(t *testing.T) {
-	f := awsFleet{cfg: exampleEC2(), owner: "owner", key: []byte("secret")}
+	f := awsFleet{cfg: exampleEC2(), owner: "owner"}
 	for _, seed := range []string{"", "snap-1"} {
 		l := &lease{Name: fixtureRunner, EC2: &ec2Lease{Seed: seed}}
-		in := f.launchInput(l)
+		token := bootstrapToken([]byte("secret"), f.owner, l.Name)
+		in := f.launchInput(l, token)
 		b := in.BlockDeviceMappings[0]
-		if in.IamInstanceProfile != nil || in.InstanceType != types.InstanceTypeM9gXlarge || in.InstanceInitiatedShutdownBehavior != types.ShutdownBehaviorTerminate || aws.ToString(in.ClientToken) != l.Name || !reflect.DeepEqual(in, f.launchInput(l)) {
+		if in.IamInstanceProfile != nil || in.InstanceType != types.InstanceTypeM9gXlarge || in.InstanceInitiatedShutdownBehavior != types.ShutdownBehaviorTerminate || aws.ToString(in.ClientToken) != l.Name || !reflect.DeepEqual(in, f.launchInput(l, token)) {
 			t.Fatal("unsafe or non-repeatable launch")
 		}
 		if aws.ToString(b.DeviceName) != "/dev/sdf" || aws.ToString(b.Ebs.SnapshotId) != seed || !aws.ToBool(b.Ebs.DeleteOnTermination) || !aws.ToBool(b.Ebs.Encrypted) {
 			t.Fatal("incorrect cache disk")
 		}
 		data, err := base64.StdEncoding.DecodeString(*in.UserData)
-		if err != nil || !strings.Contains(string(data), "\nAuthorization: Bearer "+bootstrapToken(f.key, f.owner, l.Name)+"\nHEADER\n") || strings.Count(string(data), bootstrapToken(f.key, f.owner, l.Name)) != 1 || strings.Contains(string(data), "private-jit") {
+		if err != nil || !strings.Contains(string(data), "\nAuthorization: Bearer "+token+"\nHEADER\n") || strings.Count(string(data), token) != 1 || strings.Contains(string(data), "private-jit") {
 			t.Fatal("unexpected bootstrap envelope")
 		}
 	}
