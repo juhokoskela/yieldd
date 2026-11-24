@@ -89,7 +89,7 @@ impl Policy {
         })
     }
 
-    pub(crate) fn apply(&self, grants: &mut CacheScope) {
+    fn apply(&self, grants: &mut CacheScope) {
         for grant in &mut grants.scopes {
             grant.scope = self.scope(&grants.repo_id, &grant.scope);
         }
