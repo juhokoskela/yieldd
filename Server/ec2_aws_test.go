@@ -26,6 +26,10 @@ func TestEBSSeedSelectionAndRetirement(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Error(err)
 		}
+		if r.Form.Get("Action") == "DescribeInstances" && r.Form.Get("NextToken") == "" {
+			fmt.Fprint(w, "<DescribeInstancesResponse><nextToken>more</nextToken></DescribeInstancesResponse>")
+			return
+		}
 		switch action := r.Form.Get("Action"); action {
 		case "DescribeInstances":
 			if !strings.Contains(r.Form.Encode(), "shutting-down") {
@@ -127,6 +131,10 @@ func TestEC2RetirementWaitsOnlyForActionableDisks(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.FormValue("Action") {
 				case "DescribeVolumes":
+					if r.FormValue("NextToken") == "" {
+						fmt.Fprint(w, "<DescribeVolumesResponse><nextToken>more</nextToken></DescribeVolumesResponse>")
+						return
+					}
 					fmt.Fprint(w, "<DescribeVolumesResponse><volumeSet>")
 					for i, s := range tc.states {
 						fmt.Fprintf(w, "<item><volumeId>vol-%d</volumeId><status>%s</status></item>", i, s)
@@ -159,6 +167,13 @@ func TestEC2ObservesTerminatedInstanceAfterTagRemoval(t *testing.T) {
 		{"running", "", "i-1", false}, {"running", "canary", "", true},
 	} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.FormValue("InstanceId.1") != tc.known {
+				t.Error("missing known instance ID")
+			}
+			if tc.known == "" && r.FormValue("NextToken") == "" {
+				fmt.Fprint(w, "<DescribeInstancesResponse><nextToken>more</nextToken></DescribeInstancesResponse>")
+				return
+			}
 			if r.FormValue("Filter.1.Name") != "client-token" || r.FormValue("Filter.1.Value.1") != fixtureRunner {
 				t.Error("missing lease filter")
 			}
@@ -174,5 +189,20 @@ func TestEC2ObservesTerminatedInstanceAfterTagRemoval(t *testing.T) {
 		if (err == nil) != tc.want || (tc.want && h.id != "i-1") {
 			t.Fatal(tc, h, err)
 		}
+	}
+}
+
+func TestEC2ReturnsThrottlingToTheCoordinator(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "<Response><Errors><Error><Code>RequestLimitExceeded</Code></Error></Errors></Response>")
+	}))
+	defer srv.Close()
+	f := awsFleet{api: ec2.New(testEC2Client(srv.URL).Options(), ec2RequestLimits)}
+	_, err := f.seed(t.Context())
+	if calls != 1 || !retryableBootstrapVerification(err) {
+		t.Fatal(calls, err)
 	}
 }

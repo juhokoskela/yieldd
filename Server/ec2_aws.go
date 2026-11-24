@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"time"
 
@@ -37,7 +38,13 @@ func newAWSFleet(ctx context.Context, c ec2Config, owner string, key []byte) (*a
 	if aws.ToString(who.Account) != c.Account {
 		return nil, errors.New("EC2 credentials belong to a different AWS account")
 	}
-	return &awsFleet{ec2.NewFromConfig(cfg), c, owner, key}, nil
+	return &awsFleet{ec2.NewFromConfig(cfg, ec2RequestLimits), c, owner, key}, nil
+}
+
+// The coordinator owns retries so the serialized queue does not sleep inside the SDK.
+func ec2RequestLimits(o *ec2.Options) {
+	o.RetryMaxAttempts = 1
+	o.HTTPClient = &http.Client{Timeout: 15 * time.Second}
 }
 
 func tag(k, v string) types.Tag       { return types.Tag{Key: aws.String(k), Value: aws.String(v)} }
@@ -71,16 +78,19 @@ func (f *awsFleet) snapshots(ctx context.Context) ([]types.Snapshot, error) {
 func (f *awsFleet) seed(ctx context.Context) (string, error) {
 	// Check provider capacity as well as the local slot. A restored journal may
 	// predate a launch, and shutting-down instances still consume the quota.
-	busy, err := f.api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{Filters: []types.Filter{
+	pages := ec2.NewDescribeInstancesPaginator(f.api, &ec2.DescribeInstancesInput{Filters: []types.Filter{
 		filter("tag:YielddRepository", f.cfg.Repository), filter("tag-key", "YielddOwner"),
 		{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped", "shutting-down"}},
 	}})
-	if err != nil {
-		return "", awsFailure("check EC2 capacity", err)
-	}
-	for _, r := range busy.Reservations {
-		if len(r.Instances) > 0 {
-			return "", &temporaryStatusError{errors.New("EC2 repository slot is occupied; waiting for termination")}
+	for pages.HasMorePages() {
+		busy, err := pages.NextPage(ctx)
+		if err != nil {
+			return "", awsFailure("check EC2 capacity", err)
+		}
+		for _, r := range busy.Reservations {
+			if len(r.Instances) > 0 {
+				return "", &temporaryStatusError{errors.New("EC2 repository slot is occupied; waiting for termination")}
+			}
 		}
 	}
 	entries, err := f.snapshots(ctx)
@@ -185,28 +195,39 @@ func instanceHost(i types.Instance) ec2Host {
 }
 
 func (f *awsFleet) host(ctx context.Context, l *lease) (ec2Host, error) {
-	out, err := f.api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{Filters: []types.Filter{filter("client-token", l.Name)}})
-	if err != nil {
-		return ec2Host{}, awsFailure("observe instance", err)
+	input := &ec2.DescribeInstancesInput{Filters: []types.Filter{filter("client-token", l.Name)}}
+	if l.EC2.Instance != "" {
+		input.InstanceIds = []string{l.EC2.Instance}
 	}
+	pages := ec2.NewDescribeInstancesPaginator(f.api, input)
 	var h ec2Host
-	for _, r := range out.Reservations {
-		for _, i := range r.Instances {
-			observed := instanceHost(i)
-			if h.id != "" || observed.id == "" || (l.EC2.Instance != "" && observed.id != l.EC2.Instance) {
-				return ec2Host{}, errors.New("EC2 lease identity mismatch")
+	for pages.HasMorePages() {
+		out, err := pages.NextPage(ctx)
+		if err != nil {
+			var api smithy.APIError
+			if l.EC2.Instance != "" && errors.As(err, &api) && api.ErrorCode() == "InvalidInstanceID.NotFound" {
+				return ec2Host{}, nil
 			}
-			owner := slices.IndexFunc(i.Tags, func(t types.Tag) bool { return aws.ToString(t.Key) == "YielddOwner" })
-			if owner >= 0 {
-				if aws.ToString(i.Tags[owner].Value) != f.owner {
-					return ec2Host{}, errors.New("EC2 lease owner mismatch")
+			return ec2Host{}, awsFailure("observe instance", err)
+		}
+		for _, r := range out.Reservations {
+			for _, i := range r.Instances {
+				observed := instanceHost(i)
+				if h.id != "" || observed.id == "" || (l.EC2.Instance != "" && observed.id != l.EC2.Instance) {
+					return ec2Host{}, errors.New("EC2 lease identity mismatch")
 				}
-			} else if observed.state != "terminated" || observed.id != l.EC2.Instance {
-				// EC2 can remove tags from a terminated instance before it
-				// disappears from the client-token lookup.
-				return ec2Host{}, errors.New("EC2 lease owner missing")
+				owner := slices.IndexFunc(i.Tags, func(t types.Tag) bool { return aws.ToString(t.Key) == "YielddOwner" })
+				if owner >= 0 {
+					if aws.ToString(i.Tags[owner].Value) != f.owner {
+						return ec2Host{}, errors.New("EC2 lease owner mismatch")
+					}
+				} else if observed.state != "terminated" || observed.id != l.EC2.Instance {
+					// EC2 can remove tags from a terminated instance before it
+					// disappears from the client-token lookup.
+					return ec2Host{}, errors.New("EC2 lease owner missing")
+				}
+				h = observed
 			}
-			h = observed
 		}
 	}
 	return h, nil
@@ -223,24 +244,27 @@ func (f *awsFleet) terminate(ctx context.Context, id string) error {
 // A terminated instance consumes no slot once EBS owns deletion of every disk.
 // EBS can report deleting for minutes after completing the cache snapshot.
 func (f *awsFleet) disksRetiring(ctx context.Context, l *lease) (bool, error) {
-	p, err := f.api.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{Filters: []types.Filter{
+	pages := ec2.NewDescribeVolumesPaginator(f.api, &ec2.DescribeVolumesInput{Filters: []types.Filter{
 		filter("tag:YielddOwner", f.owner), filter("tag:YielddLease", l.Name), filter("tag:YielddRepository", f.cfg.Repository),
 	}})
-	if err != nil {
-		return false, awsFailure("check runner disks", err)
-	}
 	retiring := true
-	for _, v := range p.Volumes {
-		if v.State == types.VolumeStateDeleting || v.State == types.VolumeStateDeleted {
-			continue
+	for pages.HasMorePages() {
+		p, err := pages.NextPage(ctx)
+		if err != nil {
+			return false, awsFailure("check runner disks", err)
 		}
-		retiring = false
-		if v.State == types.VolumeStateAvailable && len(v.Attachments) == 0 {
-			_, err := f.api.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: v.VolumeId})
-			if err != nil {
-				var api smithy.APIError
-				if !errors.As(err, &api) || api.ErrorCode() != "InvalidVolume.NotFound" {
-					return false, awsFailure("delete detached runner disk", err)
+		for _, v := range p.Volumes {
+			if v.State == types.VolumeStateDeleting || v.State == types.VolumeStateDeleted {
+				continue
+			}
+			retiring = false
+			if v.State == types.VolumeStateAvailable && len(v.Attachments) == 0 {
+				_, err := f.api.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: v.VolumeId})
+				if err != nil {
+					var api smithy.APIError
+					if !errors.As(err, &api) || api.ErrorCode() != "InvalidVolume.NotFound" {
+						return false, awsFailure("delete detached runner disk", err)
+					}
 				}
 			}
 		}
@@ -286,7 +310,7 @@ func (f *awsFleet) prune(ctx context.Context, retire []string) error {
 
 func (f *awsFleet) publish(ctx context.Context, l *lease) error {
 	tags := append(f.lineage(), tag("YielddLease", l.Name), tag("YielddRun", fmt.Sprint(l.EC2.ProducerRun)))
-	snapshot, err := f.api.CreateSnapshot(ctx, &ec2.CreateSnapshotInput{VolumeId: &l.EC2.Volume, Description: aws.String("yieldd build cache"), TagSpecifications: []types.TagSpecification{{ResourceType: types.ResourceTypeSnapshot, Tags: tags}}}, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
+	snapshot, err := f.api.CreateSnapshot(ctx, &ec2.CreateSnapshotInput{VolumeId: &l.EC2.Volume, Description: aws.String("yieldd build cache"), TagSpecifications: []types.TagSpecification{{ResourceType: types.ResourceTypeSnapshot, Tags: tags}}})
 	if err != nil {
 		return awsFailure("create cache snapshot", err)
 	}
