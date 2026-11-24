@@ -53,7 +53,7 @@ unset jit
 install -d -o ubuntu -g ubuntu /run/yieldd-job
 systemd-run --quiet --wait --collect --unit=yieldd-job --slice=yieldd.slice \
     --uid=ubuntu --gid=ubuntu --property=WorkingDirectory=/opt/yieldd-runner \
-    --property=EnvironmentFile=/run/yieldd-jit --setenv=HOME=/home/ubuntu --setenv=ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/sbin/yieldd-job-start \
+    --property=EnvironmentFile=/run/yieldd-jit --setenv=HOME=/home/ubuntu --setenv=ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/sbin/yieldd-job-start.sh \
     --setenv=RUNNER_TOOL_CACHE=/opt/hostedtoolcache --setenv=AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache \
     --setenv=GOCACHE="$cache/go-build" --setenv=GOMODCACHE="$cache/go-modules" \
     /opt/yieldd-runner/run.sh

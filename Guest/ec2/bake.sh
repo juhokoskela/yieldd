@@ -47,8 +47,8 @@ ConditionPathExists=!/run/yieldd-job/start
 Type=oneshot
 ExecStart=/usr/bin/systemctl --no-block poweroff
 UNIT
-printf '#!/bin/sh\nexec touch /run/yieldd-job/start\n' >/usr/local/sbin/yieldd-job-start
-chmod 0755 /usr/local/sbin/yieldd-job-start
+printf '#!/bin/sh\nexec touch /run/yieldd-job/start\n' >/usr/local/sbin/yieldd-job-start.sh
+chmod 0755 /usr/local/sbin/yieldd-job-start.sh
 systemctl daemon-reload
 systemctl enable yieldd-idle.timer yieldd-expire.timer docker.service
 test -x /usr/local/sbin/yieldd-ec2-job
