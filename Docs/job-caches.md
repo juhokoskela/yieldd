@@ -42,3 +42,5 @@ Both branches can then read and replace shared build state. A pull request that 
 Migrate workflows that call `actions/native-cache` to Actions archives before upgrading the agent. This includes workflows pinned to an older yieldd commit. Use `actions/setup-go` caching for Go, or `actions/cache` with the paths and keys needed for the build. Run the workflow twice on the same Mac and confirm the second run restores its archive.
 
 Drain the old agent and finish any pending recovery before switching versions. Old native images remain under `job-caches/native` on the guest volume. After verifying the migration, an operator can reclaim those files. The local archive store is in the sibling `job-caches/archives` directory.
+
+If you roll back to an agent that supports native job caches, restore its matching Linux guest image before resuming native-cache workflows. Both image versions report local-cache protocol 3. The archive-only image omits the native disk helper.

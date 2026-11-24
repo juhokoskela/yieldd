@@ -163,6 +163,8 @@ bash test-image.sh
 
 ## Lifecycle and recovery
 
+Before rolling back to a coordinator that predates the `job_succeeded` journal field, drain all runners and let the current coordinator acknowledge outstanding cleanup. Older coordinators reject journals containing a completed lease with this field.
+
 For hosted provisioning, the coordinator saves a unique runner name before registration. It uploads the JIT credential to the matching encrypted GitHub secret, then saves the registration ID and dispatch intent together before sending the workflow request. Dispatch inputs contain only the runner name and fallback labels. The request enables [`return_run_details`](https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event), and the service persists the returned run ID. Title-based discovery is reserved for lost responses or a crash before that ID was saved. It never redispatches an uncertain request.
 
 SIGINT, SIGTERM, and SIGHUP stop the coordinator without canceling a running bootstrap. Restart with the same arguments and state directory to resume reconciliation. GitHub continues receiving the workload's logs and result independently of the coordinator.
