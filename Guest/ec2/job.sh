@@ -2,6 +2,9 @@
 set -euo pipefail
 umask 077
 trap 'systemctl --no-block poweroff' EXIT
+# Journald records both wall-clock and monotonic time for each marker.
+mark() { printf 'yieldd-startup %s\n' "$1"; }
+mark bootstrap-start
 endpoint=$1/v1/ec2/$2
 auth="Authorization: Bearer $3"
 mode=$4
@@ -21,6 +24,7 @@ for ((i=0; i<45; i++)); do
     sleep 1
 done
 [[ -b ${dev:-} && -z $(lsblk -nro MOUNTPOINTS "$dev" | tr -d '[:space:]') ]]
+mark cache-device-ready
 case $mode in
     blank)
         signature=$(wipefs --no-act --noheadings --output TYPE "$dev")
@@ -34,23 +38,30 @@ case $mode in
         ;;
     *) exit 1 ;;
 esac
+mark filesystem-ready
 cache=/mnt/yieldd
 install -d "$cache"
 mount -o nodev,nosuid,noatime "$dev" "$cache"
+mark cache-mounted
 for dir in go-build go-modules tools buildkit; do
     install -d -o ubuntu -g ubuntu -m 0755 "$cache/$dir"
 done
 mount --bind "$cache/tools" /opt/hostedtoolcache
+mark cache-paths-ready
 systemctl start docker.service
+mark docker-started
 [[ $(cat /sys/fs/cgroup/yieldd.slice/memory.max) == 12884901888 ]]
 [[ $(docker info -f '{{.CgroupDriver}}') == systemd ]]
 
 # The runner consumes the credential from its process environment. Keep the file on tmpfs.
+mark register-start
 jit=$(curl -fsS --retry 2 --max-time 45 -X POST -H "$auth" "$endpoint/register")
 [[ -n $jit && $jit != *$'\n'* ]]
+mark register-complete
 printf 'ACTIONS_RUNNER_INPUT_JITCONFIG=%s\n' "$jit" > /run/yieldd-jit
 unset jit
 install -d -o ubuntu -g ubuntu /run/yieldd-job
+mark runner-launch
 systemd-run --quiet --wait --collect --unit=yieldd-job --slice=yieldd.slice \
     --uid=ubuntu --gid=ubuntu --property=WorkingDirectory=/opt/yieldd-runner \
     --property=EnvironmentFile=/run/yieldd-jit --setenv=HOME=/home/ubuntu --setenv=ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/sbin/yieldd-job-start.sh \
