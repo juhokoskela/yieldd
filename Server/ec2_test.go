@@ -165,7 +165,7 @@ func TestEC2Lifecycle(t *testing.T) {
 	if request("quiesced", token).Code != 202 || f.published != 0 {
 		t.Fatal("published before GitHub completion")
 	}
-	job := &scaleset.JobCompleted{RunnerName: name, RunnerID: w.runner.ID, Result: "succeeded", JobMessageBase: scaleset.JobMessageBase{OwnerName: "example", RepositoryName: "application", JobDisplayName: "build", EventName: "push", WorkflowRunID: 23}}
+	job := &scaleset.JobCompleted{RunnerName: name, RunnerID: w.runner.ID, Result: "succeeded", JobMessageBase: scaleset.JobMessageBase{OwnerName: "example", RepositoryName: "application", JobDisplayName: "build", JobWorkflowRef: "Example/application/.github/workflows/ci.yml@refs/heads/main", EventName: "push", WorkflowRunID: 23}}
 	if err := loop.HandleJobCompleted(t.Context(), job); err != nil {
 		t.Fatal(err)
 	}
@@ -432,9 +432,34 @@ func TestEC2PromotesOnlySelectedJob(t *testing.T) {
 		c.state.Config.EC2 = exampleEC2()
 		l := &lease{Name: fixtureRunner, Created: time.Now(), RunnerID: 7, DispatchIntent: true, EC2: &ec2Lease{Issuing: true}}
 		c.state.Leases = map[string]*lease{l.Name: l}
-		err := c.recordEC2Job(&scaleset.JobCompleted{RunnerName: l.Name, RunnerID: v.id, JobMessageBase: scaleset.JobMessageBase{EventName: v.event, JobDisplayName: v.name, WorkflowRunID: 14, OwnerName: v.owner, RepositoryName: "application"}}, v.success)
+		err := c.recordEC2Job(&scaleset.JobCompleted{RunnerName: l.Name, RunnerID: v.id, JobMessageBase: scaleset.JobMessageBase{EventName: v.event, JobDisplayName: v.name, WorkflowRunID: 14, JobWorkflowRef: "example/application/.github/workflows/ci.yml@refs/heads/main", OwnerName: v.owner, RepositoryName: "application"}}, v.success)
 		if err != nil || c.state.Leases[l.Name].EC2.ProducerRun != 0 {
 			t.Fatal(v, err)
+		}
+	}
+}
+
+func TestEC2ProducerRequiresOriginalBranchRef(t *testing.T) {
+	for _, tc := range []struct {
+		ref  string
+		want bool
+	}{
+		{"example/application/.github/workflows/ci.yml@refs/heads/main", true},
+		{"example/application/.github/workflows/ci.yml@refs/tags/main", false},
+		{"example/application/.github/workflows/other.yml@refs/heads/main", false},
+		{"", false},
+	} {
+		c, _, _ := newFixture(t)
+		c.state.Config.EC2 = exampleEC2()
+		l := &lease{Name: fixtureRunner, Created: time.Now(), RunnerID: 7, DispatchIntent: true, EC2: &ec2Lease{Issuing: true}}
+		c.state.Leases = map[string]*lease{l.Name: l}
+		job := &scaleset.JobCompleted{RunnerName: l.Name, RunnerID: 7, JobMessageBase: scaleset.JobMessageBase{OwnerName: "example", RepositoryName: "application", JobDisplayName: "build", WorkflowRunID: 23, EventName: "push", JobWorkflowRef: tc.ref}}
+		if err := c.recordEC2Job(job, true); err != nil {
+			t.Fatal(err)
+		}
+		recorded := c.state.Leases[l.Name].EC2
+		if !recorded.Completed || (recorded.ProducerRun == 23 && recorded.ProducerBranch == "main") != tc.want {
+			t.Fatal(tc, recorded)
 		}
 	}
 }
@@ -443,7 +468,7 @@ func TestEC2VerifiesSeedOrigin(t *testing.T) {
 	c := exampleEC2()
 	for _, v := range []struct {
 		event, branch, sha, repo, path string
-		tag, want                      bool
+		reusable, want                 bool
 	}{
 		{"push", "main", "abc", c.Repository, c.Workflow, false, true},
 		{"push", "main", "abc", c.Repository, c.Workflow, true, false},
@@ -458,21 +483,19 @@ func TestEC2VerifiesSeedOrigin(t *testing.T) {
 			case "":
 				fmt.Fprint(w, `{"default_branch":"main"}`)
 			case "/actions/runs/23":
-				fmt.Fprintf(w, `{"id":23,"event":%q,"head_branch":%q,"head_sha":%q,"head_repository":{"full_name":%q},"path":%q}`, v.event, v.branch, v.sha, v.repo, v.path)
+				called := "[]"
+				if v.reusable {
+					called = `[{"path":"example/application/.github/workflows/ci.yml@main"}]`
+				}
+				fmt.Fprintf(w, `{"referenced_workflows":%s,"id":23,"event":%q,"head_branch":%q,"head_sha":%q,"head_repository":{"full_name":%q},"path":%q}`, called, v.event, v.branch, v.sha, v.repo, v.path)
 			case "/git/ref/heads/main":
 				fmt.Fprint(w, `{"object":{"sha":"abc"}}`)
-			case "/git/ref/tags/main":
-				if !v.tag {
-					http.NotFound(w, r)
-				} else {
-					fmt.Fprint(w, "{}")
-				}
 			default:
 				t.Errorf("unexpected GitHub lookup %s", r.URL.Path)
 			}
 		}))
 		g := githubAPI{base: srv.URL, client: srv.Client()}
-		got, err := g.trustedSeed(t.Context(), c, 23)
+		got, err := g.trustedSeed(t.Context(), c, 23, "main")
 		srv.Close()
 		if err != nil || got != v.want {
 			t.Fatal(v, got, err)

@@ -31,7 +31,7 @@ type bootstrapAPI interface {
 	getRun(context.Context, int64) (*workflowRun, error)
 	cancelRun(context.Context, int64) error
 	runnerBusy(context.Context, string, int) (bool, error)
-	trustedSeed(context.Context, ec2Config, int64) (bool, error)
+	trustedSeed(context.Context, ec2Config, int64, string) (bool, error)
 }
 
 const (

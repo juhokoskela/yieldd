@@ -40,7 +40,7 @@ func (l *lease) validateTransition(next *lease) error {
 	if e, n := l.EC2, next.EC2; e != nil && (n == nil || e.Seed != n.Seed || e.KeyID != n.KeyID ||
 		(e.Instance != "" && e.Instance != n.Instance) || (e.Volume != "" && e.Volume != n.Volume) ||
 		(e.Issuing && !n.Issuing) ||
-		(e.Completed && (!n.Completed || e.ProducerRun != n.ProducerRun)) ||
+		(e.Completed && (!n.Completed || e.ProducerRun != n.ProducerRun || e.ProducerBranch != n.ProducerBranch)) ||
 		(e.SnapshotAttempted && !n.SnapshotAttempted)) {
 		return errors.New("EC2 assignment identity and progress cannot change")
 	}

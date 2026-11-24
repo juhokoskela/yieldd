@@ -129,9 +129,9 @@ func (f *fakeWorld) cancelRun(context.Context, int64) error {
 	}
 	return f.cancelErr
 }
-func (f *fakeWorld) trustedSeed(_ context.Context, _ ec2Config, id int64) (bool, error) {
+func (f *fakeWorld) trustedSeed(_ context.Context, _ ec2Config, id int64, branch string) (bool, error) {
 	f.seedVerifications++
-	return id == 23, nil
+	return id == 23 && branch == "main", nil
 }
 func (f *fakeWorld) runnerBusy(context.Context, string, int) (bool, error) { return f.busy, nil }
 

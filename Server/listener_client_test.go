@@ -280,7 +280,7 @@ func TestEC2CompletionSurvivesFailedJournalBeforeAcknowledgement(t *testing.T) {
 	if err := c.assigned(l.Name).replace(l); err != nil {
 		t.Fatal(err)
 	}
-	job := &scaleset.JobCompleted{RunnerName: l.Name, RunnerID: 7, Result: "success", JobMessageBase: scaleset.JobMessageBase{OwnerName: "example", RepositoryName: "application", JobDisplayName: "build", WorkflowRunID: 23, EventName: "push"}}
+	job := &scaleset.JobCompleted{RunnerName: l.Name, RunnerID: 7, Result: "success", JobMessageBase: scaleset.JobMessageBase{OwnerName: "example", RepositoryName: "application", JobDisplayName: "build", JobWorkflowRef: "Example/application/.github/workflows/ci.yml@refs/heads/main", WorkflowRunID: 23, EventName: "push"}}
 	msg := &scaleset.RunnerScaleSetMessage{MessageID: 1, Statistics: &scaleset.RunnerScaleSetStatistic{}, JobCompletedMessages: []*scaleset.JobCompleted{job}}
 	for _, failWrite := range []bool{true, false} {
 		saved, err := store.read()

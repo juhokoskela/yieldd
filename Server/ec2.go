@@ -80,6 +80,7 @@ type ec2Lease struct {
 	Volume            string `json:"volume,omitempty"`
 	Issuing           bool   `json:"issuing,omitempty"`
 	Completed         bool   `json:"completed,omitempty"`
+	ProducerBranch    string `json:"producer_branch,omitempty"`
 	ProducerRun       int64  `json:"producer_run,omitempty"`
 	SnapshotAttempted bool   `json:"snapshot_attempted,omitempty"`
 }
@@ -260,7 +261,13 @@ func (c *coordinator) recordEC2Job(job *scaleset.JobCompleted, success bool) err
 	e := *a.lease.EC2
 	e.Completed = true
 	if success && job.EventName == "push" && job.JobDisplayName == c.state.Config.EC2.Job && strings.EqualFold(job.OwnerName+"/"+job.RepositoryName, c.state.Config.Repository) {
-		e.ProducerRun = job.WorkflowRunID
+		// GitHub records the job definition with its qualified ref in the
+		// completion event. The REST run only carries a short branch/tag name.
+		workflow, branch, ok := strings.Cut(job.JobWorkflowRef, "@refs/heads/")
+		repository, matchesWorkflow := strings.CutSuffix(workflow, "/"+c.state.Config.EC2.Workflow)
+		if ok && branch != "" && matchesWorkflow && strings.EqualFold(repository, c.state.Config.Repository) {
+			e.ProducerRun, e.ProducerBranch = job.WorkflowRunID, branch
+		}
 	}
 	return a.saveEC2(e)
 }
@@ -345,7 +352,7 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 		if err != nil || !due {
 			return err
 		}
-		allowed, err := c.bootstrap.trustedSeed(ctx, c.state.Config.EC2, e.ProducerRun)
+		allowed, err := c.bootstrap.trustedSeed(ctx, c.state.Config.EC2, e.ProducerRun, e.ProducerBranch)
 		if err != nil || !allowed {
 			return err
 		}
@@ -370,7 +377,7 @@ func (s *coordinatorLoop) ec2Handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (g *githubAPI) trustedSeed(ctx context.Context, c ec2Config, id int64) (bool, error) {
+func (g *githubAPI) trustedSeed(ctx context.Context, c ec2Config, id int64, branch string) (bool, error) {
 	base := "/repos/" + c.Repository
 	var repo struct {
 		DefaultBranch string `json:"default_branch"`
@@ -378,7 +385,11 @@ func (g *githubAPI) trustedSeed(ctx context.Context, c ec2Config, id int64) (boo
 	if err := g.request(ctx, "GET", base, nil, &repo); err != nil {
 		return false, err
 	}
+	if branch == "" || branch != repo.DefaultBranch {
+		return false, nil
+	}
 	var run struct {
+		Referenced  []struct{ Path string } `json:"referenced_workflows"`
 		ID          int64
 		Path, Event string
 		Branch      string `json:"head_branch"`
@@ -390,20 +401,20 @@ func (g *githubAPI) trustedSeed(ctx context.Context, c ec2Config, id int64) (boo
 	if err := g.request(ctx, "GET", fmt.Sprintf("%s/actions/runs/%d", base, id), nil, &run); err != nil {
 		return false, err
 	}
-	if run.ID != id || run.Path != c.Workflow || run.Event != "push" || !strings.EqualFold(run.Head.Name, c.Repository) || repo.DefaultBranch == "" || run.Branch != repo.DefaultBranch || run.SHA == "" {
+	if run.ID != id || run.Path != c.Workflow || run.Event != "push" || !strings.EqualFold(run.Head.Name, c.Repository) || run.Branch != branch || run.SHA == "" {
 		return false, nil
+	}
+	// A reusable workflow can run from a branch independently of the caller's
+	// ref. Require this producer to be defined in the top-level workflow.
+	for _, referenced := range run.Referenced {
+		path, _, _ := strings.Cut(referenced.Path, "@")
+		if path == c.Workflow || strings.EqualFold(path, c.Repository+"/"+c.Workflow) {
+			return false, nil
+		}
 	}
 	var ref struct{ Object struct{ SHA string } }
 	if err := g.request(ctx, "GET", base+"/git/ref/heads/"+url.PathEscape(repo.DefaultBranch), nil, &ref); err != nil {
 		return false, err
 	}
-	if ref.Object.SHA != run.SHA {
-		return false, nil
-	}
-	// The run API represents branch and tag pushes with the same short ref.
-	err := g.request(ctx, "GET", base+"/git/ref/tags/"+url.PathEscape(repo.DefaultBranch), nil, &ref)
-	if hasHTTPStatus(err, 404) {
-		return true, nil
-	}
-	return false, err
+	return ref.Object.SHA == run.SHA, nil
 }
