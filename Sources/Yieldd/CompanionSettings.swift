@@ -11,7 +11,7 @@ struct CompanionSettings: View {
             VStack(alignment: .leading, spacing: 5) {
                 Toggle("Pause new jobs on battery power", isOn: Binding(
                     get: { model.snapshot?.pauseOnBattery ?? false },
-                    set: setBatteryPolicy
+                    set: { enabled in setBatteryPolicy(enabled) }
                 ))
                 .toggleStyle(.checkbox)
                 .disabled(model.snapshot?.pauseOnBattery == nil || model.changing)

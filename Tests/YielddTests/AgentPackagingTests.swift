@@ -3,7 +3,7 @@ import Testing
 @testable import Yieldd
 
 @Test
-func localAgentPlistRunsTheMainExecutableWithBoundedShutdown() throws {
+func localAgentPlistRunsTheCLIWithBoundedShutdown() throws {
     let plistURL = repositoryRoot
         .appendingPathComponent("Packaging/dev.yieldd.agent.plist", isDirectory: false)
     let data = try Data(contentsOf: plistURL)
@@ -19,6 +19,14 @@ func localAgentPlistRunsTheMainExecutableWithBoundedShutdown() throws {
     #expect(plist["KeepAlive"] as? Bool == true)
     #expect((plist["MachServices"] as? [String: Bool])?["dev.yieldd.agent.control"] == true)
     #expect(plist["AssociatedBundleIdentifiers"] == nil)
+}
+
+@Test
+func localAppOpensTheMenuCompanion() throws {
+    let url = repositoryRoot.appendingPathComponent("Packaging/Info.plist")
+    let plist = try #require(PropertyListSerialization.propertyList(from: Data(contentsOf: url), format: nil) as? [String: Any])
+    #expect(plist["CFBundleExecutable"] as? String == "yieldd-menu")
+    #expect(plist["LSUIElement"] as? Bool == true)
 }
 
 @Test

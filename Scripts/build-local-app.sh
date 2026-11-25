@@ -43,6 +43,7 @@ codesign --force --sign "$signing_identity" --identifier dev.yieldd \
     --entitlements "$entitlements" \
     "$application"
 codesign --verify --strict "$application"
+"$application/Contents/MacOS/yieldd" --help >/dev/null
 codesign --verify --strict "$application/Contents/Helpers/yieldd-network-relay"
 codesign --verify --strict "$application/Contents/Helpers/yieldd-cache-server"
 virtualization_entitlement=$(
