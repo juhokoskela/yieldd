@@ -237,10 +237,10 @@ struct APFSQuotaVolume: Equatable {
             let APFSVolumeUUID: String
             let CapacityQuota: UInt64
         }
-        struct Container: Decodable { let Volumes: [Volume] }
+        struct Container: Decodable { let Volumes: [Volume]? }
         struct List: Decodable { let Containers: [Container] }
         return try PropertyListDecoder().decode(List.self, from: data).Containers.flatMap { container in
-            container.Volumes.map { Self(uuid: $0.APFSVolumeUUID, quotaBytes: $0.CapacityQuota) }
+            (container.Volumes ?? []).map { Self(uuid: $0.APFSVolumeUUID, quotaBytes: $0.CapacityQuota) }
         }
     }
 }
