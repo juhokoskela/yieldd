@@ -100,6 +100,37 @@ func batteryPreferenceFollowsMarkerAfterDirectorySyncFailure() throws {
 }
 
 @MainActor @Test
+func companionPauseCanFinishBeforeAnOlderStatusReply() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let started = Mutex(false)
+    let release = DispatchSemaphore(value: 0)
+    let timedOut = Mutex(false)
+    let model = CompanionModel { command in
+        let result = try fixture.control.request(command)
+        if command == "status" {
+            started.withLock { $0 = true }
+            guard release.wait(timeout: .now() + 2) == .success else {
+                timedOut.withLock { $0 = true }
+                throw AgentControlError.unavailable
+            }
+        }
+        return result
+    }
+    let status = Task { await model.update() }
+    let deadline = ContinuousClock.now + .seconds(2)
+    while !started.withLock({ $0 }) && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    try #require(started.withLock { $0 })
+    #expect(await model.update() == nil)
+    #expect(await model.update("pause") == nil)
+    #expect(model.snapshot?.manuallyPaused == true)
+    release.signal()
+    #expect(await status.value == nil)
+    #expect(!timedOut.withLock { $0 })
+    #expect(model.snapshot?.manuallyPaused == true && model.error == nil)
+}
+
+@MainActor @Test
 func companionClearsLostReplyErrorWhenItReadsTheCommittedPause() async throws {
     let fixture = try AgentControlFixture()
     defer { fixture.remove() }

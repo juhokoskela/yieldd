@@ -11,7 +11,6 @@ final class CompanionModel {
     private(set) var checking = true
     private var revision = 0
     private var refreshing = false
-    private let queue = DispatchQueue(label: "dev.yieldd.menu.control")
     private let request: @Sendable (String) throws -> AgentControlSnapshot
 
     init(request: @escaping @Sendable (String) throws -> AgentControlSnapshot = {
@@ -20,28 +19,30 @@ final class CompanionModel {
         self.request = request
     }
 
-    func update(_ command: String = "status") async {
+    @discardableResult
+    func update(_ command: String = "status") async -> String? {
         let refresh = command == "status"
-        guard !changing, !refresh || !refreshing else { return }
+        guard !changing, !refresh || !refreshing else { return nil }
         if refresh { refreshing = true } else { changing = true }
         revision += 1
         let current = revision
         defer { if refresh { refreshing = false } else { changing = false } }
         do {
             let value: AgentControlSnapshot = try await withCheckedThrowingContinuation { continuation in
-                queue.async { [request] in
+                DispatchQueue.global(qos: .userInitiated).async { [request] in
                     continuation.resume(with: Result { try request(command) })
                 }
             }
-            guard current == revision else { return }
+            guard current == revision else { return nil }
             error = nil
             snapshot = value
         } catch {
-            guard current == revision else { return }
+            guard current == revision else { return nil }
             if refresh { snapshot = nil }
             self.error = describeError(error)
         }
         checking = false
+        return error
     }
 
     var runningCount: Int { snapshot?.workers.count(where: { $0.phase == .running }) ?? 0 }
@@ -98,6 +99,10 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         application.addItem(.separator())
         application.addItem(command("Quit yieldd", #selector(quit), key: "q"))
         main.addItem(withTitle: "yieldd", action: nil, keyEquivalent: "").submenu = application
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        main.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = edit
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = window
@@ -179,14 +184,14 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 let title = worker.platform == .macOS ? "macOS" : "Linux"
                 let phase = worker.phase.menuDescription
                 let row = NSMenuItem(title: several ? "\(title) · Slot \(worker.slot + 1)" : title, action: nil, keyEquivalent: "")
-                let hideIdle = worker.phase == .idle && worker.connection != .connected
-                var activity = [hideIdle ? nil : phase, worker.repository].compactMap { $0 }
-                switch worker.connection {
-                case .connecting: activity.append("Connecting")
-                case .retrying: activity.append("Reconnecting")
-                case .failed: activity.append("Connection failed")
-                case .connected: break
+                let connection: String? = switch worker.connection {
+                case .connecting: snapshot.paused && worker.phase == .idle ? nil : "Connecting"
+                case .retrying: "Reconnecting"
+                case .failed: "Connection failed"
+                case .connected: nil
                 }
+                let showPhase = worker.phase != .idle || connection == nil
+                let activity = [showPhase ? phase : nil, worker.repository, connection].compactMap { $0 }
                 let activityText = activity.joined(separator: " · ")
                 row.subtitle = activityText
                 row.setAccessibilityLabel([row.title, row.subtitle].compactMap { $0 }.joined(separator: ", "))
@@ -240,9 +245,9 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func send(_ command: String) {
         Task {
-            await model.update(command)
+            let failure = await model.update(command)
             updateIcon()
-            if model.error != nil { presentSettings() }
+            if failure != nil { presentSettings() }
         }
     }
     @objc private func refresh() { send("status") }
