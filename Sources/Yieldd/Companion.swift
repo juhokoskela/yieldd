@@ -44,6 +44,11 @@ final class CompanionModel {
         checking = false
     }
 
+    var idleRefreshInterval: Duration {
+        guard let snapshot else { return .seconds(60) }
+        return snapshot.activeAssignments > 0 ? .seconds(5) : .seconds(30)
+    }
+
     var admission: String {
         guard let snapshot else { return checking ? "Checking agent…" : "Agent unavailable" }
         if snapshot.pausedByBattery == true { return "New jobs paused on battery" }
@@ -67,12 +72,13 @@ func runCompanion() {
 }
 
 @MainActor
-final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private let model: CompanionModel
     private var item: NSStatusItem?
     private var settings: NSWindowController?
     private var logWindow: NSWindowController?
     private var polling: Task<Void, Never>?
+    private weak var openMenu: NSMenu?
 
     init(model: CompanionModel = CompanionModel()) { self.model = model }
 
@@ -98,7 +104,9 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             while !Task.isCancelled {
                 await model.update()
                 updateIcon()
-                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                let visible = openMenu != nil || settings?.window?.isVisible == true
+                let delay = visible ? .seconds(5) : model.idleRefreshInterval
+                do { try await Task.sleep(for: delay, tolerance: .seconds(1)) } catch { return }
             }
         }
     }
@@ -120,11 +128,12 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else if model.snapshot?.paused == true { symbol = "pause.circle" }
         else if running > 0 { symbol = "play.circle.fill" }
         else { symbol = "square.stack.3d.up" }
+        let description = ["yieldd", model.admission, running > 0 ? "\(running) running" : nil, issue ? "Connection issue" : nil]
+            .compactMap { $0 }.joined(separator: ", ")
+        guard button.toolTip != description else { return }
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         image?.isTemplate = true
         button.image = image
-        let description = ["yieldd", model.admission, running > 0 ? "\(running) running" : nil, issue ? "Connection issue" : nil]
-            .compactMap { $0 }.joined(separator: ", ")
         button.setAccessibilityLabel(description)
         button.toolTip = description
     }
@@ -134,6 +143,17 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.target = self
         return item
     }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        openMenu = menu
+        Task {
+            await model.update()
+            updateIcon()
+            if openMenu === menu { menu.update() }
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) { openMenu = nil }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -234,6 +254,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func showAgentLog() {
         if logWindow == nil {
             let window = NSWindow(contentViewController: NSHostingController(rootView: CompanionLog()))
+            window.delegate = self
             window.title = "yieldd Agent Log"
             window.setContentSize(NSSize(width: 700, height: 360))
             window.isReleasedWhenClosed = false
@@ -245,7 +266,14 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         logWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, window === logWindow?.window {
+            logWindow = nil
+        }
+    }
+
     @objc func showSettings() {
+        Task { await model.update(); updateIcon() }
         if settings == nil {
             let controller = NSHostingController(rootView: CompanionSettings(model: model) { [weak self] enabled in
                 self?.send(enabled ? "pause-on-battery" : "allow-on-battery")

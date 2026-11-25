@@ -1,7 +1,26 @@
 import Foundation
 import Testing
 import Synchronization
+import notify
 @testable import Yieldd
+
+@Test
+func powerSourceReadsOnlyOnStartupAndPowerChanges() async throws {
+    let notification = "dev.yieldd.test.power." + UUID().uuidString
+    let reads = Mutex(0)
+    let source = AgentPowerSource(notification: notification) {
+        reads.withLock { $0 += 1; return $0 > 1 }
+    }
+    for _ in 0..<100 { #expect(!source.onBattery()) }
+    #expect(reads.withLock { $0 } == 1)
+    try #require(notify_post(notification) == NOTIFY_STATUS_OK)
+    let deadline = ContinuousClock.now + .seconds(2)
+    while !source.onBattery() && ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(source.onBattery())
+    #expect(reads.withLock { $0 } == 2)
+}
 
 @Test
 func batteryPolicyGatesNewAssignmentsAndPreservesManualPause() throws {
@@ -227,9 +246,15 @@ func companionControlsTheAgentOverXPCAndRecoversFromLostContact() async throws {
     }
     await model.update()
     #expect(model.snapshot == nil && model.error != nil)
+    #expect(model.idleRefreshInterval == .seconds(60))
     available.withLock { $0 = true }
     await model.update()
     #expect(model.snapshot?.ready == true && model.error == nil)
+    #expect(model.idleRefreshInterval == .seconds(30))
+    #expect(fixture.control.beginAssignment(worker: "linux-0"))
+    await model.update()
+    #expect(model.idleRefreshInterval == .seconds(5))
+    fixture.control.finishAssignment(worker: "linux-0")
     await model.update("pause")
     #expect(fixture.control.isPaused)
     #expect(model.admission == "New jobs paused")

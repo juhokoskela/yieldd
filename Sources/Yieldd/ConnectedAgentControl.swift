@@ -1,7 +1,6 @@
 import ArgumentParser
 import Darwin
 import Foundation
-import IOKit.ps
 import Synchronization
 
 struct AgentControlSnapshot: Codable, Equatable, Sendable {
@@ -45,10 +44,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private var lastError: AgentReportedError?
 
     init(directory: URL, configuration: ConnectedAgentConfiguration? = nil,
-         usingBattery: @escaping @Sendable () -> Bool = {
-             guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return false }
-             return IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String? == kIOPSBatteryPowerValue
-         }) {
+         usingBattery: @escaping @Sendable () -> Bool = AgentPowerSource.system.onBattery) {
         server = configuration?.server.absoluteString
         deviceID = configuration?.deviceID
         pauseFile = directory.appendingPathComponent("connected-agent.paused")
@@ -176,14 +172,16 @@ final class ConnectedAgentControl: @unchecked Sendable {
                     resumeGeneration += 1
                 }
             case "pause-on-battery":
+                guard !pauseOnBattery else { break }
                 try writePrivateRunnerFile(Data(), to: batteryPolicyFile)
                 pauseOnBattery = true
             case "allow-on-battery":
+                guard pauseOnBattery else { break }
                 if Darwin.unlink(batteryPolicyFile.path) != 0, errno != ENOENT {
                     throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
-                pauseOnBattery = false
                 try synchronizeRunnerState(batteryPolicyFile.deletingLastPathComponent())
+                pauseOnBattery = false
             case "status": break
             default: throw AgentControlError.invalidRequest
             }
