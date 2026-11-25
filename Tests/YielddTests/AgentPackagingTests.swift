@@ -12,7 +12,7 @@ func localAgentPlistRunsTheCLIWithBoundedShutdown() throws {
             as? [String: Any]
     )
 
-    #expect(plist["BundleProgram"] as? String == "Contents/MacOS/yieldd")
+    #expect(plist["BundleProgram"] as? String == "Contents/MacOS/yieldd-menu")
     #expect(plist["ProgramArguments"] as? [String] == ["yieldd", "agent", "run"])
     #expect(plist["ExitTimeOut"] as? Int == 60)
     #expect(plist["ThrottleInterval"] as? Int == 30)

@@ -4,7 +4,8 @@ import Foundation
 @main
 enum Entrypoint {
     @MainActor static func main() async {
-        if URL(fileURLWithPath: CommandLine.arguments[0]).lastPathComponent == "yieldd-menu" {
+        if CommandLine.arguments.count == 1, let executable = CommandLine.arguments.first,
+           URL(fileURLWithPath: executable).lastPathComponent == "yieldd-menu" {
             runCompanion()
         } else {
             await Yieldd.main()
