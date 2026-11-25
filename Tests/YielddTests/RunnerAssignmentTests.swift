@@ -18,18 +18,6 @@ func jobStartEndsThePickupDeadline() throws {
 }
 
 @Test
-func nativeRequestsAreServedBetweenGuestStatusProbes() throws {
-    let backend = AssignmentBackend(statuses: [listening(true), exited(true)])
-    var now: TimeInterval = 0
-    var handled: [TimeInterval] = []
-    let job = ReservedRunnerJob(backend: backend, checkCancellation: {}, wait: { now += $0 },
-                                stateChanged: { _ in }, currentTime: { now })
-    try job.run(id: assignmentID, pickupTimeout: 30) { handled.append(now) }
-    #expect(handled == [0, 0.5, 1, 1.5])
-    #expect(backend.commands.filter { $0.last == "status" }.count == 2)
-}
-
-@Test
 func reservedRunnerObservesAJobThatFinishesBetweenPolls() throws {
     let backend = AssignmentBackend(statuses: [exited(true)])
     var states: [RunnerSessionState] = []

@@ -2,9 +2,7 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 
-use axum::Json;
-use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
@@ -91,7 +89,7 @@ impl Policy {
         })
     }
 
-    pub(crate) fn apply(&self, grants: &mut CacheScope) {
+    fn apply(&self, grants: &mut CacheScope) {
         for grant in &mut grants.scopes {
             grant.scope = self.scope(&grants.repo_id, &grant.scope);
         }
@@ -99,37 +97,16 @@ impl Policy {
 }
 
 impl AppState {
-    async fn job_cache_scope(&self, headers: &HeaderMap) -> Result<CacheScope, Unauthorized> {
-        let mut grants = self.verifier.cache_scope(headers).await?;
-        self.policy.apply(&mut grants);
-        Ok(grants)
-    }
-
     pub(crate) async fn archive_scope(
         &self,
         headers: &HeaderMap,
     ) -> Result<CacheScope, Unauthorized> {
-        let mut grants = self.job_cache_scope(headers).await?;
+        let mut grants = self.verifier.cache_scope(headers).await?;
+        self.policy.apply(&mut grants);
         // The resolved scope already includes the repository or its trusted sharing group.
         grants.repo_id = "yieldd".to_owned();
         Ok(grants)
     }
-}
-
-pub(crate) async fn verify(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let grants = state
-        .job_cache_scope(&headers)
-        .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    Ok(Json(serde_json::json!({
-        "repository_id": grants.repo_id,
-        "repository": grants.repository,
-        "read_scopes": grants.read_scopes(),
-        "write_scope": grants.write_scope().map(|grant| &grant.scope),
-    })))
 }
 
 // The relay records paths actually issued to its authenticated job. The private header

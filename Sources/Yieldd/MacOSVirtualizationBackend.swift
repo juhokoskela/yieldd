@@ -1,7 +1,7 @@
 import Dispatch
 import Foundation
 
-final class MacOSVirtualizationBackend: NativeCacheBackend {
+final class MacOSVirtualizationBackend: RunnerBackend {
     let platform = RunnerPlatform.macOS
     private final class Guest {
         enum Phase {
@@ -12,7 +12,6 @@ final class MacOSVirtualizationBackend: NativeCacheBackend {
         let relay: any RunnerNetworkRelaying
         let ssh: MacOSGuestSSH
         var phase: Phase = .relayOnly
-        var cacheVolumeID: UUID?
 
         init(relay: any RunnerNetworkRelaying, ssh: MacOSGuestSSH) {
             self.relay = relay
@@ -159,76 +158,6 @@ final class MacOSVirtualizationBackend: NativeCacheBackend {
         }
     }
 
-    private func readyGuest(_ id: RunnerID) throws -> (machine: any MacOSVirtualMachineControlling, guest: Guest) {
-        try lock.withLock {
-            guard let guest = guests[id], case let .ready(machine) = guest.phase else {
-                throw MacOSVirtualizationBackendError.notReady(id)
-            }
-            try guest.relay.check()
-            try MacOSVirtualMachineLifecycle.requireRunning(machine)
-            return (machine, guest)
-        }
-    }
-
-    func attachNativeCache(image: URL, cold _: Bool, on id: RunnerID) throws {
-        try checkCancellation()
-        try loadStorage()?.validatePath(image)
-        let (machine, guest) = try readyGuest(id)
-        let requireVacantMount = """
-        if [[ -e /Volumes/YielddCache || -L /Volumes/YielddCache ]]; then
-            echo 'The cache mount point /Volumes/YielddCache is already in use.' >&2
-            exit 1
-        fi
-        """
-        try guest.ssh.execute(["/bin/bash", "-c", requireVacantMount], timeout: 10, outputCapture: .tail(maxBytes: 4096))
-        let completion = VirtualMachineCompletion<Void>()
-        machine.attachNativeDisk(image, completion: completion.complete)
-        try completion.wait(operation: "attaching the cache disk", deadline: ProcessInfo.processInfo.systemUptime + 30,
-                            checkCancellation: checkCancellation)
-        // Disk Arbitration mounts removable APFS media asynchronously in the logged-in guest.
-        // A directory left on the guest's root filesystem must never count as a mounted cache.
-        let waitForMount = """
-        set -euo pipefail
-        volume=/Volumes/YielddCache
-        system_device=$(/usr/bin/stat -f %d /Volumes)
-        for ((i=0; i<120; ++i)); do
-            if [[ -d "$volume" && ! -L "$volume" && -w "$volume" ]] &&
-               cache_device=$(/usr/bin/stat -f %d "$volume") && [[ "$cache_device" != "$system_device" ]]; then
-                /usr/sbin/diskutil info -plist "$volume" | /usr/bin/plutil -extract VolumeUUID raw -
-                exit 0
-            fi
-            /bin/sleep .25
-        done
-        echo 'The cache disk did not mount at /Volumes/YielddCache.' >&2
-        exit 1
-        """
-        let result = try guest.ssh.execute(["/bin/bash", "-c", waitForMount], timeout: 40, outputCapture: .tail(maxBytes: 4096))
-        guard let volumeID = UUID(uuidString: result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            throw MacOSVirtualizationBackendError.cacheVolumeUnknown
-        }
-        lock.withLock { guest.cacheVolumeID = volumeID }
-    }
-
-    func detachNativeCache(on id: RunnerID) throws {
-        let (machine, guest) = try readyGuest(id)
-        guard let volumeID = lock.withLock({ guest.cacheVolumeID }) else {
-            throw MacOSVirtualizationBackendError.cacheVolumeUnknown
-        }
-        struct VolumeInfo: Decodable { let VolumeUUID: UUID; let MountPoint: String; let VolumeName: String }
-        let result = try guest.ssh.execute(["/usr/sbin/diskutil", "info", "-plist", "/Volumes/YielddCache"],
-                                           timeout: 10, outputCapture: .tail(maxBytes: 64 * 1024))
-        let mounted = try PropertyListDecoder().decode(VolumeInfo.self, from: result.stdout)
-        guard mounted.VolumeUUID == volumeID, mounted.MountPoint == "/Volumes/YielddCache", mounted.VolumeName == "YielddCache" else {
-            throw MacOSVirtualizationBackendError.cacheVolumeChanged
-        }
-        try guest.ssh.execute(["/usr/sbin/diskutil", "unmount", volumeID.uuidString], timeout: 60, outputCapture: .tail(maxBytes: 4096))
-        let completion = VirtualMachineCompletion<Void>()
-        machine.detachNativeDisk(completion: completion.complete)
-        try completion.wait(operation: "detaching the cache disk", deadline: ProcessInfo.processInfo.systemUptime + 30,
-                            checkCancellation: checkCleanupDeadline)
-        lock.withLock { guest.cacheVolumeID = nil }
-    }
-
     @discardableResult func exec(
         _ arguments: [String],
         standardInput: Data?,
@@ -238,7 +167,14 @@ final class MacOSVirtualizationBackend: NativeCacheBackend {
         on id: RunnerID
     ) throws -> ProcessResult {
         try checkCancellation()
-        let ssh = try readyGuest(id).guest.ssh
+        let ssh = try lock.withLock { () throws -> MacOSGuestSSH in
+            guard let guest = guests[id], case let .ready(machine) = guest.phase else {
+                throw MacOSVirtualizationBackendError.notReady(id)
+            }
+            try guest.relay.check()
+            try MacOSVirtualMachineLifecycle.requireRunning(machine)
+            return guest.ssh
+        }
         let command: [String]
         if let executable = arguments.first,
            executable == "yieldd-configure-runner" || executable == "yieldd-runner-control" {
@@ -309,17 +245,12 @@ final class MacOSVirtualizationBackend: NativeCacheBackend {
 
 enum MacOSVirtualizationBackendError: Error, LocalizedError {
     case notReady(RunnerID)
-    case cacheVolumeUnknown, cacheVolumeChanged
     case templateInsideCloneRoot
 
     var errorDescription: String? {
         switch self {
         case let .notReady(id):
             "macOS runner \(id.value) is not ready."
-        case .cacheVolumeUnknown:
-            "The guest could not identify the mounted APFS cache volume."
-        case .cacheVolumeChanged:
-            "The APFS cache disk changed its name, mount point, or volume identity during the job."
         case .templateInsideCloneRoot:
             "Move the macOS template outside the managed runner clone directory before retrying. Subsequent recovery commands may delete templates stored there."
         }

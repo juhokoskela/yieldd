@@ -28,7 +28,7 @@ func main() {
 	log.SetOutput(io.Discard)
 	socket := flag.String("socket", "", "Datagram socket in a private, host-owned directory")
 	runner := flag.String("runner", "", "Host-issued runner identity for diagnostic summaries")
-	platform := flag.String("platform", "", "Runner platform (linux or macos), used for diagnostics and Linux cache disk export")
+	platform := flag.String("platform", "", "Runner platform (linux or macos), used for diagnostics")
 	cacheSocket := flag.String("cache-socket", "", "Private archive service socket")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -138,7 +138,7 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 	if cacheSocket != "" {
 		results := githubResultsTransport(counts)
 		defer results.CloseIdleConnections()
-		cache := newRelayCache(cacheSocket, filepath.Dir(path), results)
+		cache := newRelayCache(cacheSocket, results)
 		listener, err := network.Listen("tcp", cacheAddress)
 		if err != nil {
 			return err
@@ -146,19 +146,7 @@ func serve(ctx context.Context, path string, ready io.Writer, counts *denialCoun
 		server := &http.Server{Handler: cache, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: time.Minute,
 			MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return ctx }}
 		go func() { _ = server.Serve(listener) }()
-		defer func() { cancel(); server.Close(); listener.Close(); cache.client.CloseIdleConnections() }()
-	}
-	if cacheSocket != "" && counts.identity.Platform == "linux" {
-		disk, err := network.Listen("tcp", nativeDiskAddress)
-		if err != nil {
-			return err
-		}
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			_ = serveNativeDisk(ctx, disk, filepath.Dir(path))
-		}()
-		defer func() { cancel(); disk.Close(); <-done }()
+		defer func() { cancel(); server.Close(); listener.Close(); cache.transport.CloseIdleConnections() }()
 	}
 	ssh, err := net.ListenUnix("unix", &net.UnixAddr{Name: path + ".ssh", Net: "unix"})
 	if err != nil {

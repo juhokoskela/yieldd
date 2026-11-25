@@ -18,7 +18,6 @@ enum RunnerSessionCleanupStep: String, Equatable {
     case githubRunner = "GitHub runner"
     case machine
     case archiveCache = "archive cache volume"
-    case nativeCache = "native cache"
     case network = "network relay"
     case leaseRecord = "lease record"
 }

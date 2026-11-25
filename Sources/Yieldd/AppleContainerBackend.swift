@@ -1,6 +1,6 @@
 import Foundation
 
-final class AppleContainerBackend: NativeCacheBackend {
+final class AppleContainerBackend: RunnerBackend {
     let platform = RunnerPlatform.linux
     static let creationTimeout: TimeInterval = 5 * 60
     static let memoryConfigurationTimeout: TimeInterval = 30
@@ -28,30 +28,6 @@ final class AppleContainerBackend: NativeCacheBackend {
         var booted = false
     }
     private var guests: [RunnerID: Guest] = [:]
-
-    func attachNativeCache(image: URL, cold: Bool, on id: RunnerID) throws {
-        let directory = try RunnerNetworkDirectories(stateDirectory: stateDirectory).directory(for: id)
-        try writePrivateRunnerFile(Data(image.path.utf8), to: directory.appendingPathComponent("native-disk"))
-        try exec(["yieldd-native-cache", "mount", cold ? "cold" : "warm"], timeout: 120,
-                 outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
-    }
-
-    func detachNativeCache(on id: RunnerID) throws {
-        try exec(["yieldd-native-cache", "unmount"], timeout: 120,
-                 outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
-        let directory = try RunnerNetworkDirectories(stateDirectory: stateDirectory).directory(for: id)
-        try writePrivateRunnerFile(Data("seal".utf8), to: directory.appendingPathComponent("native-disk-seal"))
-        try exec(["yieldd-native-cache", "close"], timeout: 30,
-                 outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
-        let closed = directory.appendingPathComponent("native-disk-closed")
-        // The guest can exit its helper early. Only the host export can confirm a flushed disconnect.
-        let deadline = ProcessInfo.processInfo.systemUptime + 5
-        while try readPrivateRunnerFile(closed, maximumBytes: 16) != Data("closed".utf8) {
-            try checkCancellation()
-            guard ProcessInfo.processInfo.systemUptime < deadline else { throw POSIXError(.ETIMEDOUT) }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-    }
 
     init(
         containerURL: URL,

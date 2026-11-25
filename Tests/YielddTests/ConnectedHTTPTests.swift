@@ -154,44 +154,6 @@ func connectedHTTPStopsLongPollOnCancellation() throws {
     #expect(throws: CancellationError.self) { try client.poll() }
 }
 
-@Test(arguments: [true, false])
-func connectedRenewalRequiresExplicitFinalSuccess(_ success: Bool) throws {
-    let body = success ? #"{"continue":false,"job_succeeded":true}"# : #"{"continue":false}"#
-    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
-    defer { server.close() }
-    let offer = try ConnectedOffer(owner: UUID().uuidString.lowercased(), runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
-        repository: "owner/repo", platform: "linux", architecture: "arm64")
-    #expect(try server.client.renew(offer, checkDeadline: {}) == (success ? .jobSucceeded : .revoked))
-}
-
-@Test(arguments: [FinalJobResult.pending, .succeeded, .unavailable])
-func connectedFinalResultUsesDedicatedEndpoint(_ result: FinalJobResult) throws {
-    let body = #"{"result":"\#(result.rawValue)"}"#
-    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
-    defer { server.close() }
-    let offer = try ConnectedOffer(owner: UUID().uuidString.lowercased(), runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
-        repository: "owner/repo", platform: "linux", architecture: "arm64")
-    #expect(try server.client.jobResult(offer, checkDeadline: {}) == result)
-    #expect(server.request.contains("POST /v1/job-result HTTP/1.1"))
-}
-
-@Test
-func unavailableFinalResultAndLocalDeadlinePreserveConnectionStatus() throws {
-    let server = try ConnectedHTTPFixture(response: "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-    defer { server.close() }
-    let original = server.client
-    var states: [AgentConnectionState] = []
-    let client = ConnectedHTTPClient(server: original.server, deviceID: original.deviceID, token: original.token,
-        checkCancellation: {}, connectionChanged: { state, _ in states.append(state) })
-    let offer = try ConnectedOffer(owner: client.deviceID, runner: "yieldd-bootstrap-\(UUID().uuidString.lowercased())",
-        repository: "owner/repo", platform: "linux", architecture: "arm64")
-    #expect(try client.jobResult(offer, checkDeadline: {}) == .unavailable)
-    #expect(throws: CancellationError.self) {
-        try client.jobResult(offer, checkDeadline: { throw CancellationError() })
-    }
-    #expect(states == [.connected])
-}
-
 @Test(arguments: [RunnerPlatform.linux, .macOS], [0, 2, 15])
 func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatform, slot: Int) throws {
     let body = #"{"jit":"fixture","continue":true}"#
@@ -207,7 +169,7 @@ func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatfor
         for action in ["accept", "renew", "complete", "decline"] {
             switch action {
             case "accept": #expect(try client.accept(offer) == "fixture")
-            case "renew": #expect(try client.renew(offer, checkDeadline: {}) == .active)
+            case "renew": #expect(try client.renew(offer, checkDeadline: {}))
             case "decline": try client.decline(offer)
             default: try client.complete(offer)
             }
@@ -225,16 +187,16 @@ func connectedHTTPPreservesEachRepositoryQueueIdentity(_ platform: RunnerPlatfor
     }
 }
 
-@Test(arguments: [RunnerPlatform.linux, .macOS])
-func connectedHTTPAuthorizationUsesIdentityAndDeadline(_ platform: RunnerPlatform) throws {
-    let body = #"{"continue":true}"#
+@Test(arguments: [RunnerPlatform.linux, .macOS], [true, false])
+func connectedHTTPAuthorizationUsesIdentityAndDeadline(_ platform: RunnerPlatform, authorized: Bool) throws {
+    let body = authorized ? #"{"continue":true}"# : #"{"continue":false,"job_succeeded":true}"#
     let server = try ConnectedHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)")
     defer { server.close() }
     let client = ConnectedHTTPClient(server: server.client.server, deviceID: server.client.deviceID,
         token: server.token, platform: platform, checkCancellation: {})
     let offer = try ConnectedOffer(owner: client.deviceID, runner: "yieldd-bootstrap-01234567-89ab-4def-8123-456789abcdef",
         repository: "owner/repo", platform: platform == .linux ? "linux" : "macos", architecture: "arm64")
-    #expect(try client.renew(offer, checkDeadline: {}) == .active)
+    #expect(try client.renew(offer, checkDeadline: {}) == authorized)
     #expect(server.request.contains(platform == .linux ? "POST /v1/renew " : "POST /v1/macos/renew "))
     #expect(server.request.contains(offer.runner))
     #expect(server.request.contains(offer.owner))

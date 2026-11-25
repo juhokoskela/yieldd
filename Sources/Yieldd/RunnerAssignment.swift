@@ -7,7 +7,7 @@ struct ReservedRunnerJob {
     let stateChanged: (RunnerSessionState) -> Void
     var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
-    func run(id: RunnerID, pickupTimeout: TimeInterval, handleNativeCache: (() throws -> Void)? = nil) throws {
+    func run(id: RunnerID, pickupTimeout: TimeInterval) throws {
         try checkCancellation()
         try backend.exec(["yieldd-runner-control", "start"], timeout: 30,
                          outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
@@ -47,15 +47,7 @@ struct ReservedRunnerJob {
                 throw RunnerAssignmentError.listenerFailed(exitStatus, output: output)
             }
             if !status.jobStarted && jobStarted { throw RunnerAssignmentError.invalidStatus }
-            if jobStarted, let handleNativeCache {
-                // Serve local cache requests between guest status probes.
-                for _ in 0..<4 {
-                    try handleNativeCache()
-                    try wait(0.5)
-                }
-            } else {
-                try wait(min(jobStarted ? 2 : 0.5, max(0, deadline - currentTime())))
-            }
+            try wait(min(jobStarted ? 2 : 0.5, max(0, deadline - currentTime())))
         }
     }
 }

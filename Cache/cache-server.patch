@@ -109,7 +109,7 @@ index 054c06f..90825f0 100644
              prometheus::process_collector::ProcessCollector::for_self(),
          ))?;
 diff --git a/src/routes.rs b/src/routes.rs
-index fee420a..0bfe703 100644
+index fee420a..94dd7a4 100644
 --- a/src/routes.rs
 +++ b/src/routes.rs
 @@ -22,6 +22,7 @@ use crate::storage::Storage;
@@ -120,14 +120,6 @@ index fee420a..0bfe703 100644
      pub(crate) storage: Arc<Storage>,
      pub(crate) verifier: Arc<TokenVerifier>,
      pub(crate) metrics: Arc<Metrics>,
-@@ -37,6 +38,7 @@ pub(crate) fn router(state: AppState) -> Router {
-     let router = Router::new()
-         .route("/", any(|| async { "OK" }))
-         .route("/health", any(|| async { "healthy" }))
-+        .route("/yieldd/verify", axum::routing::post(crate::yieldd::verify))
-         .route("/metrics", any(cache::metrics))
-         .route(
-             "/devstoreaccount1/upload/{upload_id}",
 diff --git a/src/routes/cache.rs b/src/routes/cache.rs
 index 318e039..f50a0ac 100644
 --- a/src/routes/cache.rs
@@ -227,7 +219,7 @@ index 318e039..f50a0ac 100644
  }
 
 diff --git a/src/scope.rs b/src/scope.rs
-index 1080961..28b3eef 100644
+index 1080961..0b062da 100644
 --- a/src/scope.rs
 +++ b/src/scope.rs
 @@ -11,6 +11,7 @@ use jsonwebtoken::jwk::{
@@ -238,7 +230,7 @@ index 1080961..28b3eef 100644
  use tokio::sync::{Mutex, OnceCell};
 
  use crate::config::Config;
-@@ -33,9 +34,11 @@ pub(crate) struct ScopeGrant {
+@@ -33,6 +34,7 @@ pub(crate) struct ScopeGrant {
  /// Scopes and repository a request may access.
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub(crate) struct CacheScope {
@@ -246,19 +238,7 @@ index 1080961..28b3eef 100644
      /// Never empty.
      pub(crate) scopes: Vec<ScopeGrant>,
      pub(crate) repo_id: String,
-+    pub(crate) repository: Option<String>,
- }
-
- impl CacheScope {
-@@ -67,6 +70,7 @@ pub(crate) struct Unauthorized(pub(crate) &'static str);
- struct Claims {
-     ac: Option<String>,
-     repository_id: Option<String>,
-+    repository: Option<String>,
- }
-
- /// Matches the original server's OIDC and JWKS fetch timeout.
-@@ -286,6 +290,9 @@ impl TokenVerifier {
+@@ -286,6 +288,9 @@ impl TokenVerifier {
          };
          let scopes: Vec<ScopeGrant> = serde_json::from_str(&scopes)
              .map_err(|_parse_error| Unauthorized("Invalid JSON in cache scopes"))?;
@@ -268,7 +248,7 @@ index 1080961..28b3eef 100644
          if scopes.is_empty() {
              return Err(Unauthorized("Token does not contain any cache scopes"));
          }
-@@ -295,7 +302,12 @@ impl TokenVerifier {
+@@ -295,7 +300,11 @@ impl TokenVerifier {
          let Some(repo_id) = claims.repository_id.filter(|id| !id.is_empty()) else {
              return Err(Unauthorized("Token does not contain repository id"));
          };
@@ -276,27 +256,23 @@ index 1080961..28b3eef 100644
 +        Ok(CacheScope {
 +            scopes,
 +            repo_id,
-+            repository: claims.repository,
 +            writer: Sha256::digest(token).into(),
 +        })
      }
  }
 
 diff --git a/src/scope/tests.rs b/src/scope/tests.rs
-index e2e2fcf..672c20c 100644
+index e2e2fcf..265e931 100644
 --- a/src/scope/tests.rs
 +++ b/src/scope/tests.rs
-@@ -150,8 +150,10 @@ fn permissions_are_bit_flags() {
+@@ -150,6 +150,7 @@ fn permissions_are_bit_flags() {
          permission,
      };
      let scope = CacheScope {
 +        writer: [0; 32],
          scopes: vec![grant("read", 1), grant("write", 2), grant("both", 3)],
          repo_id: "1".to_owned(),
-+        repository: None,
      };
-     assert_eq!(
-         scope.read_scopes(),
 diff --git a/src/tests/cache_protocol.rs b/src/tests/cache_protocol.rs
 index facb97e..ff4d834 100644
 --- a/src/tests/cache_protocol.rs

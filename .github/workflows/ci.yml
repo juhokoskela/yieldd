@@ -22,20 +22,42 @@ jobs:
           persist-credentials: false
 
       - name: Show runner and toolchain
+        id: toolchain
         run: |
           echo "Runner: $RUNNER_NAME"
           xcodebuild -version
           swift --version
+          echo "id=$({ xcodebuild -version; swift --version; } | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Go for the network relay
-        uses: ./.github/actions/setup-ci-go
+      - name: Set up Go for the relay and coordinator fixture
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: Prototypes/RunnerNetwork/go.mod
+          cache-dependency-path: |
+            Prototypes/RunnerNetwork/go.sum
+            Server/go.sum
 
-      - name: Keep Swift and helper builds on the native disk
-        run: |
-          mkdir -p "$YIELDD_CACHE_PATH/yieldd-build"
-          ln -s "$YIELDD_CACHE_PATH/yieldd-build" .build
+      - name: Cache SwiftPM build products and dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .build/out
+            .build/arm64-apple-macosx
+            .build/checkouts
+            .build/repositories
+            .build/artifacts
+            .build/workspace-state.json
+          key: yieldd-swift-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+
+      - name: Cache Rust build products and crate downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .build/cache-server-target
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: yieldd-cargo-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('Scripts/build-cache-server.sh', 'Cache/cache-server.patch') }}
+          restore-keys: yieldd-cargo-${{ runner.arch }}-${{ steps.toolchain.outputs.id }}-
 
       - name: Build and verify signed app
         run: Scripts/build-local-app.sh
@@ -74,7 +96,7 @@ jobs:
         with:
           node-version: '24'
       - name: Test without GitHub credentials or runner registration
-        run: node --test .github/actions/bootstrap-runner/index.test.cjs actions/native-cache/action.test.cjs
+        run: node --test .github/actions/bootstrap-runner/index.test.cjs
 
   coordinator:
     name: Coordinator contract
@@ -89,9 +111,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: ./.github/actions/setup-ci-go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: Server/go.mod
+          cache-dependency-path: Server/go.sum
       - name: Test and vet
         run: |
           go test -race ./...

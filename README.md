@@ -63,7 +63,7 @@ The command shares the runner ownership lock and memory-admission policy with fo
 
 ### Local job caching
 
-Enable the [local cache](Docs/job-caches.md) to keep Actions cache archives on the Mac or give a workflow a private writable build disk.
+Enable the [local cache](Docs/job-caches.md) to keep Actions cache archives on the Mac.
 
 ### macOS template validation
 
