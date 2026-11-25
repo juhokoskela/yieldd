@@ -46,6 +46,9 @@ struct CompanionSettings: View {
             }
             if let error = model.error {
                 Text(error).foregroundStyle(.secondary).textSelection(.enabled)
+                if error == model.rejectedChange {
+                    Button("Dismiss") { model.dismissRejection() }
+                }
             }
             if model.snapshot == nil && !model.checking {
                 HStack {

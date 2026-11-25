@@ -32,7 +32,6 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private let batteryPolicyFile: URL
     private let usingBattery: @Sendable () -> Bool
     private var pauseOnBattery: Bool
-    private var batteryMarkerNeedsSync = false
     private var paused: Bool
     private let instanceID = UUID()
     private var resumeGeneration: UInt64 = 0
@@ -178,12 +177,9 @@ final class ConnectedAgentControl: @unchecked Sendable {
                     }
                     // A new controller can already see this change even if the following sync fails.
                     pauseOnBattery = enabled
-                    batteryMarkerNeedsSync = true
                 }
-                if batteryMarkerNeedsSync {
-                    try synchronizeRunnerState(batteryPolicyFile.deletingLastPathComponent())
-                    batteryMarkerNeedsSync = false
-                }
+                // Also confirm durability on retries after an agent restart.
+                try synchronizeRunnerState(batteryPolicyFile.deletingLastPathComponent())
             case "status": break
             default: throw AgentControlError.invalidRequest
             }

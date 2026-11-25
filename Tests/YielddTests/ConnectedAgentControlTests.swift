@@ -95,6 +95,8 @@ func batteryPreferenceFollowsMarkerAfterDirectorySyncFailure() throws {
         #expect(throws: POSIXError.self) { try control.request(command) }
         #expect(control.isPaused == expected)
         #expect(ConnectedAgentControl(directory: fixture.directory, usingBattery: { true }).isPaused == expected)
+        let restarted = ConnectedAgentControl(directory: alias, usingBattery: { true })
+        #expect(throws: POSIXError.self) { try restarted.request(command) }
         #expect(throws: POSIXError.self) { try control.request(command) }
     }
 }
@@ -128,6 +130,46 @@ func companionPauseCanFinishBeforeAnOlderStatusReply() async throws {
     #expect(await status.value == nil)
     #expect(!timedOut.withLock { $0 })
     #expect(model.snapshot?.manuallyPaused == true && model.error == nil)
+}
+
+@MainActor @Test
+func openCompanionMenuReplacesOfflineActionsWhenTheAgentRecovers() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let available = Mutex(false)
+    let model = CompanionModel { command in
+        guard available.withLock({ $0 }) else { throw AgentControlError.unavailable }
+        return try fixture.control.request(command)
+    }
+    await model.update()
+    let delegate = CompanionDelegate(model: model)
+    let menu = NSMenu()
+    delegate.menuNeedsUpdate(menu)
+    #expect(menu.item(withTitle: "Check Again") != nil)
+    available.withLock { $0 = true }
+    delegate.menuWillOpen(menu)
+    let deadline = ContinuousClock.now + .seconds(2)
+    while menu.item(withTitle: "Pause New Jobs") == nil && ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(menu.item(withTitle: "Pause New Jobs") != nil)
+    #expect(menu.item(withTitle: "Check Again") == nil)
+    delegate.menuDidClose(menu)
+}
+
+@MainActor @Test
+func companionPreservesExplicitRejectionsAcrossSuccessfulPolls() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let model = CompanionModel { command in
+        if command == "pause-on-battery" { throw AgentControlError.rejected("Could not save the battery preference.") }
+        return try fixture.control.request(command)
+    }
+    #expect(await model.update("pause-on-battery") != nil)
+    #expect(await model.update() == nil)
+    #expect(model.error == "Could not save the battery preference.")
+    model.dismissRejection()
+    #expect(model.error == nil)
 }
 
 @MainActor @Test

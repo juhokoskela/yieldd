@@ -7,6 +7,7 @@ import SwiftUI
 final class CompanionModel {
     private(set) var snapshot: AgentControlSnapshot?
     private(set) var error: String?
+    private(set) var rejectedChange: String?
     private(set) var changing = false
     private(set) var checking = true
     private var revision = 0
@@ -34,15 +35,25 @@ final class CompanionModel {
                 }
             }
             guard current == revision else { return nil }
-            error = nil
+            if !refresh { rejectedChange = nil }
+            error = rejectedChange
             snapshot = value
         } catch {
             guard current == revision else { return nil }
             if refresh { snapshot = nil }
-            self.error = describeError(error)
+            let message = describeError(error)
+            if !refresh, case AgentControlError.rejected = error { rejectedChange = message }
+            self.error = message
+            checking = false
+            return message
         }
         checking = false
-        return error
+        return nil
+    }
+
+    func dismissRejection() {
+        if error == rejectedChange { error = nil }
+        rejectedChange = nil
     }
 
     var runningCount: Int { snapshot?.workers.count(where: { $0.phase == .running }) ?? 0 }
@@ -109,8 +120,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         NSApp.mainMenu = main
         polling = Task {
             while !Task.isCancelled {
-                await model.update()
-                updateIcon()
+                await refreshPresentation()
                 let visible = openMenu != nil || settings?.window?.isVisible == true
                 let delay = visible ? .seconds(5) : model.idleRefreshInterval
                 do { try await Task.sleep(for: delay, tolerance: .seconds(1)) } catch { return }
@@ -153,11 +163,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     func menuWillOpen(_ menu: NSMenu) {
         openMenu = menu
-        Task {
-            await model.update()
-            updateIcon()
-            if openMenu === menu { menu.update() }
-        }
+        Task { await refreshPresentation() }
     }
 
     func menuDidClose(_ menu: NSMenu) { openMenu = nil }
@@ -243,10 +249,25 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         menu.addItem(command("Quit yieldd", #selector(quit), key: "q"))
     }
 
+    @discardableResult
+    private func refreshPresentation(_ command: String = "status") async -> String? {
+        let previous = model.snapshot
+        let admission = model.admission
+        let error = await model.update(command)
+        updateIcon()
+        if let menu = openMenu {
+            let current = model.snapshot
+            if admission != model.admission || previous?.workers != current?.workers ||
+                previous?.manuallyPaused != current?.manuallyPaused || previous?.lastError != current?.lastError {
+                menuNeedsUpdate(menu)
+            }
+        }
+        return error
+    }
+
     private func send(_ command: String) {
         Task {
-            let failure = await model.update(command)
-            updateIcon()
+            let failure = await refreshPresentation(command)
             if failure != nil { presentSettings() }
         }
     }
@@ -282,7 +303,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     }
 
     @objc func showSettings() {
-        Task { await model.update(); updateIcon() }
+        Task { await refreshPresentation() }
         presentSettings()
     }
 
