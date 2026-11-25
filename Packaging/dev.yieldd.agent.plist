@@ -5,7 +5,7 @@
     <key>Label</key>
     <string>dev.yieldd.agent</string>
     <key>BundleProgram</key>
-    <string>Contents/MacOS/yieldd</string>
+    <string>Contents/MacOS/yieldd-menu</string>
     <key>ProgramArguments</key>
     <array>
         <string>yieldd</string>

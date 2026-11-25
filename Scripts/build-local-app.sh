@@ -29,7 +29,8 @@ mkdir -p \
     "$application/Contents/Library/LaunchAgents"
 cp Packaging/Info.plist "$application/Contents/Info.plist"
 cp Packaging/dev.yieldd.agent.plist "$application/Contents/Library/LaunchAgents/"
-cp "$executable" "$application/Contents/MacOS/yieldd"
+cp "$executable" "$application/Contents/MacOS/yieldd-menu"
+ln -s yieldd-menu "$application/Contents/MacOS/yieldd"
 mkdir -p "$application/Contents/Resources"
 cp .build/cache-server-LICENSE "$application/Contents/Resources/"
 cp .build/yieldd-network-relay .build/yieldd-cache-server "$application/Contents/Helpers/"
@@ -42,6 +43,8 @@ codesign --force --sign "$signing_identity" --identifier dev.yieldd \
     --entitlements "$entitlements" \
     "$application"
 codesign --verify --strict "$application"
+"$application/Contents/MacOS/yieldd" --help >/dev/null
+"$application/Contents/MacOS/yieldd-menu" agent --help >/dev/null
 codesign --verify --strict "$application/Contents/Helpers/yieldd-network-relay"
 codesign --verify --strict "$application/Contents/Helpers/yieldd-cache-server"
 virtualization_entitlement=$(

@@ -1,6 +1,193 @@
+import AppKit
 import Foundation
 import Testing
+import Synchronization
+import notify
 @testable import Yieldd
+
+@Test
+func powerSourceReadsOnlyOnStartupAndPowerChanges() async throws {
+    let notification = "dev.yieldd.test.power." + UUID().uuidString
+    let reads = Mutex(0)
+    let source = AgentPowerSource(notification: notification) {
+        reads.withLock { $0 += 1; return $0 > 1 }
+    }
+    for _ in 0..<100 { #expect(!source.onBattery()) }
+    #expect(reads.withLock { $0 } == 1)
+    try #require(notify_post(notification) == NOTIFY_STATUS_OK)
+    let deadline = ContinuousClock.now + .seconds(2)
+    while !source.onBattery() && ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(source.onBattery())
+    #expect(reads.withLock { $0 } == 2)
+}
+
+@Test
+func batteryPolicyGatesNewAssignmentsAndPreservesManualPause() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let battery = Mutex(false)
+    let control = ConnectedAgentControl(directory: fixture.directory, usingBattery: { battery.withLock { $0 } })
+    control.markReady()
+    #expect(control.beginAssignment(worker: "macos-0"))
+    #expect(try control.request("pause-on-battery").pauseOnBattery == true)
+    battery.withLock { $0 = true }
+    #expect(!control.beginAssignment(worker: "linux-0"))
+    #expect(control.snapshot.activeAssignments == 1)
+    #expect(control.snapshot.pausedByBattery == true)
+    let relaunched = ConnectedAgentControl(directory: fixture.directory, usingBattery: { true })
+    #expect(relaunched.isPaused)
+    _ = try control.request("pause")
+    battery.withLock { $0 = false }
+    #expect(control.isPaused)
+    #expect(try !control.request("resume").paused)
+    battery.withLock { $0 = true }
+    #expect(try !control.request("allow-on-battery").paused)
+    #expect(control.beginAssignment(worker: "linux-0"))
+}
+
+@MainActor @Test
+func companionCanPauseManuallyWhileBatteryPolicyIsActive() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let battery = Mutex(true)
+    let control = ConnectedAgentControl(directory: fixture.directory, usingBattery: { battery.withLock { $0 } })
+    _ = try control.request("pause-on-battery")
+    let model = CompanionModel { try control.request($0) }
+    await model.update()
+    let delegate = CompanionDelegate(model: model)
+    let menu = NSMenu()
+    delegate.menuNeedsUpdate(menu)
+    let item = try #require(menu.item(withTitle: "Pause New Jobs"))
+    #expect(menu.item(withTitle: "Allow New Jobs on Battery") != nil)
+    let action = try #require(item.action)
+    #expect(NSApplication.shared.sendAction(action, to: item.target, from: item))
+    let deadline = ContinuousClock.now + .seconds(2)
+    while model.snapshot?.manuallyPaused != true && ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    battery.withLock { $0 = false }
+    #expect(control.isPaused)
+    #expect(try !control.request("resume").paused)
+}
+
+@Test
+func oldAgentSnapshotsOmitBatteryPreferences() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let data = try JSONEncoder().encode(fixture.control.snapshot)
+    var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    for field in ["pauseOnBattery", "pausedByBattery", "manuallyPaused"] { json.removeValue(forKey: field) }
+    let decoded = try JSONDecoder().decode(AgentControlSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+    #expect(decoded.pauseOnBattery == nil && decoded.pausedByBattery == nil && decoded.manuallyPaused == nil)
+}
+
+@Test
+func batteryPreferenceFollowsMarkerAfterDirectorySyncFailure() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let alias = fixture.directory.appendingPathComponent("alias")
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture.directory)
+    let control = ConnectedAgentControl(directory: alias, usingBattery: { true })
+    for (command, expected) in [("pause-on-battery", true), ("allow-on-battery", false)] {
+        // The marker operation succeeds through the alias. Directory sync rejects a symlink.
+        #expect(throws: POSIXError.self) { try control.request(command) }
+        #expect(control.isPaused == expected)
+        #expect(ConnectedAgentControl(directory: fixture.directory, usingBattery: { true }).isPaused == expected)
+        let restarted = ConnectedAgentControl(directory: alias, usingBattery: { true })
+        #expect(throws: POSIXError.self) { try restarted.request(command) }
+        #expect(throws: POSIXError.self) { try control.request(command) }
+    }
+}
+
+@MainActor @Test
+func companionPauseCanFinishBeforeAnOlderStatusReply() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let started = Mutex(false)
+    let release = DispatchSemaphore(value: 0)
+    let timedOut = Mutex(false)
+    let model = CompanionModel { command in
+        let result = try fixture.control.request(command)
+        if command == "status" {
+            started.withLock { $0 = true }
+            guard release.wait(timeout: .now() + 2) == .success else {
+                timedOut.withLock { $0 = true }
+                throw AgentControlError.unavailable
+            }
+        }
+        return result
+    }
+    let status = Task { await model.update() }
+    let deadline = ContinuousClock.now + .seconds(2)
+    while !started.withLock({ $0 }) && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    try #require(started.withLock { $0 })
+    #expect(await model.update() == nil)
+    #expect(await model.update("pause") == nil)
+    #expect(model.snapshot?.manuallyPaused == true)
+    release.signal()
+    #expect(await status.value == nil)
+    #expect(!timedOut.withLock { $0 })
+    #expect(model.snapshot?.manuallyPaused == true && model.error == nil)
+}
+
+@MainActor @Test
+func openCompanionMenuReplacesOfflineActionsWhenTheAgentRecovers() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let available = Mutex(false)
+    let model = CompanionModel { command in
+        guard available.withLock({ $0 }) else { throw AgentControlError.unavailable }
+        return try fixture.control.request(command)
+    }
+    await model.update()
+    let delegate = CompanionDelegate(model: model)
+    let menu = NSMenu()
+    delegate.menuNeedsUpdate(menu)
+    #expect(menu.item(withTitle: "Check Again") != nil)
+    available.withLock { $0 = true }
+    delegate.menuWillOpen(menu)
+    let deadline = ContinuousClock.now + .seconds(2)
+    while menu.item(withTitle: "Pause New Jobs") == nil && ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(menu.item(withTitle: "Pause New Jobs") != nil)
+    #expect(menu.item(withTitle: "Check Again") == nil)
+    delegate.menuDidClose(menu)
+}
+
+@MainActor @Test
+func companionPreservesExplicitRejectionsAcrossSuccessfulPolls() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let model = CompanionModel { command in
+        if command == "pause-on-battery" { throw AgentControlError.rejected("Could not save the battery preference.") }
+        return try fixture.control.request(command)
+    }
+    #expect(await model.update("pause-on-battery") != nil)
+    #expect(await model.update() == nil)
+    #expect(model.error == "Could not save the battery preference.")
+    model.dismissRejection()
+    #expect(model.error == nil)
+}
+
+@MainActor @Test
+func companionClearsLostReplyErrorWhenItReadsTheCommittedPause() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let model = CompanionModel { command in
+        let snapshot = try fixture.control.request(command)
+        if command == "pause" { throw AgentControlError.unavailable }
+        return snapshot
+    }
+    await model.update()
+    await model.update("pause")
+    #expect(model.error != nil)
+    await model.update()
+    #expect(model.error == nil)
+    #expect(model.snapshot?.manuallyPaused == true)
+}
 
 @Test
 func connectedPauseSerializesAdmissionAndDrainsOnlyAfterCleanup() throws {
@@ -183,4 +370,39 @@ private struct AgentControlFixture {
         control = ConnectedAgentControl(directory: directory)
     }
     func remove() { try? FileManager.default.removeItem(at: directory) }
+}
+
+@MainActor @Test
+func companionControlsTheAgentOverXPCAndRecoversFromLostContact() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    fixture.control.markReady()
+    let listener = NSXPCListener.anonymous()
+    let control = AgentControlEndpoint(control: fixture.control, listener: listener)
+    control.start()
+    defer { control.stop() }
+    let endpoint = listener.endpoint
+    let available = Mutex(false)
+    let model = CompanionModel { command in
+        guard available.withLock({ $0 }) else { throw AgentControlError.unavailable }
+        return try requestAgentControl(command, connection: NSXPCConnection(listenerEndpoint: endpoint))
+    }
+    await model.update()
+    #expect(model.snapshot == nil && model.error != nil)
+    #expect(model.idleRefreshInterval == .seconds(60))
+    available.withLock { $0 = true }
+    await model.update()
+    #expect(model.snapshot?.ready == true && model.error == nil)
+    #expect(model.idleRefreshInterval == .seconds(30))
+    #expect(fixture.control.beginAssignment(worker: "linux-0"))
+    await model.update()
+    #expect(model.idleRefreshInterval == .seconds(5))
+    fixture.control.finishAssignment(worker: "linux-0")
+    await model.update("pause")
+    #expect(fixture.control.isPaused)
+    #expect(model.admission == "New jobs paused")
+    await model.update("resume")
+    #expect(!fixture.control.isPaused)
+    await model.update("pause-on-battery")
+    #expect(model.snapshot?.pauseOnBattery == true)
 }

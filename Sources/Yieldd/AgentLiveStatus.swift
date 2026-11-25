@@ -113,7 +113,13 @@ func renderAgentStatus(_ report: AgentStatusReport) -> String {
         }
         return lines.joined(separator: "\n")
     }
-    lines.append("Service: \(status.phase.rawValue), \(status.paused ? "paused" : status.ready ? "accepting assignments" : "admissions unavailable")")
+    let admission: String
+    if status.pausedByBattery == true {
+        admission = status.manuallyPaused == true ? "paused manually and on battery" : "paused on battery"
+    } else {
+        admission = status.paused ? "paused" : status.ready ? "accepting assignments" : "admissions unavailable"
+    }
+    lines.append("Service: \(status.phase.rawValue), \(admission)")
     if let server = status.server { lines.append("Coordinator: \(server)") }
     if let deviceID = status.deviceID { lines.append("Device: \(deviceID)") }
     lines.append("Active assignments or cleanup: \(status.activeAssignments)")

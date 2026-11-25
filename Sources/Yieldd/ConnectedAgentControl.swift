@@ -18,6 +18,10 @@ struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let workers: [AgentWorkerStatus]
     let lastError: AgentReportedError?
 
+    let pauseOnBattery: Bool?
+    let pausedByBattery: Bool?
+    let manuallyPaused: Bool?
+
     var drained: Bool { ready && paused && activeAssignments == 0 }
 }
 
@@ -25,6 +29,9 @@ struct AgentControlSnapshot: Codable, Equatable, Sendable {
 final class ConnectedAgentControl: @unchecked Sendable {
     private let lock = NSLock()
     private let pauseFile: URL
+    private let batteryPolicyFile: URL
+    private let usingBattery: @Sendable () -> Bool
+    private var pauseOnBattery: Bool
     private var paused: Bool
     private let instanceID = UUID()
     private var resumeGeneration: UInt64 = 0
@@ -36,11 +43,15 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private var workers: [String: AgentWorkerStatus] = [:]
     private var lastError: AgentReportedError?
 
-    init(directory: URL, configuration: ConnectedAgentConfiguration? = nil) {
+    init(directory: URL, configuration: ConnectedAgentConfiguration? = nil,
+         usingBattery: @escaping @Sendable () -> Bool = AgentPowerSource.system.onBattery) {
         server = configuration?.server.absoluteString
         deviceID = configuration?.deviceID
         pauseFile = directory.appendingPathComponent("connected-agent.paused")
+        self.usingBattery = usingBattery
+        batteryPolicyFile = directory.appendingPathComponent("connected-agent.pause-on-battery")
         var info = stat()
+        pauseOnBattery = Darwin.lstat(batteryPolicyFile.path, &info) == 0 || errno != ENOENT
         paused = Darwin.lstat(pauseFile.path, &info) == 0 || errno != ENOENT
     }
 
@@ -48,7 +59,8 @@ final class ConnectedAgentControl: @unchecked Sendable {
         lock.withLock { snapshotUnlocked() }
     }
 
-    var isPaused: Bool { lock.withLock { paused } }
+    private var pausedByBattery: Bool { pauseOnBattery && usingBattery() }
+    var isPaused: Bool { lock.withLock { paused || pausedByBattery } }
 
     func starting() {
         lock.withLock { if phase != .stopping { phase = .starting } }
@@ -121,7 +133,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
 
     func beginAssignment(worker: String) -> Bool {
         lock.withLock {
-            guard phase == .ready, !paused else { return false }
+            guard phase == .ready, !paused, !pausedByBattery else { return false }
             precondition(!assignments.contains(worker))
             assignments.insert(worker)
             return true
@@ -142,11 +154,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
             switch command {
             case "pause":
                 if !paused {
-                    let descriptor = Darwin.open(pauseFile.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
-                    guard descriptor >= 0 || errno == EEXIST else {
-                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                    }
-                    if descriptor >= 0 { _ = Darwin.close(descriptor) }
+                    try Self.createMarker(pauseFile)
                     paused = true
                     try synchronizeRunnerState(pauseFile.deletingLastPathComponent())
                 }
@@ -159,6 +167,19 @@ final class ConnectedAgentControl: @unchecked Sendable {
                     paused = false
                     resumeGeneration += 1
                 }
+            case "pause-on-battery", "allow-on-battery":
+                let enabled = command == "pause-on-battery"
+                if enabled != pauseOnBattery {
+                    if enabled {
+                        try Self.createMarker(batteryPolicyFile)
+                    } else if Darwin.unlink(batteryPolicyFile.path) != 0, errno != ENOENT {
+                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                    // A new controller can already see this change even if the following sync fails.
+                    pauseOnBattery = enabled
+                }
+                // Also confirm durability on retries after an agent restart.
+                try synchronizeRunnerState(batteryPolicyFile.deletingLastPathComponent())
             case "status": break
             default: throw AgentControlError.invalidRequest
             }
@@ -166,10 +187,20 @@ final class ConnectedAgentControl: @unchecked Sendable {
         }
     }
 
+    private static func createMarker(_ file: URL) throws {
+        let descriptor = Darwin.open(file.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 || errno == EEXIST else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        if descriptor >= 0 { _ = Darwin.close(descriptor) }
+    }
+
     private func snapshotUnlocked() -> AgentControlSnapshot {
-        AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused, ready: phase == .ready, activeAssignments: assignments.count,
+        let battery = pausedByBattery
+        return AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused || battery, ready: phase == .ready, activeAssignments: assignments.count,
             recordedAt: Date(), phase: phase, server: server, deviceID: deviceID, memory: memory?.status,
-            workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError)
+            workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError,
+            pauseOnBattery: pauseOnBattery, pausedByBattery: battery, manuallyPaused: paused)
     }
 }
 
@@ -251,8 +282,8 @@ struct AgentResumeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "resume", abstract: "Resume accepting connected assignments.")
     mutating func run() throws {
         try requireInstalledConnectedAgent()
-        _ = try requestAgentControl("resume")
-        print("Connected assignments enabled.")
+        let status = try requestAgentControl("resume")
+        print(status.pausedByBattery == true ? "New jobs are paused on battery power." : "Resumed accepting new jobs.")
     }
 }
 
