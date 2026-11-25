@@ -130,9 +130,13 @@ yieldd agent resume
 
 Pause persists across process restarts and app replacement. Resume explicitly when maintenance is complete. These controls apply to the installed connected agent; foreground diagnostic commands keep their own process lifetime. Control requests use a versioned local XPC interface restricted to the agent's effective user. It opens no network listener.
 
+The companion’s Settings window can also pause new jobs on battery power. This preference applies to every runner on the Mac and persists after you quit the companion. Plugging in clears a battery pause. A manual pause persists until you resume it. If both pauses apply, the agent accepts new jobs once both clear.
+
 ### Live status
 
 `yieldd agent status` queries the running connected agent over XPC. Add `--json` for a versioned report suitable for a menu bar client or local tooling. The XPC response and JSON report contain no device token or JIT credential payload.
+
+In the JSON report, `live.paused` is true while either pause applies. `live.manuallyPaused` identifies a manual pause. `live.pauseOnBattery` is the saved preference and `live.pausedByBattery` says whether it currently holds new jobs. Older agents omit these three fields.
 
 Live status includes service readiness, pause/drain state, active assignment and cleanup counts, worker phases, runner/repository identities, memory reservations and pressure, the latest coordinator request result and successful contact time, and the last error with its timestamp. Reservations are the runner budget, not measured guest RSS or host free memory. A successful coordinator request is a recent observation, not a guarantee of current reachability; paused and memory-blocked workers may make no requests. Listener exit does not establish the GitHub job conclusion.
 

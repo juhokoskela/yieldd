@@ -34,15 +34,17 @@ final class CompanionModel {
                 }
             }
             guard current == revision else { return }
-            if !refresh || snapshot == nil { error = nil }
+            error = nil
             snapshot = value
         } catch {
             guard current == revision else { return }
             if refresh { snapshot = nil }
-            self.error = error.localizedDescription
+            self.error = describeError(error)
         }
         checking = false
     }
+
+    var runningCount: Int { snapshot?.workers.count(where: { $0.phase == .running }) ?? 0 }
 
     var idleRefreshInterval: Duration {
         guard let snapshot else { return .seconds(60) }
@@ -121,7 +123,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     private func updateIcon() {
         guard let button = item?.button else { return }
         let workers = model.snapshot?.workers ?? []
-        let running = workers.filter { $0.phase == .running }.count
+        let running = model.runningCount
         let issue = workers.contains { $0.connection == .retrying || $0.connection == .failed }
         let symbol: String
         if issue || (model.snapshot == nil && !model.checking) { symbol = "exclamationmark.triangle" }
@@ -158,7 +160,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.autoenablesItems = false
-        let running = model.snapshot?.workers.filter { $0.phase == .running }.count ?? 0
+        let running = model.runningCount
         let title = running == 0 ? model.admission : "\(model.admission) · \(running) running"
         let summary = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let label = NSTextField(labelWithString: title)
@@ -177,19 +179,19 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 let title = worker.platform == .macOS ? "macOS" : "Linux"
                 let phase = worker.phase.menuDescription
                 let row = NSMenuItem(title: several ? "\(title) · Slot \(worker.slot + 1)" : title, action: nil, keyEquivalent: "")
-                var activity = [phase, worker.repository].compactMap { $0 }
+                let hideIdle = worker.phase == .idle && worker.connection != .connected
+                var activity = [hideIdle ? nil : phase, worker.repository].compactMap { $0 }
                 switch worker.connection {
                 case .connecting: activity.append("Connecting")
                 case .retrying: activity.append("Reconnecting")
                 case .failed: activity.append("Connection failed")
                 case .connected: break
                 }
-                if worker.phase == .idle && worker.connection != .connected { activity.removeFirst() }
-                row.subtitle = activity.joined(separator: " · ")
+                let activityText = activity.joined(separator: " · ")
+                row.subtitle = activityText
                 row.setAccessibilityLabel([row.title, row.subtitle].compactMap { $0 }.joined(separator: ", "))
                 let details = NSMenu()
                 details.autoenablesItems = false
-                let activityText = activity.joined(separator: " · ")
                 let contact = worker.lastContactAt.map { "Last contact " + $0.formatted(.relative(presentation: .named)) }
                 for line in [worker.runner, contact].compactMap({ $0 }) {
                     let info = NSMenuItem(title: line, action: nil, keyEquivalent: "")
@@ -205,16 +207,18 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             }
             let manual = snapshot.manuallyPaused ?? snapshot.paused
             menu.addItem(.separator())
+            let title = manual ? (snapshot.pausedByBattery == true ? "Clear Manual Pause" : "Resume New Jobs") : "Pause New Jobs"
+            let toggle = command(title, manual ? #selector(resumeJobs) : #selector(pauseJobs))
+            if snapshot.pausedByBattery == true && !manual {
+                toggle.subtitle = "Stay paused when power is connected"
+            }
+            toggle.isEnabled = !model.changing
+            menu.addItem(toggle)
             if snapshot.pausedByBattery == true && !manual {
                 let allow = command("Allow New Jobs on Battery", #selector(allowOnBattery))
                 allow.subtitle = "Turns off the battery pause setting"
                 allow.isEnabled = !model.changing
                 menu.addItem(allow)
-            } else {
-                let title = manual ? (snapshot.pausedByBattery == true ? "Clear Manual Pause" : "Resume New Jobs") : "Pause New Jobs"
-                let toggle = command(title, manual ? #selector(resumeJobs) : #selector(pauseJobs))
-                toggle.isEnabled = !model.changing
-                menu.addItem(toggle)
             }
         } else if !model.checking {
             menu.addItem(command("Check Again", #selector(refresh)))
@@ -238,7 +242,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         Task {
             await model.update(command)
             updateIcon()
-            if model.error != nil { showSettings() }
+            if model.error != nil { presentSettings() }
         }
     }
     @objc private func refresh() { send("status") }
@@ -267,19 +271,24 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
     }
 
     func windowWillClose(_ notification: Notification) {
-        if let window = notification.object as? NSWindow, window === logWindow?.window {
-            logWindow = nil
-        }
+        guard let window = notification.object as? NSWindow else { return }
+        if window === logWindow?.window { logWindow = nil }
+        if window === settings?.window { settings = nil }
     }
 
     @objc func showSettings() {
         Task { await model.update(); updateIcon() }
+        presentSettings()
+    }
+
+    private func presentSettings() {
         if settings == nil {
             let controller = NSHostingController(rootView: CompanionSettings(model: model) { [weak self] enabled in
                 self?.send(enabled ? "pause-on-battery" : "allow-on-battery")
             })
             controller.sizingOptions = .preferredContentSize
             let window = NSWindow(contentViewController: controller)
+            window.delegate = self
             window.title = "yieldd Settings"
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false

@@ -18,9 +18,9 @@ struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let workers: [AgentWorkerStatus]
     let lastError: AgentReportedError?
 
-    var pauseOnBattery: Bool?
-    var pausedByBattery: Bool?
-    var manuallyPaused: Bool?
+    let pauseOnBattery: Bool?
+    let pausedByBattery: Bool?
+    let manuallyPaused: Bool?
 
     var drained: Bool { ready && paused && activeAssignments == 0 }
 }
@@ -32,6 +32,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private let batteryPolicyFile: URL
     private let usingBattery: @Sendable () -> Bool
     private var pauseOnBattery: Bool
+    private var batteryMarkerNeedsSync = false
     private var paused: Bool
     private let instanceID = UUID()
     private var resumeGeneration: UInt64 = 0
@@ -154,11 +155,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
             switch command {
             case "pause":
                 if !paused {
-                    let descriptor = Darwin.open(pauseFile.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
-                    guard descriptor >= 0 || errno == EEXIST else {
-                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                    }
-                    if descriptor >= 0 { _ = Darwin.close(descriptor) }
+                    try Self.createMarker(pauseFile)
                     paused = true
                     try synchronizeRunnerState(pauseFile.deletingLastPathComponent())
                 }
@@ -171,22 +168,35 @@ final class ConnectedAgentControl: @unchecked Sendable {
                     paused = false
                     resumeGeneration += 1
                 }
-            case "pause-on-battery":
-                guard !pauseOnBattery else { break }
-                try writePrivateRunnerFile(Data(), to: batteryPolicyFile)
-                pauseOnBattery = true
-            case "allow-on-battery":
-                guard pauseOnBattery else { break }
-                if Darwin.unlink(batteryPolicyFile.path) != 0, errno != ENOENT {
-                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            case "pause-on-battery", "allow-on-battery":
+                let enabled = command == "pause-on-battery"
+                if enabled != pauseOnBattery {
+                    if enabled {
+                        try Self.createMarker(batteryPolicyFile)
+                    } else if Darwin.unlink(batteryPolicyFile.path) != 0, errno != ENOENT {
+                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                    // A new controller can already see this change even if the following sync fails.
+                    pauseOnBattery = enabled
+                    batteryMarkerNeedsSync = true
                 }
-                try synchronizeRunnerState(batteryPolicyFile.deletingLastPathComponent())
-                pauseOnBattery = false
+                if batteryMarkerNeedsSync {
+                    try synchronizeRunnerState(batteryPolicyFile.deletingLastPathComponent())
+                    batteryMarkerNeedsSync = false
+                }
             case "status": break
             default: throw AgentControlError.invalidRequest
             }
             return snapshotUnlocked()
         }
+    }
+
+    private static func createMarker(_ file: URL) throws {
+        let descriptor = Darwin.open(file.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 || errno == EEXIST else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        if descriptor >= 0 { _ = Darwin.close(descriptor) }
     }
 
     private func snapshotUnlocked() -> AgentControlSnapshot {

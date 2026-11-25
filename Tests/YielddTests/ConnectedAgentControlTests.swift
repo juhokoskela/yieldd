@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 import Synchronization
@@ -44,6 +45,74 @@ func batteryPolicyGatesNewAssignmentsAndPreservesManualPause() throws {
     battery.withLock { $0 = true }
     #expect(try !control.request("allow-on-battery").paused)
     #expect(control.beginAssignment(worker: "linux-0"))
+}
+
+@MainActor @Test
+func companionCanPauseManuallyWhileBatteryPolicyIsActive() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let battery = Mutex(true)
+    let control = ConnectedAgentControl(directory: fixture.directory, usingBattery: { battery.withLock { $0 } })
+    _ = try control.request("pause-on-battery")
+    let model = CompanionModel { try control.request($0) }
+    await model.update()
+    let delegate = CompanionDelegate(model: model)
+    let menu = NSMenu()
+    delegate.menuNeedsUpdate(menu)
+    let item = try #require(menu.item(withTitle: "Pause New Jobs"))
+    #expect(menu.item(withTitle: "Allow New Jobs on Battery") != nil)
+    menu.performActionForItem(at: menu.index(of: item))
+    let deadline = ContinuousClock.now + .seconds(2)
+    while model.snapshot?.manuallyPaused != true && ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    battery.withLock { $0 = false }
+    #expect(control.isPaused)
+    #expect(try !control.request("resume").paused)
+}
+
+@Test
+func oldAgentSnapshotsOmitBatteryPreferences() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let data = try JSONEncoder().encode(fixture.control.snapshot)
+    var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    for field in ["pauseOnBattery", "pausedByBattery", "manuallyPaused"] { json.removeValue(forKey: field) }
+    let decoded = try JSONDecoder().decode(AgentControlSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+    #expect(decoded.pauseOnBattery == nil && decoded.pausedByBattery == nil && decoded.manuallyPaused == nil)
+}
+
+@Test
+func batteryPreferenceFollowsMarkerAfterDirectorySyncFailure() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let alias = fixture.directory.appendingPathComponent("alias")
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture.directory)
+    let control = ConnectedAgentControl(directory: alias, usingBattery: { true })
+    for (command, expected) in [("pause-on-battery", true), ("allow-on-battery", false)] {
+        // The marker operation succeeds through the alias. Directory sync rejects a symlink.
+        #expect(throws: POSIXError.self) { try control.request(command) }
+        #expect(control.isPaused == expected)
+        #expect(ConnectedAgentControl(directory: fixture.directory, usingBattery: { true }).isPaused == expected)
+        #expect(throws: POSIXError.self) { try control.request(command) }
+    }
+}
+
+@MainActor @Test
+func companionClearsLostReplyErrorWhenItReadsTheCommittedPause() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let model = CompanionModel { command in
+        let snapshot = try fixture.control.request(command)
+        if command == "pause" { throw AgentControlError.unavailable }
+        return snapshot
+    }
+    await model.update()
+    await model.update("pause")
+    #expect(model.error != nil)
+    await model.update()
+    #expect(model.error == nil)
+    #expect(model.snapshot?.manuallyPaused == true)
 }
 
 @Test
