@@ -61,7 +61,8 @@ func companionCanPauseManuallyWhileBatteryPolicyIsActive() async throws {
     delegate.menuNeedsUpdate(menu)
     let item = try #require(menu.item(withTitle: "Pause New Jobs"))
     #expect(menu.item(withTitle: "Allow New Jobs on Battery") != nil)
-    menu.performActionForItem(at: menu.index(of: item))
+    let action = try #require(item.action)
+    #expect(NSApplication.shared.sendAction(action, to: item.target, from: item))
     let deadline = ContinuousClock.now + .seconds(2)
     while model.snapshot?.manuallyPaused != true && ContinuousClock.now < deadline {
         try await Task.sleep(for: .milliseconds(5))
