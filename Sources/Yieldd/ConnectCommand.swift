@@ -118,7 +118,7 @@ func runConnectedService(
         let cacheSocket = archiveService?.socketURL
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
-        if control?.isPaused == true { output.info("Connected agent is paused. Run agent resume after maintenance.") }
+        if control?.isPaused == true { output.info("Connected agent is paused. New jobs will wait until admission resumes.") }
         try RunnerPool(stop: stop).run(slots: slots) { worker, stop in
             let workerID = worker.id
             let platform = worker.backend.platform

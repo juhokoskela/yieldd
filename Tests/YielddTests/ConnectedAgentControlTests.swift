@@ -1,6 +1,31 @@
 import Foundation
 import Testing
+import Synchronization
 @testable import Yieldd
+
+@Test
+func batteryPolicyGatesNewAssignmentsAndPreservesManualPause() throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    let battery = Mutex(false)
+    let control = ConnectedAgentControl(directory: fixture.directory, usingBattery: { battery.withLock { $0 } })
+    control.markReady()
+    #expect(control.beginAssignment(worker: "macos-0"))
+    #expect(try control.request("pause-on-battery").pauseOnBattery == true)
+    battery.withLock { $0 = true }
+    #expect(!control.beginAssignment(worker: "linux-0"))
+    #expect(control.snapshot.activeAssignments == 1)
+    #expect(control.snapshot.pausedByBattery == true)
+    let relaunched = ConnectedAgentControl(directory: fixture.directory, usingBattery: { true })
+    #expect(relaunched.isPaused)
+    _ = try control.request("pause")
+    battery.withLock { $0 = false }
+    #expect(control.isPaused)
+    #expect(try !control.request("resume").paused)
+    battery.withLock { $0 = true }
+    #expect(try !control.request("allow-on-battery").paused)
+    #expect(control.beginAssignment(worker: "linux-0"))
+}
 
 @Test
 func connectedPauseSerializesAdmissionAndDrainsOnlyAfterCleanup() throws {
@@ -183,4 +208,33 @@ private struct AgentControlFixture {
         control = ConnectedAgentControl(directory: directory)
     }
     func remove() { try? FileManager.default.removeItem(at: directory) }
+}
+
+@MainActor @Test
+func companionControlsTheAgentOverXPCAndRecoversFromLostContact() async throws {
+    let fixture = try AgentControlFixture()
+    defer { fixture.remove() }
+    fixture.control.markReady()
+    let listener = NSXPCListener.anonymous()
+    let control = AgentControlEndpoint(control: fixture.control, listener: listener)
+    control.start()
+    defer { control.stop() }
+    let endpoint = listener.endpoint
+    let available = Mutex(false)
+    let model = CompanionModel { command in
+        guard available.withLock({ $0 }) else { throw AgentControlError.unavailable }
+        return try requestAgentControl(command, connection: NSXPCConnection(listenerEndpoint: endpoint))
+    }
+    await model.update()
+    #expect(model.snapshot == nil && model.error != nil)
+    available.withLock { $0 = true }
+    await model.update()
+    #expect(model.snapshot?.ready == true && model.error == nil)
+    await model.update("pause")
+    #expect(fixture.control.isPaused)
+    #expect(model.admission == "New jobs paused")
+    await model.update("resume")
+    #expect(!fixture.control.isPaused)
+    await model.update("pause-on-battery")
+    #expect(model.snapshot?.pauseOnBattery == true)
 }
