@@ -2,6 +2,8 @@
 
 `yieldd` turns spare Mac resources into ephemeral GitHub Actions runners. The Go coordinator routes queued jobs to a connected Mac or a hosted fallback. Run the Mac client in a terminal or as a login agent.
 
+Open the installed `yieldd.app` to see runner activity in the menu bar. Pause or resume new jobs there, or open Settings to pause new jobs on battery power. Running jobs finish in either case. The login agent enforces the battery setting even after you quit the companion.
+
 ## Requirements
 
 - An Apple Silicon Mac running macOS 26 or newer
