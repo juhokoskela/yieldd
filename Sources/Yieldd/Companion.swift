@@ -156,7 +156,6 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let several = snapshot.workers.contains { $0.id != worker.id && $0.platform == worker.platform }
                 let title = worker.platform == .macOS ? "macOS" : "Linux"
                 let phase = worker.phase.menuDescription
-                let issue = worker.connection == .retrying || worker.connection == .failed
                 let row = NSMenuItem(title: several ? "\(title) · Slot \(worker.slot + 1)" : title, action: nil, keyEquivalent: "")
                 var activity = [phase, worker.repository].compactMap { $0 }
                 switch worker.connection {
@@ -167,9 +166,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 if worker.phase == .idle && worker.connection != .connected { activity.removeFirst() }
                 row.subtitle = activity.joined(separator: " · ")
-                if issue { row.title = "⚠︎  " + row.title }
-                else if worker.phase == .running { row.title = "▶︎  " + row.title }
-                row.setAccessibilityLabel([title, row.subtitle].compactMap { $0 }.joined(separator: ", "))
+                row.setAccessibilityLabel([row.title, row.subtitle].compactMap { $0 }.joined(separator: ", "))
                 let details = NSMenu()
                 details.autoenablesItems = false
                 let activityText = activity.joined(separator: " · ")
@@ -180,16 +177,20 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     details.addItem(info)
                 }
                 if !details.items.isEmpty { details.addItem(.separator()) }
-                let copy = command("Copy Runner Details", #selector(copyDetails(_:)))
+                let copy = command("Copy Runner Details", #selector(copyText(_:)))
                 copy.representedObject = [worker.id, activityText, worker.runner, contact].compactMap { $0 }.joined(separator: "\n")
                 details.addItem(copy)
-                if issue { details.addItem(command("Show Agent Log", #selector(showAgentLog))) }
                 row.submenu = details
                 menu.addItem(row)
             }
             let manual = snapshot.manuallyPaused ?? snapshot.paused
-            if snapshot.pausedByBattery != true || manual {
-                menu.addItem(.separator())
+            menu.addItem(.separator())
+            if snapshot.pausedByBattery == true && !manual {
+                let allow = command("Allow New Jobs on Battery", #selector(allowOnBattery))
+                allow.subtitle = "Turns off the battery pause setting"
+                allow.isEnabled = !model.changing
+                menu.addItem(allow)
+            } else {
                 let title = manual ? (snapshot.pausedByBattery == true ? "Clear Manual Pause" : "Resume New Jobs") : "Pause New Jobs"
                 let toggle = command(title, manual ? #selector(resumeJobs) : #selector(pauseJobs))
                 toggle.isEnabled = !model.changing
@@ -199,8 +200,13 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(command("Check Again", #selector(refresh)))
         }
         menu.addItem(.separator())
-        if model.snapshot?.lastError != nil {
-            menu.addItem(command("Copy Last Agent Error", #selector(copyLastError)))
+        if let error = model.snapshot?.lastError {
+            let copy = command("Copy Last Agent Error", #selector(copyText(_:)))
+            let preview = error.message.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            copy.subtitle = preview.count > 64 ? String(preview.prefix(63)) + "…" : preview
+            copy.toolTip = error.message
+            copy.representedObject = error.message
+            menu.addItem(copy)
         }
         menu.addItem(command("Show Agent Log", #selector(showAgentLog)))
         menu.addItem(.separator())
@@ -218,16 +224,12 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func refresh() { send("status") }
     @objc private func pauseJobs() { send("pause") }
     @objc private func resumeJobs() { send("resume") }
+    @objc private func allowOnBattery() { send("allow-on-battery") }
     @objc private func quit() { NSApp.terminate(nil) }
-    @objc private func copyDetails(_ item: NSMenuItem) {
+    @objc private func copyText(_ item: NSMenuItem) {
         guard let details = item.representedObject as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(details, forType: .string)
-    }
-    @objc private func copyLastError() {
-        guard let error = model.snapshot?.lastError else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(error.message, forType: .string)
     }
     @objc private func showAgentLog() {
         if logWindow == nil {
