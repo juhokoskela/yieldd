@@ -57,6 +57,16 @@ func storageConfigurationRefusesUnresolvedLeases(connected: Bool) throws {
     #expect(try RunnerStorage.load(in: fixture.directory) == nil)
 }
 
+@Test
+func apfsInventorySkipsContainersWithoutVolumes() throws {
+    let uuid = UUID().uuidString
+    let inventory = try plist(["Containers": [
+        ["ContainerReference": "disk1"],
+        ["Volumes": [["APFSVolumeUUID": uuid, "CapacityQuota": 12345]]],
+    ]])
+    #expect(try APFSQuotaVolume.decode(inventory) == [APFSQuotaVolume(uuid: uuid, quotaBytes: 12345)])
+}
+
 @Test(arguments: [false, true])
 func storageConfigurationValidatesTheVolumeWithoutReadingItAgain(hasQuota: Bool) throws {
     let fixture = try StorageFixture()
