@@ -1,5 +1,15 @@
 import Foundation
 
+final class ConnectedSlotReservation {
+    var reservation: RunnerMemoryReservation?
+
+    func release(using release: (RunnerMemoryReservation) -> Void) {
+        guard let held = reservation else { return }
+        reservation = nil
+        release(held)
+    }
+}
+
 func runConnectedClient(
     checkCancellation: () throws -> Void,
     recover: () throws -> Void,
@@ -15,13 +25,11 @@ func runConnectedClient(
     blocked: () -> Void = {},
     paused: () -> Bool = { false },
     beginAssignment: () -> Bool = { true },
-    finishAssignment: () -> Void = {}
+    finishAssignment: () -> Void = {},
+    slotReservation: ConnectedSlotReservation = ConnectedSlotReservation()
 ) throws {
-    var heldReservation: RunnerMemoryReservation?
     func releaseCapacity() {
-        guard let reservation = heldReservation else { return }
-        heldReservation = nil
-        release(reservation)
+        slotReservation.release(using: release)
     }
     func recoverWithRetry() throws {
         while true {
@@ -64,7 +72,7 @@ func runConnectedClient(
                 try wait(1)
                 continue
             }
-            heldReservation = reservation
+            slotReservation.reservation = reservation
             guard beginAssignment() else {
                 releaseCapacity()
                 try decline(offer)

@@ -181,7 +181,6 @@ func (s *stateStore) read() (*state, error) {
 		return nil, errors.New("too many saved assignments")
 	}
 	var slots [maximumAssignments]bool
-	supply := 0
 	for name, l := range value.Leases {
 		if l == nil || name != l.Name {
 			return nil, errors.New("invalid assignment identity")
@@ -194,12 +193,6 @@ func (s *stateStore) read() (*state, error) {
 		}
 		if err := l.validateLocal(value.Config.DeviceID); err != nil {
 			return nil, err
-		}
-		if l.countsAsSupply() {
-			supply++
-			if supply > maximumAssignments {
-				return nil, errors.New("too many saved assignments")
-			}
 		}
 		if l.Local != nil {
 			if slots[l.Local.Slot] {

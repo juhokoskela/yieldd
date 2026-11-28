@@ -13,6 +13,7 @@ final class ConnectedRunner {
     var stateChanged: (RunnerSessionState) -> Void
     var currentTime: () -> TimeInterval
     var initialLinuxCPUs: () -> Int
+    var onWarning: (String) -> Void
 
     // Valid only for this worker process. A restart must prove absence again.
     private var absent: RunnerID?
@@ -23,7 +24,8 @@ final class ConnectedRunner {
          localCache: Bool = false,
          stateChanged: @escaping (RunnerSessionState) -> Void = { _ in },
          currentTime: @escaping () -> TimeInterval = continuousMonotonicSeconds,
-         initialLinuxCPUs: @escaping () -> Int = { AppleContainerBackend.virtualCPUs }) {
+         initialLinuxCPUs: @escaping () -> Int = { AppleContainerBackend.virtualCPUs },
+         onWarning: @escaping (String) -> Void = { _ in }) {
         self.backend = backend
         self.store = store
         self.server = server
@@ -36,6 +38,7 @@ final class ConnectedRunner {
         self.stateChanged = stateChanged
         self.currentTime = currentTime
         self.initialLinuxCPUs = initialLinuxCPUs
+        self.onWarning = onWarning
     }
 
     func recover() throws {
@@ -69,6 +72,7 @@ final class ConnectedRunner {
         var machineMayExist = false
         var jobStarted = false
         do {
+            authorization.prepare(runner: offer.runner)
             try authorization.check()
             let jit = try accept(offer)
             authorization.start(offer)
@@ -80,13 +84,17 @@ final class ConnectedRunner {
                 machineMayExist = true
             }
             try authorization.check()
+            try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: localCache)
             if backend.platform == .linux {
                 let targetCPUs = initialLinuxCPUs()
                 if targetCPUs < AppleContainerBackend.virtualCPUs {
-                    try backend.applyCPUQuota(targetCPUs, on: id)
+                    do {
+                        try backend.applyCPUQuota(targetCPUs, on: id)
+                    } catch let ProcessExecutionError.nonZeroExit(_, result) where result.terminationStatus == 2 {
+                        onWarning("Guest image for \(id.value) does not support runtime CPU quotas (yieldd-runner-control cpu exited 2); rebuild the Linux guest image to enable Meeting Mode CPU caps.")
+                    }
                 }
             }
-            try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: localCache)
             let configure = ["yieldd-configure-runner", "--jit"] + (localCache ? ["--local-cache"] : [])
             try backend.exec(configure, standardInput: Data("\(jit)\n".utf8),
                              timeout: 5 * 60, on: id)

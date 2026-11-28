@@ -342,7 +342,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                 timed.submenu = timedMenu
                 menu.addItem(timed)
             }
-            if snapshot.pausedByBattery == true && !manual {
+            if snapshot.pausedByBattery == true && snapshot.pauseOnBattery == true && !manual {
                 let allow = command("Allow New Jobs on Battery", #selector(allowOnBattery))
                 allow.subtitle = "Turns off the battery pause setting"
                 allow.isEnabled = !model.changing
@@ -409,6 +409,8 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
             let current = model.snapshot
             if admission != model.admission || previous?.workers != current?.workers ||
                 previous?.manuallyPaused != current?.manuallyPaused || previous?.meetingMode != current?.meetingMode ||
+                previous?.meetingModeCPUs != current?.meetingModeCPUs ||
+                previous?.meetingModeConfiguredCPUs != current?.meetingModeConfiguredCPUs ||
                 previous?.lastError != current?.lastError || previous?.memory != current?.memory {
                 menuNeedsUpdate(menu)
             }
@@ -487,8 +489,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, 
                     self?.send(enabled ? "pause-on-battery" : "allow-on-battery")
                 },
                 setMeetingCPUs: { [weak self] cpus in
-                    let active = self?.model.snapshot?.meetingMode ?? false
-                    self?.sendRequest(AgentControlRequest(action: "meeting-mode", enabled: active, cpus: cpus))
+                    self?.sendRequest(AgentControlRequest(action: "meeting-mode", cpus: cpus))
                 }
             ))
             controller.sizingOptions = .preferredContentSize

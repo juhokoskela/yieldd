@@ -29,7 +29,7 @@ struct CompanionSettings: View {
                     Text("Meeting mode CPU limit:")
                     Spacer()
                     Picker("Meeting mode CPU limit", selection: Binding(
-                        get: { model.snapshot?.meetingModeCPUs ?? HostHardwareProfile.current.defaultMeetingModeCPUs },
+                        get: { model.snapshot?.meetingModeConfiguredCPUs ?? model.snapshot?.meetingModeCPUs ?? HostHardwareProfile.current.defaultMeetingModeCPUs },
                         set: { cpus in setMeetingCPUs(cpus) }
                     )) {
                         Text("2 vCPUs").tag(2)
@@ -43,6 +43,14 @@ struct CompanionSettings: View {
                 Text("Caps Meeting Mode to 1 Linux runner on AC power. macOS jobs use hosted overflow.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                if model.snapshot?.meetingMode == true,
+                   let configured = model.snapshot?.meetingModeConfiguredCPUs,
+                   let effective = model.snapshot?.meetingModeCPUs,
+                   effective < configured {
+                    Text("Thermally capped to \(effective) vCPUs until the Mac cools down.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             VStack(alignment: .leading, spacing: 5) {
                 Toggle("Open menu bar companion at login", isOn: Binding(

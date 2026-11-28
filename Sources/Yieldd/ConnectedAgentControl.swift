@@ -30,10 +30,63 @@ struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let meetingMode: Bool?
     let meetingModeUntil: Date?
     let meetingModeCPUs: Int?
+    let meetingModeConfiguredCPUs: Int?
     let hostPower: HostPowerStatus?
     let thermalState: HostThermalState?
 
     var drained: Bool { ready && paused && activeAssignments == 0 }
+
+    init(
+        version: Int,
+        instanceID: UUID,
+        resumeGeneration: UInt64,
+        paused: Bool,
+        ready: Bool,
+        activeAssignments: Int,
+        recordedAt: Date,
+        phase: AgentServicePhase,
+        server: String?,
+        deviceID: String?,
+        memory: RunnerMemoryStatus?,
+        workers: [AgentWorkerStatus],
+        lastError: AgentReportedError?,
+        pauseOnBattery: Bool? = nil,
+        pausedByBattery: Bool? = nil,
+        manuallyPaused: Bool? = nil,
+        admissionReasons: [AgentAdmissionReason]? = nil,
+        pausedUntil: Date? = nil,
+        meetingMode: Bool? = nil,
+        meetingModeUntil: Date? = nil,
+        meetingModeCPUs: Int? = nil,
+        meetingModeConfiguredCPUs: Int? = nil,
+        hostPower: HostPowerStatus? = nil,
+        thermalState: HostThermalState? = nil
+    ) {
+        self.version = version
+        self.instanceID = instanceID
+        self.resumeGeneration = resumeGeneration
+        self.paused = paused
+        self.ready = ready
+        self.activeAssignments = activeAssignments
+        self.recordedAt = recordedAt
+        self.phase = phase
+        self.server = server
+        self.deviceID = deviceID
+        self.memory = memory
+        self.workers = workers
+        self.lastError = lastError
+        self.pauseOnBattery = pauseOnBattery
+        self.pausedByBattery = pausedByBattery
+        self.manuallyPaused = manuallyPaused
+        self.admissionReasons = admissionReasons
+        self.pausedUntil = pausedUntil
+        self.meetingMode = meetingMode
+        self.meetingModeUntil = meetingModeUntil
+        self.meetingModeCPUs = meetingModeCPUs
+        self.meetingModeConfiguredCPUs = meetingModeConfiguredCPUs
+        self.hostPower = hostPower
+        self.thermalState = thermalState
+    }
 }
 
 struct AgentControlRequest: Codable, Equatable, Sendable {
@@ -70,9 +123,8 @@ private struct AgentPersistedPolicy: Codable, Equatable {
 
 struct AgentSlotControlHandler: Sendable {
     let abort: @Sendable (ConnectedExecutionError, String?) -> Bool
-    let severNetwork: @Sendable () -> Void
+    let severNetwork: @Sendable (DispatchTime) -> Void
     let applyCPUQuota: @Sendable (Int) -> Void
-    let markDestroyOnWake: @Sendable () -> Void
 }
 
 // The lock serializes admission with pause/meeting/reclaim and owns the assignment set.
@@ -111,6 +163,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private var workers: [String: AgentWorkerStatus] = [:]
     private var slotHandlers: [String: AgentSlotControlHandler] = [:]
     private var lastError: AgentReportedError?
+    private var thermalObserver: (any NSObjectProtocol)?
 
     convenience init(directory: URL, configuration: ConnectedAgentConfiguration? = nil,
                      usingBattery: @escaping @Sendable () -> Bool) {
@@ -153,26 +206,82 @@ final class ConnectedAgentControl: @unchecked Sendable {
         meetingModeUntil = persisted?.meetingModeUntil
         let configuredCPUs = persisted?.meetingModeCPUs ?? hardwareProfile.defaultMeetingModeCPUs
         meetingModeCPUs = configuredCPUs == 4 ? 4 : 2
+        if notificationName != nil {
+            thermalObserver = NotificationCenter.default.addObserver(
+                forName: ProcessInfo.thermalStateDidChangeNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.reconcilePolicies()
+            }
+        }
+    }
+
+    deinit {
+        if let thermalObserver {
+            NotificationCenter.default.removeObserver(thermalObserver)
+        }
     }
 
     var snapshot: AgentControlSnapshot {
-        lock.withLock { snapshotUnlocked() }
+        let (result, actions, stateChanged) = lock.withLock { () -> (AgentControlSnapshot, [@Sendable () -> Void], Bool) in
+            var actions: [@Sendable () -> Void] = []
+            var stateChanged = false
+            let snap = snapshotUnlocked(postLockActions: &actions, stateChanged: &stateChanged)
+            return (snap, actions, stateChanged)
+        }
+        dispatchPostLockActions(actions)
+        if stateChanged { notifyStateChanged() }
+        return result
     }
 
     var isPaused: Bool {
-        lock.withLock { isPausedUnlocked(now: currentDate(), power: powerStatus(), thermal: thermalStateProvider(), darkWake: isDarkWakeProvider()) }
+        let (paused, actions, stateChanged) = lock.withLock { () -> (Bool, [@Sendable () -> Void], Bool) in
+            var actions: [@Sendable () -> Void] = []
+            var stateChanged = false
+            let result = isPausedUnlocked(
+                now: currentDate(),
+                power: powerStatus(),
+                thermal: thermalStateProvider(),
+                darkWake: isDarkWakeProvider(),
+                postLockActions: &actions,
+                stateChanged: &stateChanged
+            )
+            return (result, actions, stateChanged)
+        }
+        dispatchPostLockActions(actions)
+        if stateChanged { notifyStateChanged() }
+        return paused
     }
 
     var effectiveLinuxCPUs: Int {
-        lock.withLock {
+        let (cpus, actions, stateChanged) = lock.withLock { () -> (Int, [@Sendable () -> Void], Bool) in
+            var actions: [@Sendable () -> Void] = []
             let now = currentDate()
-            expireTimersUnlocked(now: now)
-            guard meetingMode else { return AppleContainerBackend.virtualCPUs }
+            let expired = expireTimersUnlocked(now: now, postLockActions: &actions)
+            guard meetingMode else { return (AppleContainerBackend.virtualCPUs, actions, expired) }
             let thermal = thermalStateProvider()
-            updateThermalGuardUnlocked(now: now, thermal: thermal)
-            if thermalCappedToTwo { return min(meetingModeCPUs, 2) }
-            return meetingModeCPUs
+            let thermalChanged = updateThermalGuardUnlocked(now: now, thermal: thermal, postLockActions: &actions)
+            let target = thermalCappedToTwo ? min(meetingModeCPUs, 2) : meetingModeCPUs
+            return (target, actions, expired || thermalChanged)
         }
+        dispatchPostLockActions(actions)
+        if stateChanged { notifyStateChanged() }
+        return cpus
+    }
+
+    /// Re-evaluates timed pauses, Meeting Mode expiry, and thermal state transitions,
+    /// pushing any required CPU quota adjustments to active Linux runners.
+    func reconcilePolicies() {
+        let (actions, stateChanged) = lock.withLock { () -> ([@Sendable () -> Void], Bool) in
+            var actions: [@Sendable () -> Void] = []
+            let now = currentDate()
+            let expired = expireTimersUnlocked(now: now, postLockActions: &actions)
+            let thermalChanged = updateThermalGuardUnlocked(now: now, thermal: thermalStateProvider(), postLockActions: &actions)
+            return (actions, expired || thermalChanged)
+        }
+        dispatchPostLockActions(actions)
+        if stateChanged { notifyStateChanged() }
     }
 
     func starting() {
@@ -223,8 +332,12 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     func update(worker: String, phase: AgentWorkerPhase) {
-        lock.withLock { workers[worker]?.phase = phase }
-        notifyStateChanged()
+        let changed = lock.withLock { () -> Bool in
+            guard workers[worker] != nil, workers[worker]?.phase != phase else { return false }
+            workers[worker]?.phase = phase
+            return true
+        }
+        if changed { notifyStateChanged() }
     }
 
     func assign(worker: String, offer: ConnectedOffer) {
@@ -250,12 +363,14 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     func connection(worker: String, state: AgentConnectionState, error: String?) {
-        lock.withLock {
+        let changed = lock.withLock { () -> Bool in
+            let stateChanged = workers[worker]?.connection != state
             workers[worker]?.connection = state
             if state == .connected { workers[worker]?.lastContactAt = currentDate() }
             if let error { lastError = AgentReportedError(message: error, occurredAt: currentDate()) }
+            return stateChanged || error != nil
         }
-        notifyStateChanged()
+        if changed { notifyStateChanged() }
     }
 
     func recordError(_ message: String) {
@@ -294,10 +409,24 @@ final class ConnectedAgentControl: @unchecked Sendable {
             wakeHoldDownUntil = currentDate().addingTimeInterval(Self.wakeHoldDownDuration)
             return Array(slotHandlers.values)
         }
+        // Latch sleep interruption on every slot synchronously first so no guest can
+        // pass an authorization check after wake.
         for handler in handlers {
-            handler.markDestroyOnWake()
-            handler.severNetwork()
             _ = handler.abort(.sleepInterrupted, nil)
+        }
+        // Sever all active relays concurrently under a single shared deadline so
+        // multiple active slots remain bounded within the sleep-callback budget.
+        if !handlers.isEmpty {
+            let sharedDeadline = DispatchTime.now() + .milliseconds(800)
+            let group = DispatchGroup()
+            for handler in handlers {
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    handler.severNetwork(sharedDeadline)
+                    group.leave()
+                }
+            }
+            _ = group.wait(timeout: sharedDeadline)
         }
         notifyStateChanged()
     }
@@ -311,39 +440,51 @@ final class ConnectedAgentControl: @unchecked Sendable {
     }
 
     func canPoll(platform: RunnerPlatform) -> Bool {
-        lock.withLock {
+        let (allowed, actions, stateChanged) = lock.withLock { () -> (Bool, [@Sendable () -> Void], Bool) in
+            var actions: [@Sendable () -> Void] = []
+            var stateChanged = false
             let now = currentDate()
             let power = powerStatus()
             let thermal = thermalStateProvider()
             let darkWake = isDarkWakeProvider()
-            guard !isPausedUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake) else { return false }
-            if meetingMode {
-                if platform == .macOS { return false }
-                if assignments.count >= 1 { return false }
+            guard !isPausedUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake,
+                                    postLockActions: &actions, stateChanged: &stateChanged) else {
+                return (false, actions, stateChanged)
             }
-            return true
+            if meetingMode {
+                if platform == .macOS { return (false, actions, stateChanged) }
+                if assignments.count >= 1 { return (false, actions, stateChanged) }
+            }
+            return (true, actions, stateChanged)
         }
+        dispatchPostLockActions(actions)
+        if stateChanged { notifyStateChanged() }
+        return allowed
     }
 
     func beginAssignment(worker: String, platform: RunnerPlatform? = nil) -> Bool {
         let resolvedPlatform = platform ?? (worker.hasPrefix("macOS-") ? .macOS : .linux)
-        let allowed = lock.withLock { () -> Bool in
+        let (allowed, actions, stateChanged) = lock.withLock { () -> (Bool, [@Sendable () -> Void], Bool) in
+            var actions: [@Sendable () -> Void] = []
+            var stateChanged = false
             let now = currentDate()
             let power = powerStatus()
             let thermal = thermalStateProvider()
             let darkWake = isDarkWakeProvider()
-            guard phase == .ready, !isPausedUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake) else {
-                return false
+            guard phase == .ready, !isPausedUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake,
+                                                     postLockActions: &actions, stateChanged: &stateChanged) else {
+                return (false, actions, stateChanged)
             }
             if meetingMode {
                 // Meeting mode atomically caps total active slots across both platforms to 1 Linux guest.
-                guard resolvedPlatform == .linux, assignments.isEmpty else { return false }
+                guard resolvedPlatform == .linux, assignments.isEmpty else { return (false, actions, stateChanged) }
             }
             precondition(!assignments.contains(worker))
             assignments.insert(worker)
-            return true
+            return (true, actions, true)
         }
-        if allowed { notifyStateChanged() }
+        dispatchPostLockActions(actions)
+        if stateChanged { notifyStateChanged() }
         return allowed
     }
 
@@ -373,9 +514,12 @@ final class ConnectedAgentControl: @unchecked Sendable {
             parsed = AgentControlRequest(action: command)
         }
         var postLockActions: [@Sendable () -> Void] = []
+        var stateChanged = parsed.action != "status"
         let snapshot = try lock.withLock { () throws -> AgentControlSnapshot in
             let now = currentDate()
-            expireTimersUnlocked(now: now)
+            if expireTimersUnlocked(now: now, postLockActions: &postLockActions) {
+                stateChanged = true
+            }
             switch parsed.action {
             case "pause":
                 try setManualPauseUnlocked(enabled: true, until: parsed.durationSeconds.map { now.addingTimeInterval(max(1, $0)) })
@@ -414,37 +558,85 @@ final class ConnectedAgentControl: @unchecked Sendable {
                     postLockActions.append { _ = handler.abort(.reclaimed, runner) }
                 }
             case "meeting-mode":
-                let enabled = parsed.enabled ?? !meetingMode
+                let nextCPUs: Int
                 if let cpus = parsed.cpus {
                     guard cpus == 2 || cpus == 4 else { throw AgentControlError.invalidRequest }
-                    meetingModeCPUs = cpus
+                    nextCPUs = cpus
+                } else {
+                    nextCPUs = meetingModeCPUs
                 }
-                meetingMode = enabled
-                meetingModeUntil = enabled ? parsed.durationSeconds.map { now.addingTimeInterval(max(1, $0)) } : nil
-                if !enabled {
-                    thermalCappedToTwo = false
-                    thermalHoldDownUntil = nil
+                let nextEnabled: Bool
+                let nextUntil: Date?
+                if let requestedEnabled = parsed.enabled {
+                    nextEnabled = requestedEnabled
+                    if requestedEnabled {
+                        if let duration = parsed.durationSeconds {
+                            nextUntil = now.addingTimeInterval(max(1, duration))
+                        } else if meetingMode {
+                            nextUntil = meetingModeUntil
+                        } else {
+                            nextUntil = nil
+                        }
+                    } else {
+                        nextUntil = nil
+                    }
+                } else if parsed.cpus != nil {
+                    // CPU-only update from Settings preserves current enabled state and timer.
+                    nextEnabled = meetingMode
+                    nextUntil = meetingModeUntil
+                } else {
+                    nextEnabled = !meetingMode
+                    nextUntil = nextEnabled ? parsed.durationSeconds.map { now.addingTimeInterval(max(1, $0)) } : nil
                 }
-                try savePolicyUnlocked()
-                let targetCPUs = enabled ? meetingModeCPUs : AppleContainerBackend.virtualCPUs
-                for (id, status) in workers where status.platform == .linux && assignments.contains(id) {
-                    if let handler = slotHandlers[id] {
-                        postLockActions.append { handler.applyCPUQuota(targetCPUs) }
+                var nextThermalCapped = nextEnabled ? thermalCappedToTwo : false
+                var nextThermalHoldDown = nextEnabled ? thermalHoldDownUntil : nil
+                if nextEnabled {
+                    let thermal = thermalStateProvider()
+                    if thermal.isSevere || thermal == .fair {
+                        nextThermalCapped = true
+                        nextThermalHoldDown = now.addingTimeInterval(Self.thermalHoldDownDuration)
                     }
                 }
+                let nextPolicy = AgentPersistedPolicy(
+                    pausedUntil: pausedUntil,
+                    meetingMode: nextEnabled,
+                    meetingModeUntil: nextUntil,
+                    meetingModeCPUs: nextCPUs
+                )
+                // Persist before mutating in-memory state so a failed write never diverges.
+                try savePolicyUnlocked(nextPolicy)
+                meetingMode = nextEnabled
+                meetingModeUntil = nextUntil
+                meetingModeCPUs = nextCPUs
+                thermalCappedToTwo = nextThermalCapped
+                thermalHoldDownUntil = nextThermalHoldDown
+                // Replace any earlier timer-expiry quota actions with the single authoritative target.
+                postLockActions.removeAll()
+                let effectiveTarget = nextEnabled ? (nextThermalCapped ? min(nextCPUs, 2) : nextCPUs) : AppleContainerBackend.virtualCPUs
+                appendLinuxCPUQuotaActionsUnlocked(targetCPUs: effectiveTarget, to: &postLockActions)
             case "status": break
             default: throw AgentControlError.invalidRequest
             }
-            return snapshotUnlocked()
+            return snapshotUnlocked(postLockActions: &postLockActions, stateChanged: &stateChanged)
         }
-        let actions = postLockActions
-        if !actions.isEmpty {
-            DispatchQueue.global(qos: .userInitiated).async {
-                for action in actions { action() }
+        dispatchPostLockActions(postLockActions)
+        if stateChanged { notifyStateChanged() }
+        return snapshot
+    }
+
+    private func dispatchPostLockActions(_ actions: [@Sendable () -> Void]) {
+        guard !actions.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            for action in actions { action() }
+        }
+    }
+
+    private func appendLinuxCPUQuotaActionsUnlocked(targetCPUs: Int, to actions: inout [@Sendable () -> Void]) {
+        for (id, status) in workers where status.platform == .linux && assignments.contains(id) {
+            if let handler = slotHandlers[id] {
+                actions.append { handler.applyCPUQuota(targetCPUs) }
             }
         }
-        if parsed.action != "status" { notifyStateChanged() }
-        return snapshot
     }
 
     private func setManualPauseUnlocked(enabled: Bool, until: Date?) throws {
@@ -474,7 +666,9 @@ final class ConnectedAgentControl: @unchecked Sendable {
         }
     }
 
-    private func expireTimersUnlocked(now: Date) {
+    @discardableResult
+    private func expireTimersUnlocked(now: Date, postLockActions: inout [@Sendable () -> Void]) -> Bool {
+        var changed = false
         if let until = pausedUntil, now >= until {
             pausedUntil = nil
             if paused {
@@ -484,6 +678,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
                 resumeGeneration += 1
             }
             try? savePolicyUnlocked()
+            changed = true
         }
         if let until = meetingModeUntil, now >= until {
             meetingMode = false
@@ -491,17 +686,24 @@ final class ConnectedAgentControl: @unchecked Sendable {
             thermalCappedToTwo = false
             thermalHoldDownUntil = nil
             try? savePolicyUnlocked()
+            appendLinuxCPUQuotaActionsUnlocked(targetCPUs: AppleContainerBackend.virtualCPUs, to: &postLockActions)
+            changed = true
         }
         if let until = wakeHoldDownUntil, now >= until {
             wakeHoldDownUntil = nil
+            changed = true
         }
         if let until = thermalHoldDownUntil, now >= until {
             thermalHoldDownUntil = nil
             thermalCappedToTwo = false
+            changed = true
         }
+        return changed
     }
 
-    private func updateThermalGuardUnlocked(now: Date, thermal: HostThermalState) {
+    @discardableResult
+    private func updateThermalGuardUnlocked(now: Date, thermal: HostThermalState, postLockActions: inout [@Sendable () -> Void]) -> Bool {
+        let wasCapped = thermalCappedToTwo
         if thermal.isSevere {
             thermalHoldDownUntil = now.addingTimeInterval(Self.thermalHoldDownDuration)
             thermalCappedToTwo = true
@@ -509,16 +711,24 @@ final class ConnectedAgentControl: @unchecked Sendable {
             thermalHoldDownUntil = now.addingTimeInterval(Self.thermalHoldDownDuration)
             thermalCappedToTwo = true
         }
+        if !wasCapped && thermalCappedToTwo && meetingMode {
+            appendLinuxCPUQuotaActionsUnlocked(targetCPUs: min(meetingModeCPUs, 2), to: &postLockActions)
+            return true
+        }
+        return !wasCapped && thermalCappedToTwo
     }
 
-    private func admissionReasonsUnlocked(now: Date, power: HostPowerStatus, thermal: HostThermalState, darkWake: Bool) -> [AgentAdmissionReason] {
-        expireTimersUnlocked(now: now)
-        updateThermalGuardUnlocked(now: now, thermal: thermal)
+    private func admissionReasonsUnlocked(
+        now: Date, power: HostPowerStatus, thermal: HostThermalState, darkWake: Bool,
+        postLockActions: inout [@Sendable () -> Void], stateChanged: inout Bool
+    ) -> [AgentAdmissionReason] {
+        if expireTimersUnlocked(now: now, postLockActions: &postLockActions) { stateChanged = true }
+        if updateThermalGuardUnlocked(now: now, thermal: thermal, postLockActions: &postLockActions) { stateChanged = true }
         var reasons: [AgentAdmissionReason] = []
         if paused {
             reasons.append(pausedUntil != nil ? .timedPause : .manual)
         }
-        if pauseOnBattery && power.source == .battery {
+        if (pauseOnBattery || meetingMode) && power.source == .battery {
             reasons.append(.battery)
         }
         if meetingMode && power.source == .unknown {
@@ -545,19 +755,25 @@ final class ConnectedAgentControl: @unchecked Sendable {
         return reasons
     }
 
-    private func isPausedUnlocked(now: Date, power: HostPowerStatus, thermal: HostThermalState, darkWake: Bool) -> Bool {
-        let blocking = admissionReasonsUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake)
+    private func isPausedUnlocked(
+        now: Date, power: HostPowerStatus, thermal: HostThermalState, darkWake: Bool,
+        postLockActions: inout [@Sendable () -> Void], stateChanged: inout Bool
+    ) -> Bool {
+        let blocking = admissionReasonsUnlocked(
+            now: now, power: power, thermal: thermal, darkWake: darkWake,
+            postLockActions: &postLockActions, stateChanged: &stateChanged
+        )
         return blocking.contains { $0 != .reclaiming }
     }
 
-    private func savePolicyUnlocked() throws {
-        let policy = AgentPersistedPolicy(
+    private func savePolicyUnlocked(_ policy: AgentPersistedPolicy? = nil) throws {
+        let value = policy ?? AgentPersistedPolicy(
             pausedUntil: pausedUntil,
             meetingMode: meetingMode,
             meetingModeUntil: meetingModeUntil,
             meetingModeCPUs: meetingModeCPUs
         )
-        try writePrivateRunnerFile(JSONEncoder().encode(policy), to: policyFile)
+        try writePrivateRunnerFile(JSONEncoder().encode(value), to: policyFile)
     }
 
     private static func loadPolicy(at url: URL) -> AgentPersistedPolicy? {
@@ -578,13 +794,16 @@ final class ConnectedAgentControl: @unchecked Sendable {
         _ = notify_post(stateChangedNotificationName)
     }
 
-    private func snapshotUnlocked() -> AgentControlSnapshot {
+    private func snapshotUnlocked(postLockActions: inout [@Sendable () -> Void], stateChanged: inout Bool) -> AgentControlSnapshot {
         let now = currentDate()
         let power = powerStatus()
         let thermal = thermalStateProvider()
         let darkWake = isDarkWakeProvider()
-        let reasons = admissionReasonsUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake)
-        let battery = pauseOnBattery && power.source == .battery
+        let reasons = admissionReasonsUnlocked(
+            now: now, power: power, thermal: thermal, darkWake: darkWake,
+            postLockActions: &postLockActions, stateChanged: &stateChanged
+        )
+        let battery = (pauseOnBattery || meetingMode) && power.source == .battery
         let effectivePaused = reasons.contains { $0 != .reclaiming }
         let displayedReasons = meetingMode ? (reasons + [.meetingMode]) : reasons
         let effectiveCPUs = thermalCappedToTwo ? min(meetingModeCPUs, 2) : meetingModeCPUs
@@ -595,7 +814,8 @@ final class ConnectedAgentControl: @unchecked Sendable {
             workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError,
             pauseOnBattery: pauseOnBattery, pausedByBattery: battery, manuallyPaused: paused,
             admissionReasons: displayedReasons, pausedUntil: pausedUntil,
-            meetingMode: meetingMode, meetingModeUntil: meetingModeUntil, meetingModeCPUs: effectiveCPUs,
+            meetingMode: meetingMode, meetingModeUntil: meetingModeUntil,
+            meetingModeCPUs: effectiveCPUs, meetingModeConfiguredCPUs: meetingModeCPUs,
             hostPower: power, thermalState: thermal
         )
     }

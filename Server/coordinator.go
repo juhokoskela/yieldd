@@ -61,7 +61,6 @@ type coordinator struct {
 	hostedCleanupRetry     map[string]time.Time
 	hostedBackoffUntil     time.Time
 	hostedBackoffDelay     time.Duration
-	lastRenewed            map[string]time.Time
 	lastBusyCheck          map[string]time.Time
 	jobStartedByEvent      map[string]bool
 	fencedLocal            map[string]bool
@@ -120,8 +119,13 @@ func (c *coordinator) hasIssuedLocal() bool {
 }
 
 func (l *lease) countsAsSupply() bool {
-	if l == nil || l.CleanupIntent {
+	if l == nil {
 		return false
+	}
+	if l.CleanupIntent {
+		// An uncompleted started local job waiting for GitHub to clear runnerBusy
+		// still accounts for 1 unit of TotalAssignedJobs and must not spawn extra runners.
+		return l.Local != nil && l.Local.JobStarted && !l.Local.JobCompleted
 	}
 	if local := l.Local; local != nil && local.Phase == localIssued {
 		if local.JobCompleted || (!local.JobStarted && local.expired()) {
@@ -225,15 +229,16 @@ func (a *assignment) replace(nextLease *lease) error {
 	}
 	if nextLease == nil {
 		delete(next.Leases, a.lease.Name)
-		delete(a.lastRenewed, a.lease.Name)
-		delete(a.lastBusyCheck, a.lease.Name)
-		delete(a.jobStartedByEvent, a.lease.Name)
-		delete(a.fencedLocal, a.lease.Name)
 	} else {
 		next.Leases[nextLease.Name] = nextLease
 	}
 	if err := a.save(&next); err != nil {
 		return &journalWriteError{err}
+	}
+	if nextLease == nil && a.lease != nil {
+		delete(a.lastBusyCheck, a.lease.Name)
+		delete(a.jobStartedByEvent, a.lease.Name)
+		delete(a.fencedLocal, a.lease.Name)
 	}
 	*a.state = next
 	a.lease = nextLease
@@ -527,6 +532,15 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if c.hasUnfencedExpiredLocal() {
+		ready, _, err := c.fenceExpiredLocalForOverflow(ctx)
+		if err != nil {
+			return err
+		}
+		if !ready || count <= c.supplyCount() || len(c.state.Leases) >= maximumAssignments*2 {
+			return nil
+		}
+	}
 	if c.state.Config.LocalOnly {
 		c.device.wait(c.state.Owner)
 	}
@@ -548,13 +562,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		}
 		return nil
 	}
-	if !local {
-		if err := c.fenceExpiredLocalForOverflow(ctx); err != nil {
-			return err
-		}
-		if count <= c.supplyCount() || len(c.state.Leases) >= maximumAssignments*2 {
-			return nil
-		}
+	if len(c.state.Leases) >= maximumAssignments*2 {
+		return nil
 	}
 	a := &assignment{coordinator: c}
 	if err := a.replace(l); err != nil {
@@ -572,7 +581,17 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	return nil
 }
 
-func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) error {
+func (c *coordinator) hasUnfencedExpiredLocal() bool {
+	for _, name := range c.names() {
+		l := c.state.Leases[name]
+		if l != nil && !l.CleanupIntent && l.Local != nil && l.Local.Phase == localIssued && !l.Local.JobStarted && l.Local.expired() && !c.fencedLocal[name] {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) (ready bool, busyPromoted bool, err error) {
 	for _, name := range c.names() {
 		l := c.state.Leases[name]
 		if l == nil || l.CleanupIntent || l.Local == nil || l.Local.Phase != localIssued || l.Local.JobStarted || !l.Local.expired() || c.fencedLocal[name] {
@@ -580,26 +599,52 @@ func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) error {
 		}
 		busy, err := c.bootstrap.runnerBusy(ctx, c.state.Config.Repository, l.RunnerID)
 		if err != nil {
-			return err
+			if ctx.Err() == context.Canceled {
+				return false, busyPromoted, ctx.Err()
+			}
+			if transientFailure(err) {
+				c.demandRetryAt = time.Now().Add(cleanupRetryDelay)
+				c.logger.Warn("Transient error checking expired local runner before overflow; retrying", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
+				return false, busyPromoted, nil
+			}
+			return false, busyPromoted, err
 		}
 		if busy {
 			next := *l.Local
 			next.JobStarted = true
 			if err := c.assigned(name).saveLocal(&next); err != nil {
-				return err
+				return false, busyPromoted, err
 			}
+			busyPromoted = true
 			continue
 		}
 		if err := c.runners.RemoveRunner(ctx, int64(l.RunnerID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
-			return &sdkError{"fence expired local runner", err}
+			if errors.Is(err, scaleset.JobStillRunningError) {
+				next := *l.Local
+				next.JobStarted = true
+				if saveErr := c.assigned(name).saveLocal(&next); saveErr != nil {
+					return false, busyPromoted, saveErr
+				}
+				busyPromoted = true
+				continue
+			}
+			if ctx.Err() == context.Canceled {
+				return false, busyPromoted, ctx.Err()
+			}
+			if transientFailure(err) {
+				c.demandRetryAt = time.Now().Add(cleanupRetryDelay)
+				c.logger.Warn("Transient error fencing expired local runner before overflow; retrying", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
+				return false, busyPromoted, nil
+			}
+			return false, busyPromoted, &sdkError{"fence expired local runner", err}
 		}
 		if c.fencedLocal == nil {
 			c.fencedLocal = make(map[string]bool)
 		}
 		c.fencedLocal[name] = true
-		c.logger.Warn("Expired unstarted local runner fenced before hosted overflow", "runner", name, "device", l.Local.DeviceID)
+		c.logger.Warn("Expired unstarted local runner fenced before overflow", "runner", name, "device", l.Local.DeviceID)
 	}
-	return nil
+	return true, busyPromoted, nil
 }
 
 // A failed read cannot authorize a new runner. Keep the queue available for

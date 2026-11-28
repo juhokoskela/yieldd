@@ -192,9 +192,26 @@ final class MacOSVirtualizationBackend: RunnerBackend, @unchecked Sendable {
         )
     }
 
-    func severNetwork(_ id: RunnerID) {
+    func severNetwork(_ id: RunnerID, deadline: DispatchTime) {
         let relay = relayLock.withLock { activeRelays[id] }
-        try? relay?.stop(deadline: .now() + .milliseconds(500))
+        try? relay?.stop(deadline: deadline)
+    }
+
+    func gracefulStopRunner(_ id: RunnerID) {
+        let ssh: MacOSGuestSSH? = lock.withLock {
+            guard let guest = guests[id], case let .ready(machine) = guest.phase,
+                  case .running = machine.state, guest.relay.isRunning else {
+                return nil
+            }
+            return guest.ssh
+        }
+        guard let ssh else { return }
+        _ = try? ssh.execute(
+            ["/Users/runner/bin/yieldd-runner-control", "stop"],
+            timeout: 4,
+            outputCapture: .tail(maxBytes: 4096),
+            cancellable: false
+        )
     }
 
     func destroy(_ id: RunnerID) throws {

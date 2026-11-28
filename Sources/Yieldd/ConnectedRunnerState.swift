@@ -40,14 +40,6 @@ struct ConnectedLease: Codable, Equatable {
     let server: String
     let deviceID: String
     let offer: ConnectedOffer
-    var mustDestroyOnWake: Bool?
-
-    init(server: String, deviceID: String, offer: ConnectedOffer, mustDestroyOnWake: Bool? = nil) {
-        self.server = server
-        self.deviceID = deviceID
-        self.offer = offer
-        self.mustDestroyOnWake = mustDestroyOnWake
-    }
 }
 
 struct ConnectedRunnerStore {

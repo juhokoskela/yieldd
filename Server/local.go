@@ -204,12 +204,6 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 }
 func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
 	l := a.lease
-	if l != nil && l.Local != nil {
-		if a.lastRenewed == nil {
-			a.lastRenewed = make(map[string]time.Time)
-		}
-		a.lastRenewed[l.Name] = time.Now()
-	}
 	var runID int64
 	if l != nil && l.Local != nil {
 		runID = l.Local.WorkflowRunID
@@ -224,11 +218,11 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	if err != nil {
 		return nil, err
 	}
-	if a.lastBusyCheck == nil {
-		a.lastBusyCheck = make(map[string]time.Time)
-	}
-	a.lastBusyCheck[l.Name] = time.Now()
 	if busy {
+		if a.lastBusyCheck == nil {
+			a.lastBusyCheck = make(map[string]time.Time)
+		}
+		a.lastBusyCheck[l.Name] = time.Now()
 		if !l.Local.JobStarted {
 			next := *l.Local
 			next.JobStarted = true
@@ -238,6 +232,8 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 		}
 		return &deviceAuthorization{Continue: true, WorkflowRunID: runID}, nil
 	}
+	delete(a.lastBusyCheck, l.Name)
+	delete(a.jobStartedByEvent, l.Name)
 	if l.Local.JobStarted {
 		// An idle response can lag a start event. Do not grant more execution
 		// time, but let the Mac's offline grace absorb temporary inconsistency.
@@ -256,7 +252,10 @@ const (
 
 func (a *assignment) recordLocalJob(id int, workflowRunID int64, event localJobEvent) error {
 	l := a.lease
-	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.RunnerID != id {
+	if l == nil || l.Local == nil || l.Local.Phase != localIssued || l.RunnerID != id {
+		return nil
+	}
+	if l.CleanupIntent && event == jobStarted {
 		return nil
 	}
 	next := *l.Local
@@ -340,6 +339,32 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 	}
 	if !expired {
 		return false, nil
+	}
+	if a.hasUnfencedExpiredLocal() {
+		ready, busyPromoted, err := a.fenceExpiredLocalForOverflow(ctx)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			return false, nil
+		}
+		if busyPromoted {
+			count, err := a.readPlacementDemand(ctx)
+			if err != nil {
+				return false, err
+			}
+			if !a.demandRetryAt.IsZero() {
+				return false, nil
+			}
+			// Supply count includes this expired offer, so subtract 1 to check whether
+			// remaining active runners already cover current demand.
+			if count <= a.supplyCount()-1 {
+				if err := a.beginCleanup(""); err != nil {
+					return false, err
+				}
+				return a.finishCleanup(ctx, true)
+			}
+		}
 	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
 	if err := a.saveLocal(nil); err != nil {

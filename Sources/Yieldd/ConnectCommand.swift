@@ -61,6 +61,19 @@ func runConnectedService(
     resolveContainer: () throws -> URL = { try ExecutableLocator().locate("container") },
     output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
 ) throws {
+    try runConnectedService(
+        server: serverURL, deviceID: deviceID, loadToken: { token }, platforms: platforms, template: template,
+        confirmation: confirmation, stop: stop, stateDirectory: stateDirectory,
+        resolveContainer: resolveContainer, output: output, control: control
+    )
+}
+
+func runConnectedService(
+    server serverURL: URL, deviceID: String, loadToken: () throws -> String, platforms: [RunnerPlatform], template: URL?,
+    confirmation: String? = nil, stop: RunnerPoolStop, stateDirectory: URL? = nil,
+    resolveContainer: () throws -> URL = { try ExecutableLocator().locate("container") },
+    output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
+) throws {
     try MacOSVirtualMachineLifecycle.requireSupportedHost()
     try withRunnerOwnership(in: stateDirectory, connected: true) { leaseStore in
         if let installed = try ConnectedAgentStore(directory: leaseStore.directory).load() {
@@ -71,10 +84,20 @@ func runConnectedService(
         }
         let directory = leaseStore.directory
         let ownershipDescriptor = leaseStore.ownershipDescriptor
+        // Destroy any orphaned local guests while holding runner ownership BEFORE requiring
+        // Keychain credentials so a locked Keychain cannot leave an abandoned guest burning CPU,
+        // and another active yieldd process's guest is never touched.
+        let locallyDestroyed = try destroyLocalConnectedGuests(
+            leaseStore: leaseStore, server: serverURL, deviceID: deviceID,
+            confirmation: confirmation, stop: stop,
+            resolveContainer: resolveContainer, output: output, control: control
+        )
+        let token = try loadToken()
         // Recover every persisted platform, even if it is no longer enabled.
         // macOS recovery removes abandoned clones without requiring the template.
         try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
                                       token: token, confirmation: confirmation, stop: stop,
+                                      alreadyDestroyed: locallyDestroyed,
                                       resolveContainer: resolveContainer, output: output, control: control)
         control?.starting()
         if confirmation != nil {
@@ -151,7 +174,7 @@ func runConnectedService(
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
             let network = try RunnerNetwork(stateDirectory: directory, platform: platform, cacheSocket: cacheSocket)
             let backend: any RunnerBackend
-            let severNetworkHandler: @Sendable (RunnerID) -> Void
+            let severNetworkHandler: @Sendable (RunnerID, DispatchTime) -> Void
             let applyCPUQuotaHandler: @Sendable (Int, RunnerID) -> Void
             switch worker.backend {
             case let .linux(containerURL):
@@ -160,7 +183,7 @@ func runConnectedService(
                     checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                     dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
                 backend = linuxBackend
-                severNetworkHandler = { linuxBackend.severNetwork($0) }
+                severNetworkHandler = { linuxBackend.severNetwork($0, deadline: $1) }
                 applyCPUQuotaHandler = { cpus, id in try? linuxBackend.applyCPUQuota(cpus, on: id) }
             case let .macOS(templateURL):
                 let macBackend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
@@ -168,7 +191,7 @@ func runConnectedService(
                     executor: executor, network: network, checkCancellation: authorization.check, wait: stop.wait,
                     maximumExecutionDeadline: stop.executionDeadline)
                 backend = macBackend
-                severNetworkHandler = { macBackend.severNetwork($0) }
+                severNetworkHandler = { macBackend.severNetwork($0, deadline: $1) }
                 applyCPUQuotaHandler = { _, _ in }
             }
             let store = ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot)
@@ -179,30 +202,24 @@ func runConnectedService(
                     control?.session(worker: workerID, state: $0)
                     reportRunnerServiceState($0, output: output)
                 },
-                initialLinuxCPUs: { control?.effectiveLinuxCPUs ?? AppleContainerBackend.virtualCPUs })
+                initialLinuxCPUs: { control?.effectiveLinuxCPUs ?? AppleContainerBackend.virtualCPUs },
+                onWarning: { output.warning($0) })
             let activeRunnerID = OSAllocatedUnfairLock<RunnerID?>(initialState: nil)
-            let slotIndex = worker.slot
             control?.registerSlotHandler(worker: workerID, handler: AgentSlotControlHandler(
                 abort: { reason, expected in authorization.abort(reason: reason, expectedRunner: expected) },
-                severNetwork: {
+                severNetwork: { deadline in
                     if let id = activeRunnerID.withLock({ $0 }) {
-                        severNetworkHandler(id)
+                        severNetworkHandler(id, deadline)
                     }
                 },
                 applyCPUQuota: { cpus in
                     if let id = activeRunnerID.withLock({ $0 }) {
                         applyCPUQuotaHandler(cpus, id)
                     }
-                },
-                markDestroyOnWake: {
-                    let wakeStore = ConnectedRunnerStore(directory: directory, platform: platform, slot: slotIndex)
-                    if var lease = try? wakeStore.load() {
-                        lease.mustDestroyOnWake = true
-                        try? wakeStore.save(lease)
-                    }
                 }
             ))
             defer { control?.unregisterSlotHandler(worker: workerID) }
+            let slotReservation = ConnectedSlotReservation()
             var platformBackoff: TimeInterval = 5
             while true {
                 try stop.check()
@@ -210,7 +227,6 @@ func runConnectedService(
                     try runConnectedClient(checkCancellation: stop.check, recover: {
                         control?.update(worker: workerID, phase: .recovering)
                         try runner.recover()
-                        platformBackoff = 5
                         output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
                     }, acquire: {
                         try memory.tryAcquire(reserving: platform.memoryReservationBytes)
@@ -222,7 +238,11 @@ func runConnectedService(
                     }, decline: client.decline, run: { offer, allocation, release in
                         let id = RunnerID(value: offer.runner)
                         activeRunnerID.withLock { $0 = id }
-                        defer { activeRunnerID.withLock { $0 = nil } }
+                        authorization.prepare(runner: offer.runner)
+                        defer {
+                            authorization.stop()
+                            activeRunnerID.withLock { $0 = nil }
+                        }
                         control?.assign(worker: workerID, offer: offer)
                         output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                         try runner.run(offer, memory: allocation, releaseCapacity: release)
@@ -238,7 +258,7 @@ func runConnectedService(
                         control?.beginAssignment(worker: workerID, platform: platform) ?? true
                     }, finishAssignment: {
                         control?.finishAssignment(worker: workerID)
-                    })
+                    }, slotReservation: slotReservation)
                     return
                 } catch where isCancellation(error) {
                     throw error
@@ -247,6 +267,11 @@ func runConnectedService(
                 } catch {
                     // Contain platform/pre-start errors (e.g., macOS 2-VM limit) to this slot
                     // instead of tearing down healthy sibling slots across the pool.
+                    // If no persisted lease remains, release assignment/memory immediately before backing off.
+                    if (try? store.load()) == nil {
+                        slotReservation.release(using: memory.release)
+                        control?.finishAssignment(worker: workerID)
+                    }
                     let message = "Paused \(platform.rawValue) slot \(worker.slot) for \(Int(platformBackoff))s after error: \(describeError(error))"
                     output.warning(message)
                     control?.connection(worker: workerID, state: .retrying, error: message)

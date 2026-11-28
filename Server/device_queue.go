@@ -123,6 +123,12 @@ func (q *deviceQueue) clearAvailability(index int) {
 	}
 }
 
+func (q *deviceQueue) slotIdle(index int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.slots[index].idle(time.Now())
+}
+
 func (q *deviceQueue) expireAllAvailability() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -217,6 +223,7 @@ func (d *deviceRouter) poll(ctx context.Context, request deviceRequest) (*device
 	defer timer.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
+			d.queue.clearAvailability(request.Slot)
 			return nil, err
 		}
 		if offer := d.queue.pollNow(request.Slot); offer != nil {

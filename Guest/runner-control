@@ -75,7 +75,7 @@ stop() {
         return 0
     fi
     systemctl kill --signal=SIGINT yieldd-runner.service 2>/dev/null || true
-    for _ in {1..30}; do
+    for _ in {1..25}; do
         if [[ -f "$state_directory/exit-status" ]] || ! systemctl is-active --quiet yieldd-runner.service; then
             return 0
         fi

@@ -17,50 +17,106 @@ struct HostPowerStatus: Codable, Equatable, Sendable {
     static let unknown = HostPowerStatus(source: .unknown, batteryPercent: nil, lowPowerMode: false, drainingOnAC: false)
 }
 
-final class AgentPowerSource: Sendable {
-    static let system = AgentPowerSource(notification: kIOPSNotifyPowerSource, readStatus: readSystemPowerStatus)
+final class AgentPowerSource: @unchecked Sendable {
+    static let system = AgentPowerSource(
+        notifications: [kIOPSNotifyPowerSource, kIOPSNotifyTimeRemaining],
+        refreshTTL: 10,
+        observeLowPowerMode: true,
+        readStatus: readSystemPowerStatus
+    )
 
-    private let state: OSAllocatedUnfairLock<HostPowerStatus>
-    private let token: Int32?
-    private let readStatus: @Sendable () -> HostPowerStatus
-
-    init(notification: String, read: @escaping @Sendable () -> Bool) {
-        self.readStatus = {
-            HostPowerStatus(source: read() ? .battery : .ac, batteryPercent: nil, lowPowerMode: false, drainingOnAC: false)
-        }
-        state = OSAllocatedUnfairLock(initialState: .unknown)
-        let queue = DispatchQueue(label: "dev.yieldd.agent.power")
-        var registration: Int32 = 0
-        let readFn = self.readStatus
-        let result = notify_register_dispatch(notification, &registration, queue) { [state] _ in
-            let current = readFn()
-            state.withLock { $0 = current }
-        }
-        token = result == NOTIFY_STATUS_OK ? registration : nil
-        queue.sync {
-            let current = readFn()
-            state.withLock { $0 = current }
-        }
+    private struct CachedState {
+        var status: HostPowerStatus
+        var updatedAt: TimeInterval
     }
 
-    init(notification: String, readStatus: @escaping @Sendable () -> HostPowerStatus) {
+    private let state: OSAllocatedUnfairLock<CachedState>
+    private let tokens: [Int32]
+    private let refreshTTL: TimeInterval?
+    private let observeLowPowerMode: Bool
+    private let currentTime: @Sendable () -> TimeInterval
+    private let readStatus: @Sendable () -> HostPowerStatus
+    private var lowPowerObserver: (any NSObjectProtocol)?
+
+    convenience init(notification: String, read: @escaping @Sendable () -> Bool) {
+        self.init(
+            notifications: [notification],
+            refreshTTL: nil,
+            observeLowPowerMode: false,
+            readStatus: {
+                HostPowerStatus(source: read() ? .battery : .ac, batteryPercent: nil, lowPowerMode: false, drainingOnAC: false)
+            }
+        )
+    }
+
+    init(notifications: [String],
+         refreshTTL: TimeInterval? = 10,
+         observeLowPowerMode: Bool = false,
+         currentTime: @escaping @Sendable () -> TimeInterval = continuousMonotonicSeconds,
+         readStatus: @escaping @Sendable () -> HostPowerStatus) {
         self.readStatus = readStatus
-        state = OSAllocatedUnfairLock(initialState: .unknown)
+        self.refreshTTL = refreshTTL
+        self.observeLowPowerMode = observeLowPowerMode
+        self.currentTime = currentTime
+        state = OSAllocatedUnfairLock(initialState: CachedState(status: .unknown, updatedAt: -.infinity))
         let queue = DispatchQueue(label: "dev.yieldd.agent.power")
-        var registration: Int32 = 0
-        let result = notify_register_dispatch(notification, &registration, queue) { [state] _ in
-            let current = readStatus()
-            state.withLock { $0 = current }
+        var registered: [Int32] = []
+        for name in notifications {
+            var registration: Int32 = 0
+            let result = notify_register_dispatch(name, &registration, queue) { [state] _ in
+                let current = readStatus()
+                let now = currentTime()
+                state.withLock { $0 = CachedState(status: current, updatedAt: now) }
+            }
+            if result == NOTIFY_STATUS_OK {
+                registered.append(registration)
+            }
         }
-        token = result == NOTIFY_STATUS_OK ? registration : nil
+        tokens = registered
         queue.sync {
             let current = readStatus()
-            state.withLock { $0 = current }
+            let now = currentTime()
+            state.withLock { $0 = CachedState(status: current, updatedAt: now) }
+        }
+        if observeLowPowerMode {
+            lowPowerObserver = NotificationCenter.default.addObserver(
+                forName: .NSProcessInfoPowerStateDidChange,
+                object: nil,
+                queue: nil
+            ) { [state] _ in
+                let current = readStatus()
+                let now = currentTime()
+                state.withLock { $0 = CachedState(status: current, updatedAt: now) }
+            }
         }
     }
 
     func status() -> HostPowerStatus {
-        token == nil ? readStatus() : state.withLock { $0 }
+        let now = currentTime()
+        let base: HostPowerStatus
+        if tokens.isEmpty {
+            base = readStatus()
+        } else if let refreshTTL {
+            let cached = state.withLock { $0 }
+            if now - cached.updatedAt >= refreshTTL {
+                let refreshed = readStatus()
+                state.withLock { $0 = CachedState(status: refreshed, updatedAt: now) }
+                base = refreshed
+            } else {
+                base = cached.status
+            }
+        } else {
+            base = state.withLock { $0.status }
+        }
+        guard observeLowPowerMode else { return base }
+        let liveLowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+        guard liveLowPower != base.lowPowerMode else { return base }
+        return HostPowerStatus(
+            source: base.source,
+            batteryPercent: base.batteryPercent,
+            lowPowerMode: liveLowPower,
+            drainingOnAC: base.drainingOnAC
+        )
     }
 
     func onBattery() -> Bool {
@@ -68,7 +124,8 @@ final class AgentPowerSource: Sendable {
     }
 
     deinit {
-        if let token { notify_cancel(token) }
+        for token in tokens { notify_cancel(token) }
+        if let lowPowerObserver { NotificationCenter.default.removeObserver(lowPowerObserver) }
     }
 
     private static func readSystemPowerStatus() -> HostPowerStatus {
@@ -107,7 +164,7 @@ final class AgentPowerSource: Sendable {
         guard let raw = IORegistryEntryCreateCFProperty(service, "InstantAmperage" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber else {
             return false
         }
-        // InstantAmperage is reported as 64-bit signed milliamps (negative means battery discharging).
-        return Int64(bitPattern: raw.uint64Value) < 0
+        // Require > 100 mA discharge to avoid flapping near 0 mA when full on AC.
+        return Int64(bitPattern: raw.uint64Value) < -100
     }
 }

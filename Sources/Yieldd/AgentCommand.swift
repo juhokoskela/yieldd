@@ -89,14 +89,11 @@ struct AgentRunCommand: ParsableCommand {
             let endpoint = AgentControlEndpoint(control: control)
             endpoint.start()
             defer { endpoint.stop() }
-            // Destroy any orphaned local guests before requiring Keychain access so a
-            // locked Keychain after reboot cannot leave a Linux machine burning CPU.
-            try destroyLocalConnectedGuests(directory: store.directory, server: connected.server,
-                deviceID: connected.deviceID, stop: stop, resolveContainer: connected.resolveContainer,
-                output: .agentLog, control: control)
-            try prepareConnectedAgentKeychain()
-            let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
-            try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
+            try runConnectedService(server: connected.server, deviceID: connected.deviceID,
+                loadToken: {
+                    try prepareConnectedAgentKeychain()
+                    return try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
+                },
                 platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
                 resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
         } catch where isCancellation(error) {

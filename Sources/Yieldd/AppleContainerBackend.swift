@@ -141,20 +141,48 @@ final class AppleContainerBackend: RunnerBackend, @unchecked Sendable {
         )
     }
 
-    func severNetwork(_ id: RunnerID) {
+    func severNetwork(_ id: RunnerID, deadline: DispatchTime) {
         let relay = relayLock.withLock { activeRelays[id] }
-        try? relay?.stop(deadline: .now() + .milliseconds(500))
+        try? relay?.stop(deadline: deadline)
+    }
+
+    func gracefulStopRunner(_ id: RunnerID) {
+        let booted = lock.withLock { guests[id]?.booted == true }
+        guard booted else { return }
+        let request = ProcessRequest(
+            executableURL: containerURL,
+            arguments: [
+                "machine", "run",
+                "--name", id.value,
+                "--user", RunnerGuestUser.root.rawValue,
+                "--",
+                "yieldd-runner-control", "stop",
+            ],
+            timeout: 4,
+            outputCapture: .tail(maxBytes: 4096),
+            cancellable: false
+        )
+        _ = try? executor.execute(request)
     }
 
     func applyCPUQuota(_ cpus: Int, on id: RunnerID) throws {
         let clamped = max(1, min(Self.virtualCPUs, cpus))
-        _ = try exec(
-            ["yieldd-runner-control", "cpu", String(clamped)],
+        let booted = lock.withLock { guests[id]?.booted == true }
+        guard booted else { throw AppleContainerBackendError.notReady(id) }
+        let request = ProcessRequest(
+            executableURL: containerURL,
+            arguments: [
+                "machine", "run",
+                "--name", id.value,
+                "--user", RunnerGuestUser.root.rawValue,
+                "--",
+                "yieldd-runner-control", "cpu", String(clamped),
+            ],
             timeout: 10,
             outputCapture: .tail(maxBytes: 4096),
-            as: .root,
-            on: id
+            cancellable: false
         )
+        _ = try executor.execute(request).requireSuccess(for: request)
     }
 
     func destroy(_ id: RunnerID) throws {

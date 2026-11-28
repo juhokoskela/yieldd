@@ -11,18 +11,22 @@ struct ConnectedAuthorizationRenewal: Equatable, Sendable {
 }
 
 // Owned by one connected slot. Backend operations check this on that slot's worker.
-// Thread-safe for cross-thread reclaim / sleep revocation signals.
+// Thread-safe for cross-thread reclaim / sleep revocation signals and serialized renewals.
 final class ConnectedExecutionAuthorization: @unchecked Sendable {
     static let preStartOfflineGrace: TimeInterval = 60
     static let offlineGrace: TimeInterval = 5 * 60
     private let lock = NSLock()
+    private let renewalLock = NSLock()
     private let renew: (ConnectedOffer, () throws -> Void) throws -> ConnectedAuthorizationRenewal
     private let checkCancellation: () throws -> Void
     private let currentTime: () -> TimeInterval
     private let initialOfflineGrace: TimeInterval
     private let onWorkflowRunID: (Int64) -> Void
+    private var generation: UInt64 = 0
+    private var admittedRunner: String?
     private var offer: ConnectedOffer?
     private var jobStarted = false
+    private var lastAuthorizedAt: TimeInterval = 0
     private var deadline: TimeInterval = 0
     private var nextRenewal: TimeInterval = 0
     private var storedFailure: ConnectedExecutionError?
@@ -59,42 +63,63 @@ final class ConnectedExecutionAuthorization: @unchecked Sendable {
         self.onWorkflowRunID = onWorkflowRunID
     }
 
-    func start(_ offer: ConnectedOffer) {
-        let now = currentTime()
+    /// Registers an admitted runner UUID before `/accept` runs so reclaim, abort, or sleep
+    /// arriving during credential acceptance latches cleanly and blocks guest creation.
+    func prepare(runner: String) {
         lock.withLock {
-            self.offer = offer
-            jobStarted = false
-            storedFailure = nil
-            nextRenewal = now
-            deadline = now + initialOfflineGrace
-        }
-    }
-
-    func markJobStarted() {
-        let now = currentTime()
-        lock.withLock {
-            guard offer != nil, !jobStarted else { return }
-            jobStarted = true
-            // Once a job has started, widen offline grace to the full 5 minutes.
-            deadline = max(deadline, now + Self.offlineGrace)
-        }
-    }
-
-    func stop() {
-        lock.withLock {
+            if admittedRunner == runner && offer == nil { return }
+            generation &+= 1
+            admittedRunner = runner
             offer = nil
             jobStarted = false
             storedFailure = nil
         }
     }
 
-    /// Aborts the currently running assignment on this slot. If `expectedRunner` is supplied,
-    /// returns `false` if the slot is idle or has moved on to a different runner UUID.
+    func start(_ offer: ConnectedOffer) {
+        let now = currentTime()
+        lock.withLock {
+            let preserveLatchedFailure = admittedRunner == offer.runner
+            if !preserveLatchedFailure {
+                generation &+= 1
+                storedFailure = nil
+            }
+            admittedRunner = offer.runner
+            self.offer = offer
+            jobStarted = false
+            lastAuthorizedAt = now
+            nextRenewal = now
+            deadline = now + initialOfflineGrace
+        }
+    }
+
+    func markJobStarted() {
+        lock.withLock {
+            guard offer != nil, !jobStarted else { return }
+            jobStarted = true
+            // Anchor the widened post-start grace strictly to the last successful
+            // coordinator grant so guest-reported state can never extend past 5 minutes.
+            deadline = max(deadline, lastAuthorizedAt + Self.offlineGrace)
+        }
+    }
+
+    func stop() {
+        lock.withLock {
+            generation &+= 1
+            admittedRunner = nil
+            offer = nil
+            jobStarted = false
+            storedFailure = nil
+        }
+    }
+
+    /// Aborts the currently admitted or running assignment on this slot. If `expectedRunner`
+    /// is supplied, returns `false` if the slot is idle or has moved on to another runner UUID.
     @discardableResult
     func abort(reason: ConnectedExecutionError, expectedRunner: String? = nil) -> Bool {
         lock.withLock {
-            guard let offer else { return false }
-            if let expectedRunner, offer.runner != expectedRunner { return false }
+            guard let currentRunner = offer?.runner ?? admittedRunner else { return false }
+            if let expectedRunner, currentRunner != expectedRunner { return false }
             if storedFailure == nil { storedFailure = reason }
             return true
         }
@@ -102,39 +127,63 @@ final class ConnectedExecutionAuthorization: @unchecked Sendable {
 
     func check() throws {
         try checkDeadline()
-        let activeOffer: ConnectedOffer? = lock.withLock {
+        let pending: (offer: ConnectedOffer, generation: UInt64)? = lock.withLock {
             guard let offer, currentTime() >= nextRenewal else { return nil }
-            return offer
+            return (offer, generation)
         }
-        guard let offer = activeOffer else { return }
-        let requestedAt = currentTime()
-        do {
-            let renewal = try renew(offer, checkDeadline)
-            if let runID = renewal.workflowRunID, runID > 0 {
-                onWorkflowRunID(runID)
-            }
-            guard renewal.shouldContinue else {
-                lock.withLock { if storedFailure == nil { storedFailure = .revoked } }
-                throw lock.withLock { storedFailure } ?? ConnectedExecutionError.revoked
-            }
+        guard let pending else { return }
+        try renewalLock.withLock {
             try checkDeadline()
-            lock.withLock {
-                // A delayed response must not extend the grace by its network latency.
-                let grace = jobStarted ? Self.offlineGrace : initialOfflineGrace
-                deadline = requestedAt + grace
-                nextRenewal = requestedAt + 30
+            let stillPending = lock.withLock {
+                self.generation == pending.generation && self.offer == pending.offer && currentTime() >= nextRenewal
             }
-        } catch where isTransientConnectedFailure(error) {
-            lock.withLock { nextRenewal = currentTime() + 5 }
-            try checkDeadline()
+            guard stillPending else { return }
+            let requestedAt = currentTime()
+            do {
+                let renewal = try renew(pending.offer) { [self] in
+                    try checkDeadline(for: pending.generation)
+                }
+                let runIDToReport: Int64? = try lock.withLock { () -> Int64? in
+                    guard self.generation == pending.generation, self.offer == pending.offer else {
+                        return nil
+                    }
+                    guard renewal.shouldContinue else {
+                        if storedFailure == nil { storedFailure = .revoked }
+                        throw storedFailure ?? ConnectedExecutionError.revoked
+                    }
+                    if currentTime() >= deadline {
+                        if storedFailure == nil { storedFailure = .expired }
+                    }
+                    if let currentFailure = storedFailure { throw currentFailure }
+                    // A delayed response must not extend the grace by its network latency.
+                    lastAuthorizedAt = requestedAt
+                    let grace = jobStarted ? Self.offlineGrace : initialOfflineGrace
+                    deadline = requestedAt + grace
+                    nextRenewal = requestedAt + 30
+                    if let runID = renewal.workflowRunID, runID > 0 { return runID }
+                    return nil
+                }
+                if let runIDToReport {
+                    onWorkflowRunID(runIDToReport)
+                }
+            } catch where isTransientConnectedFailure(error) {
+                lock.withLock {
+                    guard self.generation == pending.generation, self.offer == pending.offer else { return }
+                    nextRenewal = currentTime() + 5
+                }
+                try checkDeadline(for: pending.generation)
+            }
         }
     }
 
-    private func checkDeadline() throws {
+    private func checkDeadline(for expectedGeneration: UInt64? = nil) throws {
         try checkCancellation()
         let currentFailure: ConnectedExecutionError? = lock.withLock {
-            guard offer != nil else { return nil }
-            if storedFailure == nil, currentTime() >= deadline {
+            if let expectedGeneration, self.generation != expectedGeneration {
+                return nil
+            }
+            guard offer != nil || admittedRunner != nil else { return nil }
+            if offer != nil, storedFailure == nil, currentTime() >= deadline {
                 storedFailure = .expired
             }
             return storedFailure
