@@ -128,12 +128,12 @@ func TestConcurrentLocalAssignmentsSurviveRestartAndCompleteIndependently(t *tes
 	if err := c.completeDevice(t.Context(), requests[1]); err != nil {
 		t.Fatal("completion is not idempotent", err)
 	}
-	w.assignedJobs = 2
+	w.assignedJobs = 1
 	c.device.pollNow(1)
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); n != 2 || err != nil {
 		t.Fatal("cached demand created extra work", n, err)
 	}
-	w.assignedJobs = 3
+	w.assignedJobs = 2
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 3); n != 3 || err != nil {
 		t.Fatal("fresh demand did not refill capacity", n, err)
 	}

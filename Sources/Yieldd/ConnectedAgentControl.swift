@@ -1,7 +1,10 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import notify
 import Synchronization
+
+let agentStateChangedNotification = "dev.yieldd.agent.stateChanged"
 
 struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let version: Int
@@ -22,17 +25,82 @@ struct AgentControlSnapshot: Codable, Equatable, Sendable {
     let pausedByBattery: Bool?
     let manuallyPaused: Bool?
 
+    let admissionReasons: [AgentAdmissionReason]?
+    let pausedUntil: Date?
+    let meetingMode: Bool?
+    let meetingModeUntil: Date?
+    let meetingModeCPUs: Int?
+    let hostPower: HostPowerStatus?
+    let thermalState: HostThermalState?
+
     var drained: Bool { ready && paused && activeAssignments == 0 }
 }
 
-// The lock serializes admission with pause and owns the assignment set.
+struct AgentControlRequest: Codable, Equatable, Sendable {
+    let version: Int
+    let action: String
+    let durationSeconds: TimeInterval?
+    let enabled: Bool?
+    let cpus: Int?
+    let worker: String?
+    let runner: String?
+
+    init(action: String, durationSeconds: TimeInterval? = nil, enabled: Bool? = nil,
+         cpus: Int? = nil, worker: String? = nil, runner: String? = nil) {
+        self.version = 1
+        self.action = action
+        self.durationSeconds = durationSeconds
+        self.enabled = enabled
+        self.cpus = cpus
+        self.worker = worker
+        self.runner = runner
+    }
+
+    func encodedCommand() throws -> String {
+        String(decoding: try JSONEncoder().encode(self), as: UTF8.self)
+    }
+}
+
+private struct AgentPersistedPolicy: Codable, Equatable {
+    var pausedUntil: Date?
+    var meetingMode: Bool = false
+    var meetingModeUntil: Date?
+    var meetingModeCPUs: Int?
+}
+
+struct AgentSlotControlHandler: Sendable {
+    let abort: @Sendable (ConnectedExecutionError, String?) -> Bool
+    let severNetwork: @Sendable () -> Void
+    let applyCPUQuota: @Sendable (Int) -> Void
+    let markDestroyOnWake: @Sendable () -> Void
+}
+
+// The lock serializes admission with pause/meeting/reclaim and owns the assignment set.
 final class ConnectedAgentControl: @unchecked Sendable {
+    static let wakeHoldDownDuration: TimeInterval = 30
+    static let thermalHoldDownDuration: TimeInterval = 10 * 60
+
     private let lock = NSLock()
     private let pauseFile: URL
     private let batteryPolicyFile: URL
-    private let usingBattery: @Sendable () -> Bool
+    private let policyFile: URL
+    private let powerStatus: @Sendable () -> HostPowerStatus
+    private let thermalStateProvider: @Sendable () -> HostThermalState
+    private let isDarkWakeProvider: @Sendable () -> Bool
+    private let currentDate: @Sendable () -> Date
+    private let hardwareProfile: HostHardwareProfile
+    private let stateChangedNotificationName: String?
+
     private var pauseOnBattery: Bool
     private var paused: Bool
+    private var pausedUntil: Date?
+    private var meetingMode: Bool
+    private var meetingModeUntil: Date?
+    private var meetingModeCPUs: Int
+    private var wakeHoldDownUntil: Date?
+    private var thermalHoldDownUntil: Date?
+    private var thermalCappedToTwo = false
+
     private let instanceID = UUID()
     private var resumeGeneration: UInt64 = 0
     private var assignments: Set<String> = []
@@ -41,29 +109,75 @@ final class ConnectedAgentControl: @unchecked Sendable {
     private let deviceID: String?
     private var memory: RunnerMemoryAdmission?
     private var workers: [String: AgentWorkerStatus] = [:]
+    private var slotHandlers: [String: AgentSlotControlHandler] = [:]
     private var lastError: AgentReportedError?
 
+    convenience init(directory: URL, configuration: ConnectedAgentConfiguration? = nil,
+                     usingBattery: @escaping @Sendable () -> Bool) {
+        self.init(
+            directory: directory,
+            configuration: configuration,
+            powerStatus: {
+                HostPowerStatus(source: usingBattery() ? .battery : .ac, batteryPercent: nil, lowPowerMode: false, drainingOnAC: false)
+            },
+            thermalState: { .nominal },
+            isDarkWake: { false },
+            notificationName: nil
+        )
+    }
+
     init(directory: URL, configuration: ConnectedAgentConfiguration? = nil,
-         usingBattery: @escaping @Sendable () -> Bool = AgentPowerSource.system.onBattery) {
+         powerStatus: @escaping @Sendable () -> HostPowerStatus = AgentPowerSource.system.status,
+         thermalState: @escaping @Sendable () -> HostThermalState = { HostThermalState(ProcessInfo.processInfo.thermalState) },
+         isDarkWake: @escaping @Sendable () -> Bool = SystemPowerMonitor.isDarkWake,
+         currentDate: @escaping @Sendable () -> Date = Date.init,
+         hardwareProfile: HostHardwareProfile = .current,
+         notificationName: String? = agentStateChangedNotification) {
         server = configuration?.server.absoluteString
         deviceID = configuration?.deviceID
         pauseFile = directory.appendingPathComponent("connected-agent.paused")
-        self.usingBattery = usingBattery
         batteryPolicyFile = directory.appendingPathComponent("connected-agent.pause-on-battery")
+        policyFile = directory.appendingPathComponent("connected-agent-policy.json")
+        self.powerStatus = powerStatus
+        self.thermalStateProvider = thermalState
+        self.isDarkWakeProvider = isDarkWake
+        self.currentDate = currentDate
+        self.hardwareProfile = hardwareProfile
+        self.stateChangedNotificationName = notificationName
         var info = stat()
         pauseOnBattery = Darwin.lstat(batteryPolicyFile.path, &info) == 0 || errno != ENOENT
         paused = Darwin.lstat(pauseFile.path, &info) == 0 || errno != ENOENT
+        let persisted = Self.loadPolicy(at: policyFile)
+        pausedUntil = persisted?.pausedUntil
+        meetingMode = persisted?.meetingMode ?? false
+        meetingModeUntil = persisted?.meetingModeUntil
+        let configuredCPUs = persisted?.meetingModeCPUs ?? hardwareProfile.defaultMeetingModeCPUs
+        meetingModeCPUs = configuredCPUs == 4 ? 4 : 2
     }
 
     var snapshot: AgentControlSnapshot {
         lock.withLock { snapshotUnlocked() }
     }
 
-    private var pausedByBattery: Bool { pauseOnBattery && usingBattery() }
-    var isPaused: Bool { lock.withLock { paused || pausedByBattery } }
+    var isPaused: Bool {
+        lock.withLock { isPausedUnlocked(now: currentDate(), power: powerStatus(), thermal: thermalStateProvider(), darkWake: isDarkWakeProvider()) }
+    }
+
+    var effectiveLinuxCPUs: Int {
+        lock.withLock {
+            let now = currentDate()
+            expireTimersUnlocked(now: now)
+            guard meetingMode else { return AppleContainerBackend.virtualCPUs }
+            let thermal = thermalStateProvider()
+            updateThermalGuardUnlocked(now: now, thermal: thermal)
+            if thermalCappedToTwo { return min(meetingModeCPUs, 2) }
+            return meetingModeCPUs
+        }
+    }
 
     func starting() {
         lock.withLock { if phase != .stopping { phase = .starting } }
+        notifyStateChanged()
     }
 
     func markReady() {
@@ -71,6 +185,7 @@ final class ConnectedAgentControl: @unchecked Sendable {
             guard phase != .stopping else { return }
             phase = .ready
         }
+        notifyStateChanged()
     }
 
     func configure(workers slots: [ConnectedWorker], memory: RunnerMemoryAdmission) {
@@ -82,6 +197,15 @@ final class ConnectedAgentControl: @unchecked Sendable {
                 return (id, AgentWorkerStatus(id: id, platform: worker.backend.platform, slot: worker.slot))
             })
         }
+        notifyStateChanged()
+    }
+
+    func registerSlotHandler(worker: String, handler: AgentSlotControlHandler) {
+        lock.withLock { slotHandlers[worker] = handler }
+    }
+
+    func unregisterSlotHandler(worker: String) {
+        lock.withLock { _ = slotHandlers.removeValue(forKey: worker) }
     }
 
     func recovering(_ leases: [ConnectedLease]) {
@@ -95,10 +219,12 @@ final class ConnectedAgentControl: @unchecked Sendable {
                 assignments.insert(id)
             }
         }
+        notifyStateChanged()
     }
 
     func update(worker: String, phase: AgentWorkerPhase) {
         lock.withLock { workers[worker]?.phase = phase }
+        notifyStateChanged()
     }
 
     func assign(worker: String, offer: ConnectedOffer) {
@@ -106,38 +232,119 @@ final class ConnectedAgentControl: @unchecked Sendable {
             workers[worker]?.phase = .provisioning
             workers[worker]?.runner = offer.runner
             workers[worker]?.repository = offer.repository
+            workers[worker]?.jobStartedAt = nil
+            workers[worker]?.workflowRunID = nil
+            workers[worker]?.reclaiming = nil
         }
+        notifyStateChanged()
+    }
+
+    func recordWorkflowRun(worker: String, runID: Int64) {
+        guard runID > 0 else { return }
+        let changed = lock.withLock { () -> Bool in
+            guard workers[worker]?.workflowRunID != runID else { return false }
+            workers[worker]?.workflowRunID = runID
+            return true
+        }
+        if changed { notifyStateChanged() }
     }
 
     func connection(worker: String, state: AgentConnectionState, error: String?) {
         lock.withLock {
             workers[worker]?.connection = state
-            if state == .connected { workers[worker]?.lastContactAt = Date() }
-            if let error { lastError = AgentReportedError(message: error) }
+            if state == .connected { workers[worker]?.lastContactAt = currentDate() }
+            if let error { lastError = AgentReportedError(message: error, occurredAt: currentDate()) }
         }
+        notifyStateChanged()
+    }
+
+    func recordError(_ message: String) {
+        lock.withLock { lastError = AgentReportedError(message: message, occurredAt: currentDate()) }
+        notifyStateChanged()
     }
 
     func session(worker: String, state: RunnerSessionState) {
         switch state {
         case .listenerStarted: update(worker: worker, phase: .waitingForJob)
-        case .jobStarted: update(worker: worker, phase: .running)
+        case .jobStarted:
+            lock.withLock {
+                workers[worker]?.phase = .running
+                workers[worker]?.jobStartedAt = currentDate()
+            }
+            notifyStateChanged()
         case .listenerExited, .capacityReleased: update(worker: worker, phase: .cleaningUp)
         case let .executionStopped(_, reason):
-            lock.withLock { lastError = AgentReportedError(message: reason); workers[worker]?.phase = .cleaningUp }
+            lock.withLock {
+                lastError = AgentReportedError(message: reason, occurredAt: currentDate())
+                workers[worker]?.phase = .cleaningUp
+            }
+            notifyStateChanged()
         case .cleanupCompleted: break
         }
     }
 
-    func stopping() { lock.withLock { phase = .stopping } }
+    func stopping() {
+        lock.withLock { phase = .stopping }
+        notifyStateChanged()
+    }
 
+    /// Invoked inside `kIOMessageSystemWillSleep` (strictly <= 1.5s budget before `IOAllowPowerChange`).
+    func handleSystemWillSleep() {
+        let handlers: [AgentSlotControlHandler] = lock.withLock {
+            wakeHoldDownUntil = currentDate().addingTimeInterval(Self.wakeHoldDownDuration)
+            return Array(slotHandlers.values)
+        }
+        for handler in handlers {
+            handler.markDestroyOnWake()
+            handler.severNetwork()
+            _ = handler.abort(.sleepInterrupted, nil)
+        }
+        notifyStateChanged()
+    }
 
-    func beginAssignment(worker: String) -> Bool {
+    /// Invoked on `kIOMessageSystemHasPoweredOn` to enforce flap damping before new admissions.
+    func handleSystemDidWake() {
         lock.withLock {
-            guard phase == .ready, !paused, !pausedByBattery else { return false }
+            wakeHoldDownUntil = currentDate().addingTimeInterval(Self.wakeHoldDownDuration)
+        }
+        notifyStateChanged()
+    }
+
+    func canPoll(platform: RunnerPlatform) -> Bool {
+        lock.withLock {
+            let now = currentDate()
+            let power = powerStatus()
+            let thermal = thermalStateProvider()
+            let darkWake = isDarkWakeProvider()
+            guard !isPausedUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake) else { return false }
+            if meetingMode {
+                if platform == .macOS { return false }
+                if assignments.count >= 1 { return false }
+            }
+            return true
+        }
+    }
+
+    func beginAssignment(worker: String, platform: RunnerPlatform? = nil) -> Bool {
+        let resolvedPlatform = platform ?? (worker.hasPrefix("macOS-") ? .macOS : .linux)
+        let allowed = lock.withLock { () -> Bool in
+            let now = currentDate()
+            let power = powerStatus()
+            let thermal = thermalStateProvider()
+            let darkWake = isDarkWakeProvider()
+            guard phase == .ready, !isPausedUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake) else {
+                return false
+            }
+            if meetingMode {
+                // Meeting mode atomically caps total active slots across both platforms to 1 Linux guest.
+                guard resolvedPlatform == .linux, assignments.isEmpty else { return false }
+            }
             precondition(!assignments.contains(worker))
             assignments.insert(worker)
             return true
         }
+        if allowed { notifyStateChanged() }
+        return allowed
     }
 
     func finishAssignment(worker: String) {
@@ -146,29 +353,36 @@ final class ConnectedAgentControl: @unchecked Sendable {
             workers[worker]?.phase = .idle
             workers[worker]?.runner = nil
             workers[worker]?.repository = nil
+            workers[worker]?.jobStartedAt = nil
+            workers[worker]?.workflowRunID = nil
+            workers[worker]?.reclaiming = nil
         }
+        notifyStateChanged()
     }
 
     func request(_ command: String) throws -> AgentControlSnapshot {
-        try lock.withLock {
-            switch command {
+        let parsed: AgentControlRequest
+        if command.first == "{" {
+            guard let data = command.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode(AgentControlRequest.self, from: data),
+                  decoded.version == 1 else {
+                throw AgentControlError.invalidRequest
+            }
+            parsed = decoded
+        } else {
+            parsed = AgentControlRequest(action: command)
+        }
+        var postLockActions: [@Sendable () -> Void] = []
+        let snapshot = try lock.withLock { () throws -> AgentControlSnapshot in
+            let now = currentDate()
+            expireTimersUnlocked(now: now)
+            switch parsed.action {
             case "pause":
-                if !paused {
-                    try Self.createMarker(pauseFile)
-                    paused = true
-                    try synchronizeRunnerState(pauseFile.deletingLastPathComponent())
-                }
+                try setManualPauseUnlocked(enabled: true, until: parsed.durationSeconds.map { now.addingTimeInterval(max(1, $0)) })
             case "resume":
-                if paused {
-                    guard Darwin.unlink(pauseFile.path) == 0 || errno == ENOENT else {
-                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                    }
-                    try synchronizeRunnerState(pauseFile.deletingLastPathComponent())
-                    paused = false
-                    resumeGeneration += 1
-                }
+                try setManualPauseUnlocked(enabled: false, until: nil)
             case "pause-on-battery", "allow-on-battery":
-                let enabled = command == "pause-on-battery"
+                let enabled = parsed.action == "pause-on-battery"
                 if enabled != pauseOnBattery {
                     if enabled {
                         try Self.createMarker(batteryPolicyFile)
@@ -180,11 +394,175 @@ final class ConnectedAgentControl: @unchecked Sendable {
                 }
                 // Also confirm durability on retries after an agent restart.
                 try synchronizeRunnerState(batteryPolicyFile.deletingLastPathComponent())
+            case "reclaim":
+                try setManualPauseUnlocked(enabled: true, until: parsed.durationSeconds.map { now.addingTimeInterval(max(1, $0)) })
+                for id in assignments {
+                    workers[id]?.reclaiming = true
+                    if let handler = slotHandlers[id] {
+                        postLockActions.append { _ = handler.abort(.reclaimed, nil) }
+                    }
+                }
+            case "abort-job":
+                guard let worker = parsed.worker, let runner = parsed.runner, !runner.isEmpty else {
+                    throw AgentControlError.invalidRequest
+                }
+                guard assignments.contains(worker), workers[worker]?.runner == runner else {
+                    throw AgentControlError.rejected("That job is no longer running on \(worker).")
+                }
+                workers[worker]?.reclaiming = true
+                if let handler = slotHandlers[worker] {
+                    postLockActions.append { _ = handler.abort(.reclaimed, runner) }
+                }
+            case "meeting-mode":
+                let enabled = parsed.enabled ?? !meetingMode
+                if let cpus = parsed.cpus {
+                    guard cpus == 2 || cpus == 4 else { throw AgentControlError.invalidRequest }
+                    meetingModeCPUs = cpus
+                }
+                meetingMode = enabled
+                meetingModeUntil = enabled ? parsed.durationSeconds.map { now.addingTimeInterval(max(1, $0)) } : nil
+                if !enabled {
+                    thermalCappedToTwo = false
+                    thermalHoldDownUntil = nil
+                }
+                try savePolicyUnlocked()
+                let targetCPUs = enabled ? meetingModeCPUs : AppleContainerBackend.virtualCPUs
+                for (id, status) in workers where status.platform == .linux && assignments.contains(id) {
+                    if let handler = slotHandlers[id] {
+                        postLockActions.append { handler.applyCPUQuota(targetCPUs) }
+                    }
+                }
             case "status": break
             default: throw AgentControlError.invalidRequest
             }
             return snapshotUnlocked()
         }
+        let actions = postLockActions
+        if !actions.isEmpty {
+            DispatchQueue.global(qos: .userInitiated).async {
+                for action in actions { action() }
+            }
+        }
+        if parsed.action != "status" { notifyStateChanged() }
+        return snapshot
+    }
+
+    private func setManualPauseUnlocked(enabled: Bool, until: Date?) throws {
+        if enabled {
+            if !paused {
+                try Self.createMarker(pauseFile)
+                paused = true
+            }
+            pausedUntil = until
+            try synchronizeRunnerState(pauseFile.deletingLastPathComponent())
+            if until != nil || FileManager.default.fileExists(atPath: policyFile.path) {
+                try savePolicyUnlocked()
+            }
+        } else {
+            if paused {
+                guard Darwin.unlink(pauseFile.path) == 0 || errno == ENOENT else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                try synchronizeRunnerState(pauseFile.deletingLastPathComponent())
+                paused = false
+                resumeGeneration += 1
+            }
+            if pausedUntil != nil {
+                pausedUntil = nil
+                try savePolicyUnlocked()
+            }
+        }
+    }
+
+    private func expireTimersUnlocked(now: Date) {
+        if let until = pausedUntil, now >= until {
+            pausedUntil = nil
+            if paused {
+                _ = Darwin.unlink(pauseFile.path)
+                try? synchronizeRunnerState(pauseFile.deletingLastPathComponent())
+                paused = false
+                resumeGeneration += 1
+            }
+            try? savePolicyUnlocked()
+        }
+        if let until = meetingModeUntil, now >= until {
+            meetingMode = false
+            meetingModeUntil = nil
+            thermalCappedToTwo = false
+            thermalHoldDownUntil = nil
+            try? savePolicyUnlocked()
+        }
+        if let until = wakeHoldDownUntil, now >= until {
+            wakeHoldDownUntil = nil
+        }
+        if let until = thermalHoldDownUntil, now >= until {
+            thermalHoldDownUntil = nil
+            thermalCappedToTwo = false
+        }
+    }
+
+    private func updateThermalGuardUnlocked(now: Date, thermal: HostThermalState) {
+        if thermal.isSevere {
+            thermalHoldDownUntil = now.addingTimeInterval(Self.thermalHoldDownDuration)
+            thermalCappedToTwo = true
+        } else if meetingMode && thermal == .fair {
+            thermalHoldDownUntil = now.addingTimeInterval(Self.thermalHoldDownDuration)
+            thermalCappedToTwo = true
+        }
+    }
+
+    private func admissionReasonsUnlocked(now: Date, power: HostPowerStatus, thermal: HostThermalState, darkWake: Bool) -> [AgentAdmissionReason] {
+        expireTimersUnlocked(now: now)
+        updateThermalGuardUnlocked(now: now, thermal: thermal)
+        var reasons: [AgentAdmissionReason] = []
+        if paused {
+            reasons.append(pausedUntil != nil ? .timedPause : .manual)
+        }
+        if pauseOnBattery && power.source == .battery {
+            reasons.append(.battery)
+        }
+        if meetingMode && power.source == .unknown {
+            reasons.append(.unknownPower)
+        }
+        if (pauseOnBattery || meetingMode) && power.drainingOnAC {
+            reasons.append(.drainingCharger)
+        }
+        if power.lowPowerMode {
+            reasons.append(.lowPowerMode)
+        }
+        if darkWake {
+            reasons.append(.darkWake)
+        }
+        if let until = wakeHoldDownUntil, now < until {
+            reasons.append(.wakeHoldDown)
+        }
+        if thermal.isSevere || (meetingMode && thermal == .fair && meetingModeCPUs <= 2) {
+            reasons.append(.thermal)
+        }
+        if workers.values.contains(where: { $0.reclaiming == true }) {
+            reasons.append(.reclaiming)
+        }
+        return reasons
+    }
+
+    private func isPausedUnlocked(now: Date, power: HostPowerStatus, thermal: HostThermalState, darkWake: Bool) -> Bool {
+        let blocking = admissionReasonsUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake)
+        return blocking.contains { $0 != .reclaiming }
+    }
+
+    private func savePolicyUnlocked() throws {
+        let policy = AgentPersistedPolicy(
+            pausedUntil: pausedUntil,
+            meetingMode: meetingMode,
+            meetingModeUntil: meetingModeUntil,
+            meetingModeCPUs: meetingModeCPUs
+        )
+        try writePrivateRunnerFile(JSONEncoder().encode(policy), to: policyFile)
+    }
+
+    private static func loadPolicy(at url: URL) -> AgentPersistedPolicy? {
+        guard let data = try? readPrivateRunnerFile(url, maximumBytes: 8_192) else { return nil }
+        return try? JSONDecoder().decode(AgentPersistedPolicy.self, from: data)
     }
 
     private static func createMarker(_ file: URL) throws {
@@ -195,12 +573,31 @@ final class ConnectedAgentControl: @unchecked Sendable {
         if descriptor >= 0 { _ = Darwin.close(descriptor) }
     }
 
+    private func notifyStateChanged() {
+        guard let stateChangedNotificationName else { return }
+        _ = notify_post(stateChangedNotificationName)
+    }
+
     private func snapshotUnlocked() -> AgentControlSnapshot {
-        let battery = pausedByBattery
-        return AgentControlSnapshot(version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration, paused: paused || battery, ready: phase == .ready, activeAssignments: assignments.count,
-            recordedAt: Date(), phase: phase, server: server, deviceID: deviceID, memory: memory?.status,
+        let now = currentDate()
+        let power = powerStatus()
+        let thermal = thermalStateProvider()
+        let darkWake = isDarkWakeProvider()
+        let reasons = admissionReasonsUnlocked(now: now, power: power, thermal: thermal, darkWake: darkWake)
+        let battery = pauseOnBattery && power.source == .battery
+        let effectivePaused = reasons.contains { $0 != .reclaiming }
+        let displayedReasons = meetingMode ? (reasons + [.meetingMode]) : reasons
+        let effectiveCPUs = thermalCappedToTwo ? min(meetingModeCPUs, 2) : meetingModeCPUs
+        return AgentControlSnapshot(
+            version: 1, instanceID: instanceID, resumeGeneration: resumeGeneration,
+            paused: effectivePaused, ready: phase == .ready, activeAssignments: assignments.count,
+            recordedAt: now, phase: phase, server: server, deviceID: deviceID, memory: memory?.status,
             workers: workers.values.sorted { $0.id < $1.id }, lastError: lastError,
-            pauseOnBattery: pauseOnBattery, pausedByBattery: battery, manuallyPaused: paused)
+            pauseOnBattery: pauseOnBattery, pausedByBattery: battery, manuallyPaused: paused,
+            admissionReasons: displayedReasons, pausedUntil: pausedUntil,
+            meetingMode: meetingMode, meetingModeUntil: meetingModeUntil, meetingModeCPUs: effectiveCPUs,
+            hostPower: power, thermalState: thermal
+        )
     }
 }
 
@@ -271,10 +668,32 @@ func requestAgentControl(_ command: String, connection: NSXPCConnection = NSXPCC
 
 struct AgentPauseCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "pause", abstract: "Stop accepting connected assignments; let active work finish.")
+    @Option(name: .long, help: "Automatically resume after this many minutes.")
+    var minutes: Int?
+
     mutating func run() throws {
         try requireInstalledConnectedAgent()
-        let snapshot = try requestAgentControl("pause")
+        let command: String
+        if let minutes, minutes > 0 {
+            command = try AgentControlRequest(action: "pause", durationSeconds: TimeInterval(minutes * 60)).encodedCommand()
+        } else {
+            command = "pause"
+        }
+        let snapshot = try requestAgentControl(command)
         print("Paused. \(snapshot.activeAssignments) assignment(s) still active or cleaning up.")
+    }
+}
+
+struct AgentReclaimCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "reclaim", abstract: "Pause new jobs and immediately stop all running local runners to reclaim Mac compute.")
+    @Option(name: .long, help: "Automatically resume accepting jobs after this many minutes.")
+    var minutes: Int?
+
+    mutating func run() throws {
+        try requireInstalledConnectedAgent()
+        let request = AgentControlRequest(action: "reclaim", durationSeconds: minutes.flatMap { $0 > 0 ? TimeInterval($0 * 60) : nil })
+        let snapshot = try requestAgentControl(try request.encodedCommand())
+        print("Reclaiming compute and paused new jobs. \(snapshot.activeAssignments) assignment(s) stopping.")
     }
 }
 
@@ -319,7 +738,7 @@ enum AgentControlError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notInstalled: "Pause, resume, and drain require an installed connected agent."
+        case .notInstalled: "Pause, resume, drain, and reclaim require an installed connected agent."
         case .drainInterrupted: "Drain interrupted because the agent restarted or connected assignments were resumed."
         case .invalidRequest: "Unknown connected agent control request."
         case .invalidResponse: "The connected agent returned an unsupported control response."

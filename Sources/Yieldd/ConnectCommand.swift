@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import os
 
 enum ConnectedPlatform: String, ExpressibleByArgument, Sendable {
     case linux, macos
@@ -110,12 +111,28 @@ func runConnectedService(
         let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
-        let archiveService = try cachePolicy.map { policy in
-            try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
-                policy: policy, ownershipDescriptor: ownershipDescriptor, stop: stop)
+        let archiveService: ArchiveCacheService?
+        if let policy = cachePolicy {
+            do {
+                archiveService = try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
+                    policy: policy, ownershipDescriptor: ownershipDescriptor, stop: stop)
+            } catch {
+                let message = "Local archive cache unavailable; continuing without local cache: \(describeError(error))"
+                output.warning(message)
+                control?.recordError(message)
+                archiveService = nil
+            }
+        } else {
+            archiveService = nil
         }
         defer { archiveService?.stop() }
         let cacheSocket = archiveService?.socketURL
+        let powerMonitor = SystemPowerMonitor(
+            onWillSleep: { control?.handleSystemWillSleep() },
+            onDidWake: { control?.handleSystemDidWake() }
+        )
+        _ = powerMonitor.start()
+        defer { powerMonitor.stop() }
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
         if control?.isPaused == true { output.info("Connected agent is paused. New jobs will wait until admission resumes.") }
@@ -125,56 +142,118 @@ func runConnectedService(
             let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
                                              platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline,
                 connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
-            let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
+            let authorization = ConnectedExecutionAuthorization(
+                renewWithMetadata: client.renewWithMetadata,
+                checkCancellation: stop.check,
+                initialOfflineGrace: ConnectedExecutionAuthorization.preStartOfflineGrace,
+                onWorkflowRunID: { control?.recordWorkflowRun(worker: workerID, runID: $0) }
+            )
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
             let network = try RunnerNetwork(stateDirectory: directory, platform: platform, cacheSocket: cacheSocket)
             let backend: any RunnerBackend
+            let severNetworkHandler: @Sendable (RunnerID) -> Void
+            let applyCPUQuotaHandler: @Sendable (Int, RunnerID) -> Void
             switch worker.backend {
             case let .linux(containerURL):
-                backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
+                let linuxBackend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
                     stateDirectory: directory, ownershipDescriptor: ownershipDescriptor, network: network,
                     checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                     dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
+                backend = linuxBackend
+                severNetworkHandler = { linuxBackend.severNetwork($0) }
+                applyCPUQuotaHandler = { cpus, id in try? linuxBackend.applyCPUQuota(cpus, on: id) }
             case let .macOS(templateURL):
-                backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
+                let macBackend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
                     cloneRootURL: RunnerStorage.cloneRoot(in: directory),
                     executor: executor, network: network, checkCancellation: authorization.check, wait: stop.wait,
                     maximumExecutionDeadline: stop.executionDeadline)
+                backend = macBackend
+                severNetworkHandler = { macBackend.severNetwork($0) }
+                applyCPUQuotaHandler = { _, _ in }
             }
-            let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
+            let store = ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot)
+            let runner = ConnectedRunner(backend: backend, store: store,
                 server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
                 authorization: authorization, wait: stop.wait, localCache: cacheSocket != nil,
                 stateChanged: {
                     control?.session(worker: workerID, state: $0)
                     reportRunnerServiceState($0, output: output)
-                })
-            try runConnectedClient(checkCancellation: stop.check, recover: {
-                control?.update(worker: workerID, phase: .recovering)
-                try runner.recover()
-                output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
-            }, acquire: {
-                try memory.tryAcquire(reserving: platform.memoryReservationBytes)
-            }, release: memory.release, prepareToPoll: {
-                try archiveService?.ensureRunning()
-            }, poll: {
-                control?.update(worker: workerID, phase: .idle)
-                return try client.poll()
-            }, decline: client.decline, run: { offer, allocation, release in
-                control?.assign(worker: workerID, offer: offer)
-                output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
-                try runner.run(offer, memory: allocation, releaseCapacity: release)
-            }, wait: stop.wait, retrying: { error in
-                output.info("Retrying \(platform.rawValue) slot \(worker.slot) in five seconds: \(describeError(error))")
-            }, available: {
-                memory.isAvailable(reserving: platform.memoryReservationBytes)
-            }, blocked: {
-                control?.update(worker: workerID, phase: .waitingForMemory)
-                output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
-            }, paused: { control?.isPaused ?? false }, beginAssignment: {
-                control?.beginAssignment(worker: workerID) ?? true
-            }, finishAssignment: {
-                control?.finishAssignment(worker: workerID)
-            })
+                },
+                initialLinuxCPUs: { control?.effectiveLinuxCPUs ?? AppleContainerBackend.virtualCPUs })
+            let activeRunnerID = OSAllocatedUnfairLock<RunnerID?>(initialState: nil)
+            let slotIndex = worker.slot
+            control?.registerSlotHandler(worker: workerID, handler: AgentSlotControlHandler(
+                abort: { reason, expected in authorization.abort(reason: reason, expectedRunner: expected) },
+                severNetwork: {
+                    if let id = activeRunnerID.withLock({ $0 }) {
+                        severNetworkHandler(id)
+                    }
+                },
+                applyCPUQuota: { cpus in
+                    if let id = activeRunnerID.withLock({ $0 }) {
+                        applyCPUQuotaHandler(cpus, id)
+                    }
+                },
+                markDestroyOnWake: {
+                    let wakeStore = ConnectedRunnerStore(directory: directory, platform: platform, slot: slotIndex)
+                    if var lease = try? wakeStore.load() {
+                        lease.mustDestroyOnWake = true
+                        try? wakeStore.save(lease)
+                    }
+                }
+            ))
+            defer { control?.unregisterSlotHandler(worker: workerID) }
+            var platformBackoff: TimeInterval = 5
+            while true {
+                try stop.check()
+                do {
+                    try runConnectedClient(checkCancellation: stop.check, recover: {
+                        control?.update(worker: workerID, phase: .recovering)
+                        try runner.recover()
+                        platformBackoff = 5
+                        output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
+                    }, acquire: {
+                        try memory.tryAcquire(reserving: platform.memoryReservationBytes)
+                    }, release: memory.release, prepareToPoll: {
+                        try archiveService?.ensureRunning()
+                    }, poll: {
+                        control?.update(worker: workerID, phase: .idle)
+                        return try client.poll()
+                    }, decline: client.decline, run: { offer, allocation, release in
+                        let id = RunnerID(value: offer.runner)
+                        activeRunnerID.withLock { $0 = id }
+                        defer { activeRunnerID.withLock { $0 = nil } }
+                        control?.assign(worker: workerID, offer: offer)
+                        output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
+                        try runner.run(offer, memory: allocation, releaseCapacity: release)
+                        platformBackoff = 5
+                    }, wait: stop.wait, retrying: { error in
+                        output.info("Retrying \(platform.rawValue) slot \(worker.slot) in five seconds: \(describeError(error))")
+                    }, available: {
+                        memory.isAvailable(reserving: platform.memoryReservationBytes)
+                    }, blocked: {
+                        control?.update(worker: workerID, phase: .waitingForMemory)
+                        output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
+                    }, paused: { !(control?.canPoll(platform: platform) ?? true) }, beginAssignment: {
+                        control?.beginAssignment(worker: workerID, platform: platform) ?? true
+                    }, finishAssignment: {
+                        control?.finishAssignment(worker: workerID)
+                    })
+                    return
+                } catch where isCancellation(error) {
+                    throw error
+                } catch where isFatalConnectedServiceError(error) {
+                    throw error
+                } catch {
+                    // Contain platform/pre-start errors (e.g., macOS 2-VM limit) to this slot
+                    // instead of tearing down healthy sibling slots across the pool.
+                    let message = "Paused \(platform.rawValue) slot \(worker.slot) for \(Int(platformBackoff))s after error: \(describeError(error))"
+                    output.warning(message)
+                    control?.connection(worker: workerID, state: .retrying, error: message)
+                    try stop.wait(for: platformBackoff)
+                    platformBackoff = min(60, platformBackoff * 2)
+                }
+            }
         }
     }
 }
@@ -196,4 +275,17 @@ func connectedWorkers(backends: [RunnerSlotBackend], memory: RunnerMemoryAdmissi
         report(backend.platform, count)
         return (0..<count).map { ConnectedWorker(backend: backend, slot: $0) }
     }
+}
+
+private func isFatalConnectedServiceError(_ error: any Error) -> Bool {
+    if let connected = error as? ConnectedRunnerError {
+        switch connected {
+        case .previousVersionState, .invalidState, .identityChanged, .registrationReconciliationRequired,
+             .confirmationMismatch, .http(401, _, _), .http(403, _, _):
+            return true
+        default:
+            return false
+        }
+    }
+    return false
 }

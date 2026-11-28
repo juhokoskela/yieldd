@@ -65,6 +65,7 @@ func TestLocalCompletionRevokesDurablyAndLateStartCannotRenew(t *testing.T) {
 	if err != nil || authorization.Continue {
 		t.Fatal("completed job renewed", err)
 	}
+	w.assignedJobs = 0
 	if count, err := c.HandleDesiredRunnerCount(t.Context(), 1); count != 1 || err != nil || w.dispatched != 0 {
 		t.Fatal("completion bypassed guest destruction acknowledgement", count, err)
 	}

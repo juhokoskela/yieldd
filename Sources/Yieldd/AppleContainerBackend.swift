@@ -1,6 +1,6 @@
 import Foundation
 
-final class AppleContainerBackend: RunnerBackend {
+final class AppleContainerBackend: RunnerBackend, @unchecked Sendable {
     let platform = RunnerPlatform.linux
     static let creationTimeout: TimeInterval = 5 * 60
     static let memoryConfigurationTimeout: TimeInterval = 30
@@ -23,11 +23,13 @@ final class AppleContainerBackend: RunnerBackend {
     private let checkCancellation: () throws -> Void
     private let maximumExecutionDeadline: () -> DispatchTime?
     private let lock = NSLock()
+    private let relayLock = NSLock()
     private struct Guest {
         let relay: any RunnerNetworkRelaying
         var booted = false
     }
     private var guests: [RunnerID: Guest] = [:]
+    private var activeRelays: [RunnerID: any RunnerNetworkRelaying] = [:]
 
     init(
         containerURL: URL,
@@ -71,6 +73,7 @@ final class AppleContainerBackend: RunnerBackend {
             try recordIntent()
             let relay = try network.start(for: id, checkCancellation: checkCancellation)
             guests[id] = Guest(relay: relay)
+            relayLock.withLock { activeRelays[id] = relay }
             _ = try run([
                 "machine", "create",
                 "--name", id.value,
@@ -138,6 +141,22 @@ final class AppleContainerBackend: RunnerBackend {
         )
     }
 
+    func severNetwork(_ id: RunnerID) {
+        let relay = relayLock.withLock { activeRelays[id] }
+        try? relay?.stop(deadline: .now() + .milliseconds(500))
+    }
+
+    func applyCPUQuota(_ cpus: Int, on id: RunnerID) throws {
+        let clamped = max(1, min(Self.virtualCPUs, cpus))
+        _ = try exec(
+            ["yieldd-runner-control", "cpu", String(clamped)],
+            timeout: 10,
+            outputCapture: .tail(maxBytes: 4096),
+            as: .root,
+            on: id
+        )
+    }
+
     func destroy(_ id: RunnerID) throws {
         try lock.withLock {
             var failures: [RunnerSessionCleanupFailure] = []
@@ -152,6 +171,7 @@ final class AppleContainerBackend: RunnerBackend {
             // After an owner crash there is no relay object, only its socket directory.
             try RunnerNetworkDirectories(stateDirectory: stateDirectory).remove(id)
             guests.removeValue(forKey: id)
+            relayLock.withLock { _ = activeRelays.removeValue(forKey: id) }
         }
     }
 

@@ -74,12 +74,25 @@ final class ConnectedHTTPClient {
     }
 
     func renew(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> Bool {
-        struct Authorization: Decodable { let `continue`: Bool }
+        try renewWithMetadata(offer, checkDeadline: checkDeadline).shouldContinue
+    }
+
+    func renewWithMetadata(_ offer: ConnectedOffer, checkDeadline: () throws -> Void) throws -> ConnectedAuthorizationRenewal {
+        struct Authorization: Decodable {
+            let `continue`: Bool
+            let workflowRunID: Int64?
+
+            enum CodingKeys: String, CodingKey {
+                case `continue`
+                case workflowRunID = "workflow_run_id"
+            }
+        }
         let (_, data) = try request("renew", offer: offer, checkCancellation: {
             try self.checkCancellation()
             try checkDeadline()
         })
-        return try JSONDecoder().decode(Authorization.self, from: data).continue
+        let decoded = try JSONDecoder().decode(Authorization.self, from: data)
+        return ConnectedAuthorizationRenewal(shouldContinue: decoded.continue, workflowRunID: decoded.workflowRunID)
     }
 
     private func request(_ action: String, offer: ConnectedOffer?, checkCancellation check: () throws -> Void) throws -> (Int, Data) {

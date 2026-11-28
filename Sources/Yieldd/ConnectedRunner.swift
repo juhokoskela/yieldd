@@ -12,6 +12,7 @@ final class ConnectedRunner {
     let wait: (TimeInterval) throws -> Void
     var stateChanged: (RunnerSessionState) -> Void
     var currentTime: () -> TimeInterval
+    var initialLinuxCPUs: () -> Int
 
     // Valid only for this worker process. A restart must prove absence again.
     private var absent: RunnerID?
@@ -21,7 +22,8 @@ final class ConnectedRunner {
          authorization: ConnectedExecutionAuthorization, wait: @escaping (TimeInterval) throws -> Void,
          localCache: Bool = false,
          stateChanged: @escaping (RunnerSessionState) -> Void = { _ in },
-         currentTime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         currentTime: @escaping () -> TimeInterval = continuousMonotonicSeconds,
+         initialLinuxCPUs: @escaping () -> Int = { AppleContainerBackend.virtualCPUs }) {
         self.backend = backend
         self.store = store
         self.server = server
@@ -33,6 +35,7 @@ final class ConnectedRunner {
         self.wait = wait
         self.stateChanged = stateChanged
         self.currentTime = currentTime
+        self.initialLinuxCPUs = initialLinuxCPUs
     }
 
     func recover() throws {
@@ -77,13 +80,22 @@ final class ConnectedRunner {
                 machineMayExist = true
             }
             try authorization.check()
+            if backend.platform == .linux {
+                let targetCPUs = initialLinuxCPUs()
+                if targetCPUs < AppleContainerBackend.virtualCPUs {
+                    try backend.applyCPUQuota(targetCPUs, on: id)
+                }
+            }
             try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: localCache)
             let configure = ["yieldd-configure-runner", "--jit"] + (localCache ? ["--local-cache"] : [])
             try backend.exec(configure, standardInput: Data("\(jit)\n".utf8),
                              timeout: 5 * 60, on: id)
             try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
                                   stateChanged: { state in
-                                      if case .jobStarted = state { jobStarted = true }
+                                      if case .jobStarted = state {
+                                          jobStarted = true
+                                          self.authorization.markJobStarted()
+                                      }
                                       self.stateChanged(state)
                                   }, currentTime: currentTime)
                 .run(id: id, pickupTimeout: 5 * 60)
@@ -91,11 +103,18 @@ final class ConnectedRunner {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation
         }
+        let stoppedForReclaimOrShutdown = (failure as? ConnectedExecutionError) == .reclaimed
+            || (failure.map(isCancellation) ?? false)
         authorization.stop()
         if let failure, !isCancellation(failure), (failure as? ConnectedRunnerError)?.httpStatus != 410 {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         if machineMayExist {
+            if stoppedForReclaimOrShutdown {
+                // Best-effort bounded graceful stop with relay still attached so GitHub
+                // marks the runner idle in seconds instead of waiting for a 5-10m timeout.
+                backend.gracefulStopRunner(id)
+            }
             try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
         }
         absent = id

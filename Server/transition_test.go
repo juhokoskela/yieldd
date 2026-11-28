@@ -52,6 +52,7 @@ func TestLocalTransitionsCannotReopenExecutionOrReleaseUnacknowledgedCapacity(t 
 		{"phase", func(l *lease) { l.Local.Phase = localOffered }},
 		{"job started", func(l *lease) { l.Local.JobStarted = false }},
 		{"job completed", func(l *lease) { l.Local.JobCompleted = false }},
+		{"workflow run id", func(l *lease) { l.Local.WorkflowRunID = 999 }},
 		{"issued to hosted", func(l *lease) { l.Local = nil }},
 	} {
 		t.Run(change.name, func(t *testing.T) {
@@ -59,7 +60,7 @@ func TestLocalTransitionsCannotReopenExecutionOrReleaseUnacknowledgedCapacity(t 
 			if _, err := c.acceptDevice(t.Context(), request); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.assigned(request.Runner).recordLocalJob(singleLease(c.state).RunnerID, jobSucceeded); err != nil {
+			if err := c.assigned(request.Runner).recordLocalJob(singleLease(c.state).RunnerID, 12345, jobSucceeded); err != nil {
 				t.Fatal(err)
 			}
 			original := singleLease(c.state)

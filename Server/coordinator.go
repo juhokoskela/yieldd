@@ -59,6 +59,12 @@ type coordinator struct {
 	maxFallbackRunners     int
 	demandRetryAt          time.Time
 	hostedCleanupRetry     map[string]time.Time
+	hostedBackoffUntil     time.Time
+	hostedBackoffDelay     time.Duration
+	lastRenewed            map[string]time.Time
+	lastBusyCheck          map[string]time.Time
+	jobStartedByEvent      map[string]bool
+	fencedLocal            map[string]bool
 }
 
 type assignment struct {
@@ -107,6 +113,41 @@ func (c *coordinator) hasPendingOffer() bool {
 func (c *coordinator) hasIssuedLocal() bool {
 	for _, l := range c.state.Leases {
 		if l.Local != nil && l.Local.Phase == localIssued {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *lease) countsAsSupply() bool {
+	if l == nil || l.CleanupIntent {
+		return false
+	}
+	if local := l.Local; local != nil && local.Phase == localIssued {
+		if local.JobCompleted || (!local.JobStarted && local.expired()) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *coordinator) supplyCount() int {
+	count := 0
+	for _, l := range c.state.Leases {
+		if l.countsAsSupply() {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *coordinator) hostedBackoffActive() bool {
+	return !c.hostedBackoffUntil.IsZero() && time.Now().Before(c.hostedBackoffUntil)
+}
+
+func (c *coordinator) hasNonSupplyLease() bool {
+	for _, l := range c.state.Leases {
+		if !l.countsAsSupply() {
 			return true
 		}
 	}
@@ -184,6 +225,10 @@ func (a *assignment) replace(nextLease *lease) error {
 	}
 	if nextLease == nil {
 		delete(next.Leases, a.lease.Name)
+		delete(a.lastRenewed, a.lease.Name)
+		delete(a.lastBusyCheck, a.lease.Name)
+		delete(a.jobStartedByEvent, a.lease.Name)
+		delete(a.fencedLocal, a.lease.Name)
 	} else {
 		next.Leases[nextLease.Name] = nextLease
 	}
@@ -197,7 +242,7 @@ func (a *assignment) replace(nextLease *lease) error {
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, jobStarted); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, job.WorkflowRunID, jobStarted); err != nil {
 		return err
 	}
 	c.logger.Info("Job started", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID)
@@ -209,7 +254,7 @@ func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCom
 	if strings.EqualFold(job.Result, "succeeded") || strings.EqualFold(job.Result, "success") {
 		event = jobSucceeded
 	}
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, event); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, job.WorkflowRunID, event); err != nil {
 		return err
 	}
 	c.logger.Info("Job completed", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID, "result", job.Result)
@@ -450,13 +495,29 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	countsAgree := count == listenerCount
 	count = min(count, maximumAssignments)
-	if count <= len(c.state.Leases) {
+	if count <= c.supplyCount() {
 		// The listener can repeat a stale positive count on every empty poll.
 		if count > 0 && countsAgree {
 			c.refreshDemand = false
 		}
 		c.device.forget(c.state.Owner)
 		return nil
+	}
+	if !c.needsDemandRefresh() && c.hasNonSupplyLease() {
+		// Confirm real GitHub demand before provisioning replacement capacity
+		// alongside an unacknowledged completed or expired local lease.
+		refreshed, err := c.readPlacementDemand(ctx)
+		if err != nil {
+			return err
+		}
+		if ctx.Err() == context.DeadlineExceeded && !c.demandRetryAt.IsZero() {
+			return nil
+		}
+		count = min(refreshed, maximumAssignments)
+		if count <= c.supplyCount() {
+			c.device.forget(c.state.Owner)
+			return nil
+		}
 	}
 	// Registration runs on this queue's event loop. Offer the next worker only
 	// after issuance so slow GitHub I/O cannot consume another offer's five seconds.
@@ -478,14 +539,22 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		l.Local = &localLease{DeviceID: c.state.Config.DeviceID, Slot: slot, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
 	} else if c.state.Config.LocalOnly {
 		return nil
-	} else if c.fallbackFull() {
-		if countsAgree {
+	} else if c.fallbackFull() || c.hostedBackoffActive() {
+		if countsAgree && c.fallbackFull() {
 			c.refreshDemand = false
 		}
 		if c.state.Config.DeviceID != "" {
 			c.device.wait(c.state.Owner)
 		}
 		return nil
+	}
+	if !local {
+		if err := c.fenceExpiredLocalForOverflow(ctx); err != nil {
+			return err
+		}
+		if count <= c.supplyCount() || len(c.state.Leases) >= maximumAssignments*2 {
+			return nil
+		}
 	}
 	a := &assignment{coordinator: c}
 	if err := a.replace(l); err != nil {
@@ -500,6 +569,36 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	// Give device requests a turn before the next provisioning operation.
 	c.device.redrive(c.state.Owner)
+	return nil
+}
+
+func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) error {
+	for _, name := range c.names() {
+		l := c.state.Leases[name]
+		if l == nil || l.CleanupIntent || l.Local == nil || l.Local.Phase != localIssued || l.Local.JobStarted || !l.Local.expired() || c.fencedLocal[name] {
+			continue
+		}
+		busy, err := c.bootstrap.runnerBusy(ctx, c.state.Config.Repository, l.RunnerID)
+		if err != nil {
+			return err
+		}
+		if busy {
+			next := *l.Local
+			next.JobStarted = true
+			if err := c.assigned(name).saveLocal(&next); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := c.runners.RemoveRunner(ctx, int64(l.RunnerID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
+			return &sdkError{"fence expired local runner", err}
+		}
+		if c.fencedLocal == nil {
+			c.fencedLocal = make(map[string]bool)
+		}
+		c.fencedLocal[name] = true
+		c.logger.Warn("Expired unstarted local runner fenced before hosted overflow", "runner", name, "device", l.Local.DeviceID)
+	}
 	return nil
 }
 
@@ -761,8 +860,15 @@ func (a *assignment) finishCleanup(ctx context.Context, recoverOnly bool) (bool,
 	} else {
 		a.logger.Info("Bootstrap cleaned up", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion)
 	}
-	if l.RunID != 0 && l.Conclusion != "success" && !recoverOnly {
-		return true, fmt.Errorf("bootstrap %d concluded %s; stopped after cleanup rather than automatically retrying the workload", l.RunID, l.Conclusion)
+	if l.RunID != 0 && !recoverOnly {
+		if l.Conclusion == "success" {
+			a.hostedBackoffDelay = 0
+			a.hostedBackoffUntil = time.Time{}
+		} else {
+			a.hostedBackoffDelay = min(max(cleanupRetryDelay, a.hostedBackoffDelay*2), verificationMaximumRetryDelay)
+			a.hostedBackoffUntil = time.Now().Add(a.hostedBackoffDelay)
+			a.logger.Warn("Bootstrap concluded unsuccessfully; backing off hosted provisioning", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion, "retry_delay", a.hostedBackoffDelay)
+		}
 	}
 	return true, nil
 }

@@ -12,6 +12,7 @@ const (
 	availabilityLifetime = 30 * time.Second
 	registrationLifetime = 30 * time.Second
 	localStartupLifetime = 10 * time.Minute
+	busyCheckInterval    = 2 * time.Minute
 )
 
 type localPhase string
@@ -24,13 +25,14 @@ const (
 )
 
 type localLease struct {
-	Slot         int        `json:"slot"`
-	DeviceID     string     `json:"device_id"`
-	Phase        localPhase `json:"phase"`
-	Expires      time.Time  `json:"expires"`
-	JobStarted   bool       `json:"job_started,omitempty"`
-	JobCompleted bool       `json:"job_completed,omitempty"`
-	JobSucceeded bool       `json:"job_succeeded,omitempty"`
+	Slot          int        `json:"slot"`
+	DeviceID      string     `json:"device_id"`
+	Phase         localPhase `json:"phase"`
+	Expires       time.Time  `json:"expires"`
+	JobStarted    bool       `json:"job_started,omitempty"`
+	JobCompleted  bool       `json:"job_completed,omitempty"`
+	JobSucceeded  bool       `json:"job_succeeded,omitempty"`
+	WorkflowRunID int64      `json:"workflow_run_id,omitempty"`
 }
 
 func (l *localLease) expired() bool {
@@ -157,8 +159,9 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 }
 
 type deviceAuthorization struct {
-	Continue     bool `json:"continue"`
-	JobSucceeded bool `json:"job_succeeded,omitempty"`
+	Continue      bool  `json:"continue"`
+	JobSucceeded  bool  `json:"job_succeeded,omitempty"`
+	WorkflowRunID int64 `json:"workflow_run_id,omitempty"`
 }
 
 type finalJobResult string
@@ -201,13 +204,30 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 }
 func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
 	l := a.lease
+	if l != nil && l.Local != nil {
+		if a.lastRenewed == nil {
+			a.lastRenewed = make(map[string]time.Time)
+		}
+		a.lastRenewed[l.Name] = time.Now()
+	}
+	var runID int64
+	if l != nil && l.Local != nil {
+		runID = l.Local.WorkflowRunID
+	}
 	if result := l.jobResult(request.Slot); result != resultPending {
-		return &deviceAuthorization{JobSucceeded: result == resultSucceeded}, nil
+		return &deviceAuthorization{JobSucceeded: result == resultSucceeded, WorkflowRunID: runID}, nil
+	}
+	if l.Local.JobStarted && !a.demandUnavailable && a.jobStartedByEvent[l.Name] && time.Since(a.lastBusyCheck[l.Name]) < busyCheckInterval {
+		return &deviceAuthorization{Continue: true, WorkflowRunID: runID}, nil
 	}
 	busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, l.RunnerID)
 	if err != nil {
 		return nil, err
 	}
+	if a.lastBusyCheck == nil {
+		a.lastBusyCheck = make(map[string]time.Time)
+	}
+	a.lastBusyCheck[l.Name] = time.Now()
 	if busy {
 		if !l.Local.JobStarted {
 			next := *l.Local
@@ -216,14 +236,14 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 				return nil, err
 			}
 		}
-		return &deviceAuthorization{Continue: true}, nil
+		return &deviceAuthorization{Continue: true, WorkflowRunID: runID}, nil
 	}
 	if l.Local.JobStarted {
 		// An idle response can lag a start event. Do not grant more execution
 		// time, but let the Mac's offline grace absorb temporary inconsistency.
 		return nil, &deviceError{status: http.StatusServiceUnavailable, message: "GitHub has not confirmed an active runner; execution authorization was not renewed"}
 	}
-	return &deviceAuthorization{Continue: !l.Local.expired()}, nil
+	return &deviceAuthorization{Continue: !l.Local.expired() && !a.fencedLocal[l.Name], WorkflowRunID: runID}, nil
 }
 
 type localJobEvent uint8
@@ -234,16 +254,29 @@ const (
 	jobSucceeded
 )
 
-func (a *assignment) recordLocalJob(id int, event localJobEvent) error {
+func (a *assignment) recordLocalJob(id int, workflowRunID int64, event localJobEvent) error {
 	l := a.lease
 	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.RunnerID != id {
 		return nil
 	}
 	next := *l.Local
 	next.JobStarted = true
+	if workflowRunID > 0 && next.WorkflowRunID == 0 {
+		next.WorkflowRunID = workflowRunID
+	}
 	if event != jobStarted && !next.JobCompleted {
 		next.JobCompleted = true
 		next.JobSucceeded = event == jobSucceeded
+	}
+	if event == jobStarted {
+		if a.jobStartedByEvent == nil {
+			a.jobStartedByEvent = make(map[string]bool)
+		}
+		if a.lastBusyCheck == nil {
+			a.lastBusyCheck = make(map[string]time.Time)
+		}
+		a.jobStartedByEvent[l.Name] = true
+		a.lastBusyCheck[l.Name] = time.Now()
 	}
 	if next == *l.Local {
 		return nil
@@ -270,6 +303,11 @@ func (a *assignment) complete(ctx context.Context, request deviceRequest) error 
 		return err
 	}
 	_, err := a.finishCleanup(ctx, true)
+	if errors.Is(err, runnerStillBusy) {
+		a.logger.Info("Local cleanup recorded; waiting asynchronously for GitHub runner to become idle before removal", "runner", l.Name)
+		a.device.redrive(a.state.Owner)
+		return nil
+	}
 	return err
 }
 
@@ -283,7 +321,10 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, nil
 	}
 	expired := l.Local.expired()
-	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull()))
+	if l.Local.Phase == localOffered && expired && !recoverOnly {
+		a.device.expireAllAvailability()
+	}
+	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull() || a.hostedBackoffActive()))
 	if retire {
 		if err := a.beginCleanup(""); err != nil {
 			return false, err

@@ -64,6 +64,7 @@ func TestIssuedLocalLeaseSurvivesRestartAndDisconnection(t *testing.T) {
 	}
 	c.state = saved
 	c.device.slots[0].availableUntil = time.Time{}
+	w.assignedJobs = 0
 	singleLease(c.state).Local.Expires = time.Now().Add(-time.Hour)
 	for _, demand := range []int{0, 1} {
 		if n, err := c.HandleDesiredRunnerCount(t.Context(), demand); err != nil || n != 1 {
@@ -127,17 +128,20 @@ func TestLocalCleanupMustConfirmRegistrationIsIdle(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.busy = true
-	if err := c.completeDevice(t.Context(), request); err == nil {
-		t.Fatal("busy registration removed")
+	if err := c.completeDevice(t.Context(), request); err != nil {
+		t.Fatalf("busy completion blocked Mac acknowledgement: %v", err)
 	}
 	saved, err := store.load(c.state.Config)
 	if err != nil || !singleLease(saved).CleanupIntent || w.runner == nil {
-		t.Fatalf("cleanup intent lost: %v", err)
+		t.Fatalf("cleanup intent lost or busy registration removed: %v", err)
 	}
 	c.state = saved
 	w.busy = false
 	if err := c.completeDevice(t.Context(), request); err != nil {
 		t.Fatal(err)
+	}
+	if singleLease(c.state) != nil || w.runner != nil {
+		t.Fatal("idle registration was not cleaned up")
 	}
 }
 

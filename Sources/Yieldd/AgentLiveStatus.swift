@@ -19,6 +19,20 @@ enum AgentWorkerPhase: String, Codable, Sendable {
     case idle, waitingForMemory, provisioning, waitingForJob, running, cleaningUp, recovering
 }
 
+enum AgentAdmissionReason: String, Codable, Equatable, Hashable, Sendable {
+    case manual
+    case timedPause
+    case battery
+    case unknownPower
+    case drainingCharger
+    case lowPowerMode
+    case meetingMode
+    case thermal
+    case darkWake
+    case wakeHoldDown
+    case reclaiming
+}
+
 struct AgentReportedError: Codable, Equatable, Sendable {
     let message: String
     let occurredAt: Date
@@ -38,6 +52,14 @@ struct AgentWorkerStatus: Codable, Equatable, Sendable {
     var lastContactAt: Date?
     var runner: String?
     var repository: String?
+    var jobStartedAt: Date?
+    var workflowRunID: Int64?
+    var reclaiming: Bool?
+
+    var githubRunURL: URL? {
+        guard let repository, let workflowRunID, workflowRunID > 0 else { return nil }
+        return URL(string: "https://github.com/\(repository)/actions/runs/\(workflowRunID)")
+    }
 }
 
 enum AgentRegistrationState: String, Codable {
@@ -116,20 +138,37 @@ func renderAgentStatus(_ report: AgentStatusReport) -> String {
     let admission: String
     if status.pausedByBattery == true {
         admission = status.manuallyPaused == true ? "paused manually and on battery" : "paused on battery"
+    } else if status.paused {
+        admission = "paused"
+    } else if status.meetingMode == true {
+        let cpus = status.meetingModeCPUs ?? 2
+        admission = status.ready ? "meeting mode (1 Linux slot, \(cpus) vCPUs)" : "admissions unavailable"
     } else {
-        admission = status.paused ? "paused" : status.ready ? "accepting assignments" : "admissions unavailable"
+        admission = status.ready ? "accepting assignments" : "admissions unavailable"
     }
     lines.append("Service: \(status.phase.rawValue), \(admission)")
     if let server = status.server { lines.append("Coordinator: \(server)") }
     if let deviceID = status.deviceID { lines.append("Device: \(deviceID)") }
     lines.append("Active assignments or cleanup: \(status.activeAssignments)")
     if let memory = status.memory {
-        lines.append("Memory reservations: \(memory.reservedBytes) / \(memory.budgetBytes) bytes; pressure: \(memory.pressure.rawValue)")
+        let reservedGiB = Double(memory.reservedBytes) / 1_073_741_824
+        let budgetGiB = Double(memory.budgetBytes) / 1_073_741_824
+        lines.append(String(format: "Memory reservations: %.1f / %.1f GiB (%llu / %llu bytes); pressure: %@",
+                            reservedGiB, budgetGiB, memory.reservedBytes, memory.budgetBytes, memory.pressure.rawValue))
+    }
+    if let power = status.hostPower {
+        var powerSummary = "Power: \(power.source.rawValue)"
+        if let percent = power.batteryPercent { powerSummary += " (\(percent)%)" }
+        if power.drainingOnAC { powerSummary += ", draining on AC" }
+        if power.lowPowerMode { powerSummary += ", low power mode" }
+        if let thermal = status.thermalState { powerSummary += "; thermal: \(thermal.rawValue)" }
+        lines.append(powerSummary)
     }
     for worker in status.workers {
         var line = "\(worker.id): \(worker.phase.rawValue), last coordinator result \(worker.connection.rawValue)"
         if let repository = worker.repository { line += ", \(repository)" }
         if let runner = worker.runner { line += ", \(runner)" }
+        if let runURL = worker.githubRunURL { line += ", run \(runURL.absoluteString)" }
         if let contact = worker.lastContactAt { line += ", last contact \(contact.formatted(.iso8601))" }
         lines.append(line)
     }

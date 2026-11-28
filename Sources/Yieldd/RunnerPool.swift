@@ -98,11 +98,11 @@ final class RunnerPoolStop: @unchecked Sendable {
 
     func wait(for interval: TimeInterval) throws {
         precondition(interval.isFinite && interval >= 0)
-        let deadline = ProcessInfo.processInfo.systemUptime + interval
+        let deadline = continuousMonotonicSeconds() + interval
 
         while true {
             try check()
-            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            let remaining = deadline - continuousMonotonicSeconds()
             guard remaining > 0 else {
                 return
             }

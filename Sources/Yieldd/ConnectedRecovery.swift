@@ -1,5 +1,44 @@
 import Foundation
 
+/// Destroys any locally persisted guest machines/clones without requiring Keychain
+/// credentials or coordinator reachability, so a locked Keychain cannot leave an
+/// orphaned Linux container running after a crash or reboot.
+func destroyLocalConnectedGuests(
+    directory: URL, server: URL, deviceID: String,
+    stop: RunnerPoolStop,
+    makeCloneStore: ((RunnerCloneKind) throws -> MacOSRunnerCloneStore)? = nil,
+    resolveContainer: () throws -> URL = { try ExecutableLocator().locate("container") },
+    output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
+) throws {
+    let leases = ConnectedRunnerStore.all(in: directory).compactMap { try? $0.load() }
+    guard !leases.isEmpty else { return }
+    control?.recovering(leases)
+    let executor = ProcessExecutor(checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline)
+    for store in ConnectedRunnerStore.all(in: directory) {
+        try stop.check()
+        do {
+            guard let lease = try store.load() else { continue }
+            try lease.requireRecoveryIdentity(server: server.absoluteString, deviceID: deviceID)
+            let id = RunnerID(value: lease.offer.runner)
+            try withConnectedRunnerActivity(id.value) {
+                switch store.platform {
+                case .macOS:
+                    try removeMacOSRunnerFiles(id, in: directory, executor: executor, makeCloneStore: makeCloneStore)
+                case .linux:
+                    let container = try resolveContainer()
+                    try AppleContainerSystem(containerURL: container, executor: executor, stateDirectory: directory).start()
+                    try AppleContainerBackend(containerURL: container, executor: executor, stateDirectory: directory,
+                                              maximumExecutionDeadline: stop.executionDeadline).destroy(id)
+                }
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            output.error(describeError(error))
+        }
+    }
+}
+
 func recoverConnectedPlatforms(
     directory: URL, server: URL, deviceID: String, token: String,
     confirmation: String?, stop: RunnerPoolStop,
