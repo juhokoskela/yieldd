@@ -79,7 +79,7 @@ final class RunnerNetworkRelay: @unchecked Sendable {
         try lifetime.fileHandleForReading.close()
         try readiness.fileHandleForWriting.close()
 
-        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        let deadline = continuousMonotonicSeconds() + timeout
         var payload = Data()
         var buffer = [UInt8](repeating: 0, count: 1_025)
         while true {
@@ -102,7 +102,7 @@ final class RunnerNetworkRelay: @unchecked Sendable {
             } else if errno != EAGAIN && errno != EINTR {
                 throw Self.posixError()
             }
-            guard ProcessInfo.processInfo.systemUptime < deadline else { throw RunnerNetworkRelayError.startupTimedOut }
+            guard continuousMonotonicSeconds() < deadline else { throw RunnerNetworkRelayError.startupTimedOut }
             var descriptorState = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
             if poll(&descriptorState, 1, 20) < 0, errno != EINTR { throw Self.posixError() }
         }

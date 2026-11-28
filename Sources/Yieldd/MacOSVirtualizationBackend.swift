@@ -1,7 +1,7 @@
 import Dispatch
 import Foundation
 
-final class MacOSVirtualizationBackend: RunnerBackend {
+final class MacOSVirtualizationBackend: RunnerBackend, @unchecked Sendable {
     let platform = RunnerPlatform.macOS
     private final class Guest {
         enum Phase {
@@ -41,7 +41,9 @@ final class MacOSVirtualizationBackend: RunnerBackend {
     // Provisioning and destruction are serialized. SSH job waits run outside this lock
     // so another caller can stop the runner or destroy its VM.
     private let lock = NSLock()
+    private let relayLock = NSLock()
     private var guests: [RunnerID: Guest] = [:]
+    private var activeRelays: [RunnerID: any RunnerNetworkRelaying] = [:]
 
     init(
         stateDirectory: URL,
@@ -118,6 +120,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
                 let ssh = MacOSGuestSSH(templateURL: templateURL, socketURL: relay.sshSocketURL, executor: executor)
                 let guest = Guest(relay: relay, ssh: ssh)
                 guests[id] = guest
+                relayLock.withLock { activeRelays[id] = relay }
                 let machine = try makeMachine(
                     clone.url,
                     MacOSVirtualMachineLifecycle.memoryBytes(for: memory),
@@ -132,7 +135,7 @@ final class MacOSVirtualizationBackend: RunnerBackend {
                 machine.start(completion: completion.complete)
                 try completion.wait(
                     operation: "starting the macOS virtual machine",
-                    deadline: ProcessInfo.processInfo.systemUptime + bootTimeout,
+                    deadline: continuousMonotonicSeconds() + bootTimeout,
                     checkCancellation: checkGuest
                 )
                 let checkRunningGuest = {
@@ -189,6 +192,28 @@ final class MacOSVirtualizationBackend: RunnerBackend {
         )
     }
 
+    func severNetwork(_ id: RunnerID, deadline: DispatchTime) {
+        let relay = relayLock.withLock { activeRelays[id] }
+        try? relay?.stop(deadline: deadline)
+    }
+
+    func gracefulStopRunner(_ id: RunnerID) {
+        let ssh: MacOSGuestSSH? = lock.withLock {
+            guard let guest = guests[id], case let .ready(machine) = guest.phase,
+                  case .running = machine.state, guest.relay.isRunning else {
+                return nil
+            }
+            return guest.ssh
+        }
+        guard let ssh else { return }
+        _ = try? ssh.execute(
+            ["/Users/runner/bin/yieldd-runner-control", "stop"],
+            timeout: 4,
+            outputCapture: .tail(maxBytes: 4096),
+            cancellable: false
+        )
+    }
+
     func destroy(_ id: RunnerID) throws {
         try lock.withLock {
             // Validate paths even when no in-memory VM survived.
@@ -219,7 +244,10 @@ final class MacOSVirtualizationBackend: RunnerBackend {
                 if failures.count == 1 && failures[0].step == .machine { throw failures[0].error }
                 throw RunnerSessionError.cleanupFailed(failures)
             }
-            if failures.isEmpty { guests.removeValue(forKey: id) }
+            if failures.isEmpty {
+                guests.removeValue(forKey: id)
+                relayLock.withLock { _ = activeRelays.removeValue(forKey: id) }
+            }
         }
         do {
             try loadStorage()?.validatePath(clones.rootURL)

@@ -355,8 +355,11 @@ func TestFailedBootstrapCleansUpAndStopsRatherThanRerunning(t *testing.T) {
 	}
 	w.run.DisplayTitle = "Runner bootstrap prototype"
 	w.run.Status, w.run.Conclusion = "completed", "startup_failure"
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "concluded startup_failure") {
-		t.Fatalf("startup failure was not reported after cleanup: error=%v", err)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatalf("failed bootstrap should back off hosted provisioning without erroring queue: %v", err)
+	}
+	if !c.hostedBackoffActive() {
+		t.Fatal("failed bootstrap did not activate hosted backoff")
 	}
 	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
 		t.Fatalf("failure cleanup or dispatch count: lease=%v runner=%v secret_present=%v dispatches=%d", singleLease(c.state), w.runner, w.secret != "", w.dispatched)

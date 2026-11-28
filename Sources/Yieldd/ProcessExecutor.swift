@@ -248,6 +248,7 @@ struct ProcessExecutor: ProcessExecuting {
         }
 
         let timeoutDeadline = request.timeout.map(deadline(after:))
+        let continuousTimeoutDeadline = request.timeout.map { continuousMonotonicSeconds() + $0 }
         let stdoutReader = PipeReader(
             fileHandle: stdoutPipe.fileHandleForReading,
             capture: request.outputCapture
@@ -285,6 +286,7 @@ struct ProcessExecutor: ProcessExecuting {
 
         var waitOutcome = waitForCompletion(
             deadline: timeoutDeadline,
+            continuousDeadline: continuousTimeoutDeadline,
             cancellable: request.cancellable,
             wait: { process.wait(timeout: $0) },
             waitIndefinitely: process.waitUntilExit
@@ -292,6 +294,7 @@ struct ProcessExecutor: ProcessExecuting {
         if case .exited = waitOutcome {
             waitOutcome = waitForCompletion(
                 deadline: timeoutDeadline,
+                continuousDeadline: continuousTimeoutDeadline,
                 cancellable: request.cancellable,
                 wait: { group.wait(timeout: $0) },
                 waitIndefinitely: group.wait
@@ -467,12 +470,13 @@ struct ProcessExecutor: ProcessExecuting {
 
     private func waitForCompletion(
         deadline: DispatchTime?,
+        continuousDeadline: TimeInterval?,
         cancellable: Bool,
         wait: (DispatchTime) -> DispatchTimeoutResult,
         waitIndefinitely: () -> Void
     ) -> ProcessWaitOutcome {
         let pollsForCancellation = cancellable && checkCancellation != nil
-        guard pollsForCancellation || maximumExecutionDeadline != nil else {
+        guard pollsForCancellation || maximumExecutionDeadline != nil || continuousDeadline != nil else {
             guard let deadline else {
                 waitIndefinitely()
                 return .exited
@@ -505,6 +509,9 @@ struct ProcessExecutor: ProcessExecuting {
             if let executionDeadline,
                now >= executionDeadline.uptimeNanoseconds {
                 return .executionDeadlineExceeded
+            }
+            if let continuousDeadline, continuousMonotonicSeconds() >= continuousDeadline {
+                return .timedOut
             }
             if let deadline, now >= deadline.uptimeNanoseconds {
                 return .timedOut

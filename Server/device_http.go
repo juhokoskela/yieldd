@@ -49,6 +49,9 @@ func (s *coordinatorLoop) run() error {
 		if s.worker.verificationPaused() && (deadline.IsZero() || s.worker.verificationRetryAt.Before(deadline)) {
 			deadline = s.worker.verificationRetryAt
 		}
+		if s.worker.hostedBackoffActive() && (deadline.IsZero() || s.worker.hostedBackoffUntil.Before(deadline)) {
+			deadline = s.worker.hostedBackoffUntil
+		}
 		protectDevices := s.protectColdDevices()
 		for _, l := range s.worker.state.Leases {
 			if protectDevices && l.Local == nil {

@@ -50,7 +50,10 @@ func (l *lease) validateTransition(next *lease) error {
 	}
 	previous, current := l.Local, next.Local
 	if previous.Slot != current.Slot || previous.DeviceID != current.DeviceID ||
-		(previous.JobStarted && !current.JobStarted) || (previous.JobCompleted && (!current.JobCompleted || current.JobSucceeded != previous.JobSucceeded)) {
+		(previous.JobStarted && !current.JobStarted) || (previous.JobCompleted && (!current.JobCompleted || current.JobSucceeded != previous.JobSucceeded)) ||
+		(previous.Fenced && !current.Fenced) ||
+		(previous.FenceIntent && !current.FenceIntent && !current.Fenced && !current.JobStarted) ||
+		(previous.WorkflowRunID != 0 && current.WorkflowRunID != previous.WorkflowRunID) {
 		return errors.New("local assignment identity and job progress cannot be reset")
 	}
 	if current.Phase == previous.Phase ||
@@ -176,7 +179,7 @@ func (s *stateStore) read() (*state, error) {
 	if value.ScaleSetID < 0 || (len(value.Leases) != 0 && value.ScaleSetID == 0) {
 		return nil, errors.New("invalid scale set identity")
 	}
-	if len(value.Leases) > maximumAssignments {
+	if len(value.Leases) > maximumAssignments*2 {
 		return nil, errors.New("too many saved assignments")
 	}
 	var slots [maximumAssignments]bool
@@ -239,10 +242,10 @@ func (l *lease) validateLocal(device string) error {
 		return nil
 	}
 	a := l.Local
-	if (a.JobSucceeded && !a.JobCompleted) || (a.JobCompleted && !a.JobStarted) || ((a.JobStarted || a.JobCompleted) && a.Phase != localIssued) {
+	if (a.JobSucceeded && !a.JobCompleted) || (a.JobCompleted && !a.JobStarted) || ((a.JobStarted || a.JobCompleted || a.Fenced || a.FenceIntent) && a.Phase != localIssued) || (a.FenceIntent && a.Fenced) {
 		return errors.New("invalid local job state")
 	}
-	if device == "" || a.DeviceID != device || a.Slot < 0 || a.Slot >= maximumAssignments || a.Expires.IsZero() || l.DispatchIntent {
+	if device == "" || a.DeviceID != device || a.Slot < 0 || a.Slot >= maximumAssignments || a.Expires.IsZero() || l.DispatchIntent || a.WorkflowRunID < 0 {
 		return errors.New("invalid local lease identity")
 	}
 	switch a.Phase {

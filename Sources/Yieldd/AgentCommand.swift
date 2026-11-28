@@ -13,6 +13,7 @@ struct AgentCommand: ParsableCommand {
             AgentInstallCommand.self,
             AgentStatusCommand.self,
             AgentPauseCommand.self,
+            AgentReclaimCommand.self,
             AgentResumeCommand.self,
             AgentDrainCommand.self,
             AgentUninstallCommand.self,
@@ -88,9 +89,11 @@ struct AgentRunCommand: ParsableCommand {
             let endpoint = AgentControlEndpoint(control: control)
             endpoint.start()
             defer { endpoint.stop() }
-            try prepareConnectedAgentKeychain()
-            let token = try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
-            try runConnectedService(server: connected.server, deviceID: connected.deviceID, token: token,
+            try runConnectedService(server: connected.server, deviceID: connected.deviceID,
+                loadToken: {
+                    try prepareConnectedAgentKeychain()
+                    return try ConnectedAgentCredentials.keychain.load(connected.credentialAccount)
+                },
                 platforms: connected.platforms, template: connected.template, stop: stop, stateDirectory: store.directory,
                 resolveContainer: connected.resolveContainer, output: .agentLog, control: control)
         } catch where isCancellation(error) {

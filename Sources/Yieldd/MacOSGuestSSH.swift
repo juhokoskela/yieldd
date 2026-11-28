@@ -173,7 +173,7 @@ struct MacOSGuestConnection {
     init(
         ssh: MacOSGuestSSH,
         currentTime: @escaping () -> TimeInterval = {
-            ProcessInfo.processInfo.systemUptime
+            continuousMonotonicSeconds()
         }
     ) {
         checkTransport = ssh.checkTransport

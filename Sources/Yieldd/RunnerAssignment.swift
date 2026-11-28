@@ -5,7 +5,7 @@ struct ReservedRunnerJob {
     let checkCancellation: () throws -> Void
     let wait: (TimeInterval) throws -> Void
     let stateChanged: (RunnerSessionState) -> Void
-    var currentTime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var currentTime: () -> TimeInterval = continuousMonotonicSeconds
 
     func run(id: RunnerID, pickupTimeout: TimeInterval) throws {
         try checkCancellation()

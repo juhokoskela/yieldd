@@ -59,6 +59,10 @@ type coordinator struct {
 	maxFallbackRunners     int
 	demandRetryAt          time.Time
 	hostedCleanupRetry     map[string]time.Time
+	hostedBackoffUntil     time.Time
+	hostedBackoffDelay     time.Duration
+	lastBusyCheck          map[string]time.Time
+	jobStartedByEvent      map[string]bool
 }
 
 type assignment struct {
@@ -113,6 +117,46 @@ func (c *coordinator) hasIssuedLocal() bool {
 	return false
 }
 
+func (l *lease) countsAsSupply() bool {
+	if l == nil {
+		return false
+	}
+	if l.CleanupIntent {
+		// An uncompleted started local job waiting for GitHub to clear runnerBusy
+		// still accounts for 1 unit of TotalAssignedJobs and must not spawn extra runners.
+		return l.Local != nil && l.Local.JobStarted && !l.Local.JobCompleted && !l.Local.Fenced
+	}
+	if local := l.Local; local != nil && local.Phase == localIssued {
+		if local.Fenced || local.JobCompleted || (!local.JobStarted && local.expired()) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *coordinator) supplyCount() int {
+	count := 0
+	for _, l := range c.state.Leases {
+		if l.countsAsSupply() {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *coordinator) hostedBackoffActive() bool {
+	return !c.hostedBackoffUntil.IsZero() && time.Now().Before(c.hostedBackoffUntil)
+}
+
+func (c *coordinator) hasNonSupplyLease() bool {
+	for _, l := range c.state.Leases {
+		if !l.countsAsSupply() {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *coordinator) needsDemandRefresh() bool {
 	if c.refreshDemand {
 		return true
@@ -139,11 +183,14 @@ func (c *coordinator) surplusAssignments(count int) map[string]bool {
 	for _, name := range c.names() {
 		l := c.state.Leases[name]
 		if l.CleanupIntent {
+			if l.countsAsSupply() {
+				count--
+			}
 			continue
 		}
 		if local := l.Local; local != nil && local.Phase == localIssued {
-			// Retired workers still hold their slots, but no longer satisfy demand.
-			if local.JobCompleted || (!local.JobStarted && local.expired()) {
+			// Retired or fenced workers still hold their slots, but no longer satisfy demand.
+			if local.Fenced || local.JobCompleted || (!local.JobStarted && local.expired()) {
 				continue
 			}
 			if !local.JobStarted {
@@ -190,6 +237,10 @@ func (a *assignment) replace(nextLease *lease) error {
 	if err := a.save(&next); err != nil {
 		return &journalWriteError{err}
 	}
+	if nextLease == nil && a.lease != nil {
+		delete(a.lastBusyCheck, a.lease.Name)
+		delete(a.jobStartedByEvent, a.lease.Name)
+	}
 	*a.state = next
 	a.lease = nextLease
 	a.device.update(a.state)
@@ -197,7 +248,7 @@ func (a *assignment) replace(nextLease *lease) error {
 }
 
 func (c *coordinator) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, jobStarted); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, job.WorkflowRunID, jobStarted); err != nil {
 		return err
 	}
 	c.logger.Info("Job started", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID)
@@ -209,7 +260,7 @@ func (c *coordinator) HandleJobCompleted(_ context.Context, job *scaleset.JobCom
 	if strings.EqualFold(job.Result, "succeeded") || strings.EqualFold(job.Result, "success") {
 		event = jobSucceeded
 	}
-	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, event); err != nil {
+	if err := c.assigned(job.RunnerName).recordLocalJob(job.RunnerID, job.WorkflowRunID, event); err != nil {
 		return err
 	}
 	c.logger.Info("Job completed", "runner", job.RunnerName, "workflow_run", job.WorkflowRunID, "result", job.Result)
@@ -294,7 +345,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	// A full hosted-only queue can observe and clean up its existing runs
 	// without a separate demand read. Cleanup wakes it when capacity returns.
 	fullHosted := c.state.Config.DeviceID == "" && c.fallbackFull()
-	if count > 0 && !fullHosted && !c.demandUnavailable && c.paused == nil && c.needsDemandRefresh() {
+	demandRefreshed := false
+	if count > 0 && !fullHosted && !c.demandUnavailable && c.paused == nil && (c.needsDemandRefresh() || !c.demandRetryAt.IsZero()) {
 		var err error
 		count, err = c.readPlacementDemand(ctx)
 		if err != nil {
@@ -302,6 +354,9 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		}
 		if ctx.Err() == context.DeadlineExceeded && !c.demandRetryAt.IsZero() {
 			return nil
+		}
+		if c.demandRetryAt.IsZero() {
+			demandRefreshed = true
 		}
 	}
 	var surplus map[string]bool
@@ -450,13 +505,29 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	countsAgree := count == listenerCount
 	count = min(count, maximumAssignments)
-	if count <= len(c.state.Leases) {
+	if count <= c.supplyCount() {
 		// The listener can repeat a stale positive count on every empty poll.
 		if count > 0 && countsAgree {
 			c.refreshDemand = false
 		}
 		c.device.forget(c.state.Owner)
 		return nil
+	}
+	if !demandRefreshed && c.hasNonSupplyLease() {
+		// Confirm real GitHub demand before provisioning replacement capacity
+		// alongside an unacknowledged completed or expired local lease.
+		refreshed, err := c.readPlacementDemand(ctx)
+		if err != nil {
+			return err
+		}
+		if !c.demandRetryAt.IsZero() {
+			return nil
+		}
+		count = min(refreshed, maximumAssignments)
+		if count <= c.supplyCount() {
+			c.device.forget(c.state.Owner)
+			return nil
+		}
 	}
 	// Registration runs on this queue's event loop. Offer the next worker only
 	// after issuance so slow GitHub I/O cannot consume another offer's five seconds.
@@ -465,6 +536,18 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if c.hasUnfencedExpiredLocal() {
+		ready, _, err := c.fenceExpiredLocalForOverflow(ctx)
+		if err != nil {
+			return err
+		}
+		if !ready || count <= c.supplyCount() {
+			return nil
+		}
+	}
+	if len(c.state.Leases) >= maximumAssignments*2 {
+		return nil
 	}
 	if c.state.Config.LocalOnly {
 		c.device.wait(c.state.Owner)
@@ -478,8 +561,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		l.Local = &localLease{DeviceID: c.state.Config.DeviceID, Slot: slot, Phase: localOffered, Expires: time.Now().UTC().Add(offerLifetime)}
 	} else if c.state.Config.LocalOnly {
 		return nil
-	} else if c.fallbackFull() {
-		if countsAgree {
+	} else if c.fallbackFull() || c.hostedBackoffActive() {
+		if countsAgree && c.fallbackFull() {
 			c.refreshDemand = false
 		}
 		if c.state.Config.DeviceID != "" {
@@ -501,6 +584,89 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	// Give device requests a turn before the next provisioning operation.
 	c.device.redrive(c.state.Owner)
 	return nil
+}
+
+func (c *coordinator) hasUnfencedExpiredLocal() bool {
+	for _, name := range c.names() {
+		l := c.state.Leases[name]
+		if l != nil && !l.CleanupIntent && l.Local != nil && l.Local.Phase == localIssued && !l.Local.JobStarted && l.Local.expired() && !l.Local.Fenced {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) (ready bool, busyPromoted bool, err error) {
+	for _, name := range c.names() {
+		l := c.state.Leases[name]
+		if l == nil || l.CleanupIntent || l.Local == nil || l.Local.Phase != localIssued || l.Local.JobStarted || !l.Local.expired() || l.Local.Fenced {
+			continue
+		}
+		busy, err := c.bootstrap.runnerBusy(ctx, c.state.Config.Repository, l.RunnerID)
+		if err != nil {
+			if ctx.Err() == context.Canceled {
+				return false, busyPromoted, ctx.Err()
+			}
+			if transientFailure(err) {
+				c.demandRetryAt = time.Now().Add(cleanupRetryDelay)
+				c.logger.Warn("Transient error checking expired local runner before overflow; retrying", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
+				return false, busyPromoted, nil
+			}
+			return false, busyPromoted, err
+		}
+		if busy {
+			next := *l.Local
+			next.JobStarted = true
+			next.FenceIntent = false
+			if err := c.assigned(name).saveLocal(&next); err != nil {
+				return false, busyPromoted, err
+			}
+			busyPromoted = true
+			continue
+		}
+		if !l.Local.FenceIntent {
+			// Persist pending fence intent before RemoveRunner so a lost response cannot
+			// allow a delayed JobStarted event to reauthorize a deleted runner.
+			intent := *l.Local
+			intent.FenceIntent = true
+			if err := c.assigned(name).saveLocal(&intent); err != nil {
+				return false, busyPromoted, err
+			}
+			delete(c.lastBusyCheck, name)
+			delete(c.jobStartedByEvent, name)
+			l = c.state.Leases[name]
+		}
+		if err := c.runners.RemoveRunner(ctx, int64(l.RunnerID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
+			if errors.Is(err, scaleset.JobStillRunningError) {
+				next := *l.Local
+				next.JobStarted = true
+				next.FenceIntent = false
+				if saveErr := c.assigned(name).saveLocal(&next); saveErr != nil {
+					return false, busyPromoted, saveErr
+				}
+				busyPromoted = true
+				continue
+			}
+			if ctx.Err() == context.Canceled {
+				return false, busyPromoted, ctx.Err()
+			}
+			// Scale Set SDK HTTP errors (including 5xx) are untyped errors; retry on demandRetryAt
+			// instead of permanently pausing the queue while local siblings are active.
+			c.demandRetryAt = time.Now().Add(cleanupRetryDelay)
+			c.logger.Warn("Failed to fence expired local runner before overflow; retrying", "runner", name, "retry_delay", cleanupRetryDelay, "error", &sdkError{"fence expired local runner", err})
+			return false, busyPromoted, nil
+		}
+		next := *l.Local
+		next.Fenced = true
+		next.FenceIntent = false
+		if err := c.assigned(name).saveLocal(&next); err != nil {
+			return false, busyPromoted, err
+		}
+		delete(c.lastBusyCheck, name)
+		delete(c.jobStartedByEvent, name)
+		c.logger.Warn("Expired unstarted local runner fenced before overflow", "runner", name, "device", l.Local.DeviceID)
+	}
+	return true, busyPromoted, nil
 }
 
 // A failed read cannot authorize a new runner. Keep the queue available for
@@ -761,8 +927,15 @@ func (a *assignment) finishCleanup(ctx context.Context, recoverOnly bool) (bool,
 	} else {
 		a.logger.Info("Bootstrap cleaned up", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion)
 	}
-	if l.RunID != 0 && l.Conclusion != "success" && !recoverOnly {
-		return true, fmt.Errorf("bootstrap %d concluded %s; stopped after cleanup rather than automatically retrying the workload", l.RunID, l.Conclusion)
+	if l.RunID != 0 && !recoverOnly {
+		if l.Conclusion == "success" {
+			a.hostedBackoffDelay = 0
+			a.hostedBackoffUntil = time.Time{}
+		} else {
+			a.hostedBackoffDelay = min(max(cleanupRetryDelay, a.hostedBackoffDelay*2), verificationMaximumRetryDelay)
+			a.hostedBackoffUntil = time.Now().Add(a.hostedBackoffDelay)
+			a.logger.Warn("Bootstrap concluded unsuccessfully; backing off hosted provisioning", "runner", l.Name, "run", l.RunID, "conclusion", l.Conclusion, "retry_delay", a.hostedBackoffDelay)
+		}
 	}
 	return true, nil
 }
@@ -785,9 +958,18 @@ func (a *assignment) cleanup(ctx context.Context) error {
 			return err
 		}
 		if busy {
+			if saveErr := a.markLocalCleanupBusy(); saveErr != nil {
+				return saveErr
+			}
 			return runnerStillBusy
 		}
 		if err := a.runners.RemoveRunner(ctx, int64(runner.ID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
+			if errors.Is(err, scaleset.JobStillRunningError) {
+				if saveErr := a.markLocalCleanupBusy(); saveErr != nil {
+					return saveErr
+				}
+				return runnerStillBusy
+			}
 			return &sdkError{"remove runner", err}
 		}
 	}
@@ -802,6 +984,16 @@ func (a *assignment) cleanup(ctx context.Context) error {
 	delete(a.reportedLocalHold, l.Name)
 	if l.Local == nil || runner != nil || l.Local.Phase == localIssued {
 		a.refreshDemand = true
+	}
+	return nil
+}
+
+func (a *assignment) markLocalCleanupBusy() error {
+	if a.lease != nil && a.lease.Local != nil && a.lease.Local.Phase == localIssued && !a.lease.Local.JobStarted && !a.lease.Local.Fenced {
+		next := *a.lease.Local
+		next.JobStarted = true
+		next.FenceIntent = false
+		return a.saveLocal(&next)
 	}
 	return nil
 }

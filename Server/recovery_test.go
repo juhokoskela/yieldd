@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -511,8 +510,8 @@ func TestFailedBootstrapConclusionSurvivesInterruptedCleanup(t *testing.T) {
 	}
 	c.state, w.deleteErr = saved, nil
 	w.getErr = errors.New("workflow API unavailable during cleanup")
-	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err == nil || !strings.Contains(err.Error(), "concluded startup_failure") {
-		t.Fatal("bootstrap failure not preserved", err)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || !c.hostedBackoffActive() {
+		t.Fatal("bootstrap failure backoff not activated", err)
 	}
 	if singleLease(c.state) != nil || w.runner != nil || w.secret != "" || w.dispatched != 1 {
 		t.Fatal("terminal cleanup did not finish")
@@ -543,8 +542,8 @@ func TestMissingWorkflowRequiresAbsentRunnerBeforeCleanup(t *testing.T) {
 					}
 					return
 				}
-				if !done || (err != nil) == recoverOnly || singleLease(c.state) != nil || w.secret != "" || w.dispatched != 1 {
-					t.Fatal("missing workflow did not clean up while preserving unknown conclusion", done, err)
+				if !done || err != nil || singleLease(c.state) != nil || w.secret != "" || w.dispatched != 1 || (!recoverOnly && !c.hostedBackoffActive()) {
+					t.Fatal("missing workflow did not clean up while recording hosted backoff", done, err)
 				}
 			})
 		}

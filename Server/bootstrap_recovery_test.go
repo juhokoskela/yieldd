@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -155,14 +154,14 @@ func TestIndependentBootstrapFailureIsNotClearedWithIdentityPause(t *testing.T) 
 		w.run.ID--
 		w.run.Status, w.run.Conclusion = "completed", "failure"
 		time.Sleep(5 * time.Second)
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused == nil {
-			t.Fatal("bootstrap failure revoked the issued sibling", err)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || c.paused != nil || !c.hostedBackoffActive() {
+			t.Fatal("bootstrap failure should clear identity pause and back off hosted only", err, c.paused)
 		}
 		if err := c.completeDevice(t.Context(), request); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err == nil || !strings.Contains(err.Error(), "concluded failure") || w.dispatched != 1 {
-			t.Fatal("an independent failure was cleared or workload retried", err, w.events)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil || !c.hostedBackoffActive() || w.dispatched != 1 {
+			t.Fatal("hosted backoff did not prevent immediate retry", err, w.events)
 		}
 	})
 }

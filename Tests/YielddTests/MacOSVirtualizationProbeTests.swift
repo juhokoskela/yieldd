@@ -163,7 +163,7 @@ func virtualMachineCompletionReceivesCrossThreadResult() throws {
     #expect(
         try completion.wait(
             operation: "testing asynchronous completion",
-            deadline: ProcessInfo.processInfo.systemUptime + 1,
+            deadline: continuousMonotonicSeconds() + 1,
             checkCancellation: {}
         ) == 42)
 }
@@ -175,7 +175,7 @@ func virtualMachineCompletionTimesOut() throws {
     do {
         try completion.wait(
             operation: "testing timeout",
-            deadline: ProcessInfo.processInfo.systemUptime + 0.001,
+            deadline: continuousMonotonicSeconds() + 0.001,
             checkCancellation: {}
         )
         Issue.record("Expected completion to time out")

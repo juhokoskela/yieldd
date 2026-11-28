@@ -65,10 +65,19 @@ protocol RunnerBackend {
         on id: RunnerID
     ) throws -> ProcessResult
     func destroy(_ id: RunnerID) throws
+    func severNetwork(_ id: RunnerID, deadline: DispatchTime)
+    func applyCPUQuota(_ cpus: Int, on id: RunnerID) throws
+    func gracefulStopRunner(_ id: RunnerID)
 }
 
 extension RunnerBackend {
     func prepare() throws {}
+    func severNetwork(_ id: RunnerID, deadline: DispatchTime) {}
+    func severNetwork(_ id: RunnerID) { severNetwork(id, deadline: .now() + .milliseconds(500)) }
+    func applyCPUQuota(_ cpus: Int, on id: RunnerID) throws {}
+    func gracefulStopRunner(_ id: RunnerID) {
+        _ = try? exec(["yieldd-runner-control", "stop"], timeout: 4, outputCapture: .tail(maxBytes: 4096), as: .root, on: id)
+    }
 
     func create(id: RunnerID, memory: RunnerMemoryAllocation, recordIntent: () throws -> Void) throws {
         try prepare()

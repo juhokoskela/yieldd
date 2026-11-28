@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import os
 
 enum ConnectedPlatform: String, ExpressibleByArgument, Sendable {
     case linux, macos
@@ -60,6 +61,19 @@ func runConnectedService(
     resolveContainer: () throws -> URL = { try ExecutableLocator().locate("container") },
     output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
 ) throws {
+    try runConnectedService(
+        server: serverURL, deviceID: deviceID, loadToken: { token }, platforms: platforms, template: template,
+        confirmation: confirmation, stop: stop, stateDirectory: stateDirectory,
+        resolveContainer: resolveContainer, output: output, control: control
+    )
+}
+
+func runConnectedService(
+    server serverURL: URL, deviceID: String, loadToken: () throws -> String, platforms: [RunnerPlatform], template: URL?,
+    confirmation: String? = nil, stop: RunnerPoolStop, stateDirectory: URL? = nil,
+    resolveContainer: () throws -> URL = { try ExecutableLocator().locate("container") },
+    output: RunnerServiceOutput = .terminal, control: ConnectedAgentControl? = nil
+) throws {
     try MacOSVirtualMachineLifecycle.requireSupportedHost()
     try withRunnerOwnership(in: stateDirectory, connected: true) { leaseStore in
         if let installed = try ConnectedAgentStore(directory: leaseStore.directory).load() {
@@ -70,10 +84,20 @@ func runConnectedService(
         }
         let directory = leaseStore.directory
         let ownershipDescriptor = leaseStore.ownershipDescriptor
+        // Destroy any orphaned local guests while holding runner ownership BEFORE requiring
+        // Keychain credentials so a locked Keychain cannot leave an abandoned guest burning CPU,
+        // and another active yieldd process's guest is never touched.
+        let locallyDestroyed = try destroyLocalConnectedGuests(
+            leaseStore: leaseStore, server: serverURL, deviceID: deviceID,
+            confirmation: confirmation, stop: stop,
+            resolveContainer: resolveContainer, output: output, control: control
+        )
+        let token = try loadToken()
         // Recover every persisted platform, even if it is no longer enabled.
         // macOS recovery removes abandoned clones without requiring the template.
         try recoverConnectedPlatforms(directory: directory, server: serverURL, deviceID: deviceID,
                                       token: token, confirmation: confirmation, stop: stop,
+                                      alreadyDestroyed: locallyDestroyed,
                                       resolveContainer: resolveContainer, output: output, control: control)
         control?.starting()
         if confirmation != nil {
@@ -110,12 +134,43 @@ func runConnectedService(
         let slots = connectedWorkers(backends: backends, memory: memory) { platform, count in
             output.info("Offering up to \(count) \(platform.rawValue) workers. All platforms compete for the same memory budget; idle workers reserve no RAM.")
         }
-        let archiveService = try cachePolicy.map { policy in
-            try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
-                policy: policy, ownershipDescriptor: ownershipDescriptor, stop: stop)
+        let archiveService: ArchiveCacheService?
+        if let policy = cachePolicy {
+            do {
+                archiveService = try ArchiveCacheService.start(storage: storage, stateDirectory: directory,
+                    policy: policy, ownershipDescriptor: ownershipDescriptor, stop: stop)
+            } catch {
+                let message = "Local archive cache unavailable; continuing without local cache: \(describeError(error))"
+                output.warning(message)
+                control?.recordError(message)
+                archiveService = nil
+            }
+        } else {
+            archiveService = nil
         }
         defer { archiveService?.stop() }
         let cacheSocket = archiveService?.socketURL
+        let sleepCoordinator = ConnectedSleepCoordinator()
+        let powerMonitor = SystemPowerMonitor(
+            onWillSleep: {
+                if let control {
+                    control.handleSystemWillSleep()
+                } else {
+                    sleepCoordinator.handleSystemWillSleep()
+                }
+            },
+            onDidWake: {
+                if let control {
+                    control.handleSystemDidWake()
+                } else {
+                    sleepCoordinator.handleSystemDidWake()
+                }
+            }
+        )
+        guard powerMonitor.start() else {
+            throw SystemPowerMonitorError.registrationFailed
+        }
+        defer { powerMonitor.stop() }
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
         if control?.isPaused == true { output.info("Connected agent is paused. New jobs will wait until admission resumes.") }
@@ -125,56 +180,147 @@ func runConnectedService(
             let client = ConnectedHTTPClient(server: serverURL, deviceID: deviceID, token: token,
                                              platform: platform, slot: worker.slot, checkCancellation: stop.check, maximumExecutionDeadline: stop.executionDeadline,
                 connectionChanged: { state, error in control?.connection(worker: workerID, state: state, error: error) })
-            let authorization = ConnectedExecutionAuthorization(renew: client.renew, checkCancellation: stop.check)
+            let authorization = ConnectedExecutionAuthorization(
+                renewWithMetadata: client.renewWithMetadata,
+                checkCancellation: stop.check,
+                initialOfflineGrace: ConnectedExecutionAuthorization.preStartOfflineGrace,
+                onWorkflowRunID: { control?.recordWorkflowRun(worker: workerID, runID: $0) }
+            )
             let executor = ProcessExecutor(checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline)
             let network = try RunnerNetwork(stateDirectory: directory, platform: platform, cacheSocket: cacheSocket)
             let backend: any RunnerBackend
+            let severNetworkHandler: @Sendable (RunnerID, DispatchTime) -> Void
+            let applyCPUQuotaHandler: @Sendable (Int, RunnerID) -> Void
             switch worker.backend {
             case let .linux(containerURL):
-                backend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
+                let linuxBackend = try AppleContainerBackend(containerURL: containerURL, executor: executor,
                     stateDirectory: directory, ownershipDescriptor: ownershipDescriptor, network: network,
                     checkCancellation: authorization.check, maximumExecutionDeadline: stop.executionDeadline,
                     dockerReadiness: DockerReadiness(wait: stop.wait, checkCancellation: authorization.check))
+                backend = linuxBackend
+                severNetworkHandler = { linuxBackend.severNetwork($0, deadline: $1) }
+                applyCPUQuotaHandler = { cpus, id in try? linuxBackend.applyCPUQuota(cpus, on: id) }
             case let .macOS(templateURL):
-                backend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
+                let macBackend = try MacOSVirtualizationBackend(stateDirectory: directory, templateURL: templateURL,
                     cloneRootURL: RunnerStorage.cloneRoot(in: directory),
                     executor: executor, network: network, checkCancellation: authorization.check, wait: stop.wait,
                     maximumExecutionDeadline: stop.executionDeadline)
+                backend = macBackend
+                severNetworkHandler = { macBackend.severNetwork($0, deadline: $1) }
+                applyCPUQuotaHandler = { _, _ in }
             }
-            let runner = ConnectedRunner(backend: backend, store: ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot),
+            let store = ConnectedRunnerStore(directory: directory, platform: platform, slot: worker.slot)
+            let runner = ConnectedRunner(backend: backend, store: store,
                 server: serverURL.absoluteString, deviceID: deviceID, accept: client.accept, complete: client.complete,
                 authorization: authorization, wait: stop.wait, localCache: cacheSocket != nil,
                 stateChanged: {
                     control?.session(worker: workerID, state: $0)
                     reportRunnerServiceState($0, output: output)
-                })
-            try runConnectedClient(checkCancellation: stop.check, recover: {
-                control?.update(worker: workerID, phase: .recovering)
-                try runner.recover()
-                output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
-            }, acquire: {
-                try memory.tryAcquire(reserving: platform.memoryReservationBytes)
-            }, release: memory.release, prepareToPoll: {
-                try archiveService?.ensureRunning()
-            }, poll: {
-                control?.update(worker: workerID, phase: .idle)
-                return try client.poll()
-            }, decline: client.decline, run: { offer, allocation, release in
-                control?.assign(worker: workerID, offer: offer)
-                output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
-                try runner.run(offer, memory: allocation, releaseCapacity: release)
-            }, wait: stop.wait, retrying: { error in
-                output.info("Retrying \(platform.rawValue) slot \(worker.slot) in five seconds: \(describeError(error))")
-            }, available: {
-                memory.isAvailable(reserving: platform.memoryReservationBytes)
-            }, blocked: {
-                control?.update(worker: workerID, phase: .waitingForMemory)
-                output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
-            }, paused: { control?.isPaused ?? false }, beginAssignment: {
-                control?.beginAssignment(worker: workerID) ?? true
-            }, finishAssignment: {
-                control?.finishAssignment(worker: workerID)
-            })
+                },
+                initialLinuxCPUs: { control?.effectiveLinuxCPUs ?? AppleContainerBackend.virtualCPUs },
+                onWarning: { output.warning($0) })
+            let activeRunnerID = OSAllocatedUnfairLock<RunnerID?>(initialState: nil)
+            let slotHandler = AgentSlotControlHandler(
+                abort: { reason, expected in authorization.abort(reason: reason, expectedRunner: expected) },
+                severNetwork: { deadline in
+                    if let id = activeRunnerID.withLock({ $0 }) {
+                        severNetworkHandler(id, deadline)
+                    }
+                },
+                applyCPUQuota: { cpus, expectedRunner in
+                    guard let id = activeRunnerID.withLock({ $0 }) else { return }
+                    if let expectedRunner, id.value != expectedRunner { return }
+                    applyCPUQuotaHandler(cpus, id)
+                }
+            )
+            if let control {
+                control.registerSlotHandler(worker: workerID, handler: slotHandler)
+            } else {
+                sleepCoordinator.register(worker: workerID, handler: slotHandler)
+            }
+            defer {
+                if let control {
+                    control.unregisterSlotHandler(worker: workerID)
+                } else {
+                    sleepCoordinator.unregister(worker: workerID)
+                }
+            }
+            let slotReservation = ConnectedSlotReservation()
+            var platformBackoff: TimeInterval = 5
+            while true {
+                try stop.check()
+                do {
+                    try runConnectedClient(checkCancellation: stop.check, recover: {
+                        control?.update(worker: workerID, phase: .recovering)
+                        try runner.recover()
+                        output.info("Connected \(platform.rawValue) ARM64 slot \(worker.slot) ready. Idle polling reserves no RAM and starts no guest.")
+                    }, acquire: {
+                        try memory.tryAcquire(reserving: platform.memoryReservationBytes)
+                    }, release: memory.release, prepareToPoll: {
+                        try archiveService?.ensureRunning()
+                    }, poll: {
+                        control?.update(worker: workerID, phase: .idle)
+                        return try client.poll()
+                    }, decline: client.decline, run: { offer, allocation, release in
+                        output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
+                        try runner.run(offer, memory: allocation, releaseCapacity: release)
+                        platformBackoff = 5
+                    }, wait: stop.wait, retrying: { error in
+                        output.info("Retrying \(platform.rawValue) slot \(worker.slot) in five seconds: \(describeError(error))")
+                    }, available: {
+                        memory.isAvailable(reserving: platform.memoryReservationBytes)
+                    }, blocked: {
+                        control?.update(worker: workerID, phase: .waitingForMemory)
+                        output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
+                    }, paused: {
+                        if let control { return !control.canPoll(platform: platform) }
+                        return sleepCoordinator.isPausedForWake() || SystemPowerMonitor.isDarkWake()
+                    }, beginOfferAssignment: { offer in
+                        // Register the runner UUID and authorization target BEFORE exposing the slot
+                        // as active so a concurrent sleep or reclaim can never be dropped.
+                        let id = RunnerID(value: offer.runner)
+                        activeRunnerID.withLock { $0 = id }
+                        authorization.prepare(runner: offer.runner)
+                        let admitted: Bool
+                        if let control {
+                            admitted = control.beginAssignment(worker: workerID, platform: platform, offer: offer)
+                        } else {
+                            admitted = !SystemPowerMonitor.isDarkWake() && sleepCoordinator.beginAssignment()
+                        }
+                        if !admitted {
+                            authorization.stop()
+                            activeRunnerID.withLock { $0 = nil }
+                        }
+                        return admitted
+                    }, finishAssignment: {
+                        authorization.stop()
+                        activeRunnerID.withLock { $0 = nil }
+                        control?.finishAssignment(worker: workerID)
+                    }, slotReservation: slotReservation)
+                    return
+                } catch where isCancellation(error) {
+                    throw error
+                } catch where isFatalConnectedServiceError(error) {
+                    throw error
+                } catch {
+                    // Contain platform/pre-start errors (e.g., macOS 2-VM limit) to this slot
+                    // instead of tearing down healthy sibling slots across the pool.
+                    // Release capacity only when store.load() succeeds and confirms no persisted lease.
+                    do {
+                        if try store.load() == nil {
+                            slotReservation.release(using: memory.release)
+                            authorization.stop()
+                            activeRunnerID.withLock { $0 = nil }
+                            control?.finishAssignment(worker: workerID)
+                        }
+                    } catch {}
+                    let message = "Paused \(platform.rawValue) slot \(worker.slot) for \(Int(platformBackoff))s after error: \(describeError(error))"
+                    output.warning(message)
+                    control?.connection(worker: workerID, state: .retrying, error: message)
+                    try stop.wait(for: platformBackoff)
+                    platformBackoff = min(60, platformBackoff * 2)
+                }
+            }
         }
     }
 }
@@ -196,4 +342,17 @@ func connectedWorkers(backends: [RunnerSlotBackend], memory: RunnerMemoryAdmissi
         report(backend.platform, count)
         return (0..<count).map { ConnectedWorker(backend: backend, slot: $0) }
     }
+}
+
+private func isFatalConnectedServiceError(_ error: any Error) -> Bool {
+    if let connected = error as? ConnectedRunnerError {
+        switch connected {
+        case .previousVersionState, .invalidState, .identityChanged, .registrationReconciliationRequired,
+             .confirmationMismatch, .http(401, _, _), .http(403, _, _):
+            return true
+        default:
+            return false
+        }
+    }
+    return false
 }

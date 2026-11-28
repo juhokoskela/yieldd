@@ -114,6 +114,31 @@ func (q *deviceQueue) restore(s *state) error {
 	return nil
 }
 
+func (q *deviceQueue) clearAvailability(index int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	slot := &q.slots[index]
+	if slot.owner == "" {
+		slot.availableUntil = time.Time{}
+	}
+}
+
+func (q *deviceQueue) slotIdle(index int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.slots[index].idle(time.Now())
+}
+
+func (q *deviceQueue) expireAllAvailability() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i := range q.slots {
+		if q.slots[i].owner == "" {
+			q.slots[i].availableUntil = time.Time{}
+		}
+	}
+}
+
 func (q *deviceQueue) update(s *state) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -198,6 +223,7 @@ func (d *deviceRouter) poll(ctx context.Context, request deviceRequest) (*device
 	defer timer.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
+			d.queue.clearAvailability(request.Slot)
 			return nil, err
 		}
 		if offer := d.queue.pollNow(request.Slot); offer != nil {
@@ -205,6 +231,7 @@ func (d *deviceRouter) poll(ctx context.Context, request deviceRequest) (*device
 		}
 		select {
 		case <-ctx.Done():
+			d.queue.clearAvailability(request.Slot)
 			return nil, ctx.Err()
 		case <-timer.C:
 			return nil, nil

@@ -12,6 +12,8 @@ final class ConnectedRunner {
     let wait: (TimeInterval) throws -> Void
     var stateChanged: (RunnerSessionState) -> Void
     var currentTime: () -> TimeInterval
+    var initialLinuxCPUs: () -> Int
+    var onWarning: (String) -> Void
 
     // Valid only for this worker process. A restart must prove absence again.
     private var absent: RunnerID?
@@ -21,7 +23,9 @@ final class ConnectedRunner {
          authorization: ConnectedExecutionAuthorization, wait: @escaping (TimeInterval) throws -> Void,
          localCache: Bool = false,
          stateChanged: @escaping (RunnerSessionState) -> Void = { _ in },
-         currentTime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         currentTime: @escaping () -> TimeInterval = continuousMonotonicSeconds,
+         initialLinuxCPUs: @escaping () -> Int = { AppleContainerBackend.virtualCPUs },
+         onWarning: @escaping (String) -> Void = { _ in }) {
         self.backend = backend
         self.store = store
         self.server = server
@@ -33,6 +37,8 @@ final class ConnectedRunner {
         self.wait = wait
         self.stateChanged = stateChanged
         self.currentTime = currentTime
+        self.initialLinuxCPUs = initialLinuxCPUs
+        self.onWarning = onWarning
     }
 
     func recover() throws {
@@ -66,6 +72,7 @@ final class ConnectedRunner {
         var machineMayExist = false
         var jobStarted = false
         do {
+            authorization.prepare(runner: offer.runner)
             try authorization.check()
             let jit = try accept(offer)
             authorization.start(offer)
@@ -78,12 +85,32 @@ final class ConnectedRunner {
             }
             try authorization.check()
             try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: localCache)
+            if backend.platform == .linux {
+                var targetCPUs = initialLinuxCPUs()
+                if targetCPUs < AppleContainerBackend.virtualCPUs {
+                    do {
+                        try backend.applyCPUQuota(targetCPUs, on: id)
+                        // Re-check policy after applying startup quota so a concurrent Meeting Mode
+                        // disable/change cannot be overwritten by an earlier startup cap.
+                        let latestCPUs = initialLinuxCPUs()
+                        if latestCPUs != targetCPUs {
+                            targetCPUs = latestCPUs
+                            try backend.applyCPUQuota(targetCPUs, on: id)
+                        }
+                    } catch let ProcessExecutionError.nonZeroExit(_, result) where result.terminationStatus == 2 {
+                        onWarning("Guest image for \(id.value) does not support runtime CPU quotas (yieldd-runner-control cpu exited 2); rebuild the Linux guest image to enable Meeting Mode CPU caps.")
+                    }
+                }
+            }
             let configure = ["yieldd-configure-runner", "--jit"] + (localCache ? ["--local-cache"] : [])
             try backend.exec(configure, standardInput: Data("\(jit)\n".utf8),
                              timeout: 5 * 60, on: id)
             try ReservedRunnerJob(backend: backend, checkCancellation: authorization.check, wait: wait,
                                   stateChanged: { state in
-                                      if case .jobStarted = state { jobStarted = true }
+                                      if case .jobStarted = state {
+                                          jobStarted = true
+                                          self.authorization.markJobStarted()
+                                      }
                                       self.stateChanged(state)
                                   }, currentTime: currentTime)
                 .run(id: id, pickupTimeout: 5 * 60)
@@ -91,11 +118,18 @@ final class ConnectedRunner {
             let operation: any Error = jobStarted ? (ConnectedAssignmentFailure(error) ?? error) : error
             failure = authorization.failure ?? operation
         }
+        let stoppedForReclaimOrShutdown = (failure as? ConnectedExecutionError) == .reclaimed
+            || (failure.map(isCancellation) ?? false)
         authorization.stop()
         if let failure, !isCancellation(failure), (failure as? ConnectedRunnerError)?.httpStatus != 410 {
             stateChanged(.executionStopped(id, reason: describeError(failure)))
         }
         if machineMayExist {
+            if stoppedForReclaimOrShutdown {
+                // Best-effort bounded graceful stop with relay still attached so GitHub
+                // marks the runner idle in seconds instead of waiting for a 5-10m timeout.
+                backend.gracefulStopRunner(id)
+            }
             try cleanUp(step: .machine, after: failure) { try backend.destroy(id) }
         }
         absent = id

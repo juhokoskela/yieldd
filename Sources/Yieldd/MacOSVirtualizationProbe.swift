@@ -393,7 +393,7 @@ enum MacOSVirtualMachineLifecycle {
         timeout: TimeInterval,
         checkDeadline: () throws -> Void = {}
     ) throws {
-        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        let deadline = continuousMonotonicSeconds() + timeout
 
         while true {
             // A terminally failed VM cannot be stopped. Its owner must release it.
@@ -416,7 +416,7 @@ enum MacOSVirtualMachineLifecycle {
             case .stopped:
                 return
             case .retry:
-                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                let remaining = deadline - continuousMonotonicSeconds()
                 guard remaining > 0 else {
                     throw MacOSVirtualizationProbeError.timedOut(
                         operation: "stopping the macOS virtual machine"
@@ -660,7 +660,7 @@ final class VirtualMachineCompletion<Success: Sendable>: @unchecked Sendable {
             }
             try checkCancellation()
 
-            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            let remaining = deadline - continuousMonotonicSeconds()
             guard remaining > 0 else {
                 throw MacOSVirtualizationProbeError.timedOut(
                     operation: operation

@@ -28,6 +28,7 @@ func TestLocalCompletionFailureRetriesWithoutMacRestart(t *testing.T) {
 	if !singleLease(c.state).CleanupIntent {
 		t.Fatal("lost cleanup intent")
 	}
+	w.assignedJobs = 0
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 {
 		t.Fatal(n, err)
 	}
@@ -35,6 +36,7 @@ func TestLocalCompletionFailureRetriesWithoutMacRestart(t *testing.T) {
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 0 {
 		t.Fatal(n, err)
 	}
+	w.assignedJobs = 1
 	if n, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil || n != 1 || w.dispatched != 1 {
 		t.Fatal(n, err)
 	}
@@ -88,8 +90,8 @@ func TestZeroDemandRevokesIdleStartupButRetainsIssuedCapacity(t *testing.T) {
 	if authorization, err := c.renewDevice(t.Context(), request); err != nil || !authorization.Continue {
 		t.Fatal("a running job was interrupted by a zero count", authorization, err)
 	}
-	if err := c.completeDevice(t.Context(), request); !errors.Is(err, runnerStillBusy) || c.device.slots[0].owner != c.state.Owner {
-		t.Fatal("busy capacity was released", err)
+	if err := c.completeDevice(t.Context(), request); err != nil || c.device.slots[0].owner != c.state.Owner || w.runner == nil {
+		t.Fatal("busy completion released capacity or removed active runner", err)
 	}
 	w.busy = false
 	if err := c.completeDevice(t.Context(), request); err != nil || c.device.slots[0].owner != "" {
@@ -159,10 +161,11 @@ func TestExpiredOfferFailedSaveRetainsLocalIdentity(t *testing.T) {
 }
 
 func TestIssuedLocalHoldIsReportedOnceAndNeverExpires(t *testing.T) {
-	c, _, _, request := localFixture(t)
+	c, w, _, request := localFixture(t)
 	if _, err := c.acceptDevice(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
+	w.assignedJobs = 0
 	var logs bytes.Buffer
 	c.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	singleLease(c.state).Local.Expires = time.Now().Add(-time.Hour)

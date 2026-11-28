@@ -12,6 +12,7 @@ const (
 	availabilityLifetime = 30 * time.Second
 	registrationLifetime = 30 * time.Second
 	localStartupLifetime = 10 * time.Minute
+	busyCheckInterval    = 2 * time.Minute
 )
 
 type localPhase string
@@ -24,13 +25,16 @@ const (
 )
 
 type localLease struct {
-	Slot         int        `json:"slot"`
-	DeviceID     string     `json:"device_id"`
-	Phase        localPhase `json:"phase"`
-	Expires      time.Time  `json:"expires"`
-	JobStarted   bool       `json:"job_started,omitempty"`
-	JobCompleted bool       `json:"job_completed,omitempty"`
-	JobSucceeded bool       `json:"job_succeeded,omitempty"`
+	Slot          int        `json:"slot"`
+	DeviceID      string     `json:"device_id"`
+	Phase         localPhase `json:"phase"`
+	Expires       time.Time  `json:"expires"`
+	JobStarted    bool       `json:"job_started,omitempty"`
+	JobCompleted  bool       `json:"job_completed,omitempty"`
+	JobSucceeded  bool       `json:"job_succeeded,omitempty"`
+	FenceIntent   bool       `json:"fence_intent,omitempty"`
+	Fenced        bool       `json:"fenced,omitempty"`
+	WorkflowRunID int64      `json:"workflow_run_id,omitempty"`
 }
 
 func (l *localLease) expired() bool {
@@ -157,8 +161,9 @@ func (a *assignment) accept(ctx context.Context, request deviceRequest) (*device
 }
 
 type deviceAuthorization struct {
-	Continue     bool `json:"continue"`
-	JobSucceeded bool `json:"job_succeeded,omitempty"`
+	Continue      bool  `json:"continue"`
+	JobSucceeded  bool  `json:"job_succeeded,omitempty"`
+	WorkflowRunID int64 `json:"workflow_run_id,omitempty"`
 }
 
 type finalJobResult string
@@ -201,29 +206,49 @@ func (c *coordinator) renewDevice(ctx context.Context, request deviceRequest) (*
 }
 func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceAuthorization, error) {
 	l := a.lease
+	var runID int64
+	if l != nil && l.Local != nil {
+		runID = l.Local.WorkflowRunID
+	}
 	if result := l.jobResult(request.Slot); result != resultPending {
-		return &deviceAuthorization{JobSucceeded: result == resultSucceeded}, nil
+		return &deviceAuthorization{JobSucceeded: result == resultSucceeded, WorkflowRunID: runID}, nil
+	}
+	if l.Local.Fenced {
+		return &deviceAuthorization{Continue: false, WorkflowRunID: runID}, nil
+	}
+	if !l.Local.FenceIntent && l.Local.JobStarted && !a.demandUnavailable && a.jobStartedByEvent[l.Name] && time.Since(a.lastBusyCheck[l.Name]) < busyCheckInterval {
+		return &deviceAuthorization{Continue: true, WorkflowRunID: runID}, nil
 	}
 	busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, l.RunnerID)
 	if err != nil {
 		return nil, err
 	}
 	if busy {
-		if !l.Local.JobStarted {
+		if a.lastBusyCheck == nil {
+			a.lastBusyCheck = make(map[string]time.Time)
+		}
+		a.lastBusyCheck[l.Name] = time.Now()
+		if !l.Local.JobStarted || l.Local.FenceIntent {
 			next := *l.Local
 			next.JobStarted = true
+			next.FenceIntent = false
 			if err := a.saveLocal(&next); err != nil {
 				return nil, err
 			}
 		}
-		return &deviceAuthorization{Continue: true}, nil
+		return &deviceAuthorization{Continue: true, WorkflowRunID: runID}, nil
+	}
+	delete(a.lastBusyCheck, l.Name)
+	delete(a.jobStartedByEvent, l.Name)
+	if l.Local.FenceIntent {
+		return &deviceAuthorization{Continue: false, WorkflowRunID: runID}, nil
 	}
 	if l.Local.JobStarted {
 		// An idle response can lag a start event. Do not grant more execution
 		// time, but let the Mac's offline grace absorb temporary inconsistency.
 		return nil, &deviceError{status: http.StatusServiceUnavailable, message: "GitHub has not confirmed an active runner; execution authorization was not renewed"}
 	}
-	return &deviceAuthorization{Continue: !l.Local.expired()}, nil
+	return &deviceAuthorization{Continue: !l.Local.expired(), WorkflowRunID: runID}, nil
 }
 
 type localJobEvent uint8
@@ -234,16 +259,34 @@ const (
 	jobSucceeded
 )
 
-func (a *assignment) recordLocalJob(id int, event localJobEvent) error {
+func (a *assignment) recordLocalJob(id int, workflowRunID int64, event localJobEvent) error {
 	l := a.lease
-	if l == nil || l.Local == nil || l.CleanupIntent || l.Local.Phase != localIssued || l.RunnerID != id {
+	if l == nil || l.Local == nil || l.Local.Phase != localIssued || l.RunnerID != id {
+		return nil
+	}
+	if (l.Local.Fenced || l.Local.FenceIntent) && event == jobStarted {
+		// A fenced or pending-fence runner cannot be reauthorized by a delayed start event;
+		// only an authoritative GitHub REST busy check or JobStillRunningError can clear FenceIntent.
 		return nil
 	}
 	next := *l.Local
 	next.JobStarted = true
+	if workflowRunID > 0 && next.WorkflowRunID == 0 {
+		next.WorkflowRunID = workflowRunID
+	}
 	if event != jobStarted && !next.JobCompleted {
 		next.JobCompleted = true
 		next.JobSucceeded = event == jobSucceeded
+	}
+	if event == jobStarted && !l.CleanupIntent {
+		if a.jobStartedByEvent == nil {
+			a.jobStartedByEvent = make(map[string]bool)
+		}
+		if a.lastBusyCheck == nil {
+			a.lastBusyCheck = make(map[string]time.Time)
+		}
+		a.jobStartedByEvent[l.Name] = true
+		a.lastBusyCheck[l.Name] = time.Now()
 	}
 	if next == *l.Local {
 		return nil
@@ -270,6 +313,11 @@ func (a *assignment) complete(ctx context.Context, request deviceRequest) error 
 		return err
 	}
 	_, err := a.finishCleanup(ctx, true)
+	if errors.Is(err, runnerStillBusy) {
+		a.logger.Info("Local cleanup recorded; waiting asynchronously for GitHub runner to become idle before removal", "runner", l.Name)
+		a.device.redrive(a.state.Owner)
+		return nil
+	}
 	return err
 }
 
@@ -283,7 +331,10 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 		return false, nil
 	}
 	expired := l.Local.expired()
-	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull()))
+	if l.Local.Phase == localOffered && expired && !recoverOnly {
+		a.device.expireAllAvailability()
+	}
+	retire := recoverOnly || (expired && (l.Local.Phase == localAccepted || a.state.Config.LocalOnly || a.fallbackFull() || a.hostedBackoffActive()))
 	if retire {
 		if err := a.beginCleanup(""); err != nil {
 			return false, err
@@ -299,6 +350,35 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 	}
 	if !expired {
 		return false, nil
+	}
+	busyPromoted := false
+	if a.hasUnfencedExpiredLocal() {
+		var ready bool
+		var err error
+		ready, busyPromoted, err = a.fenceExpiredLocalForOverflow(ctx)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			return false, nil
+		}
+	}
+	if busyPromoted || a.hasNonSupplyLease() {
+		count, err := a.readPlacementDemand(ctx)
+		if err != nil {
+			return false, err
+		}
+		if !a.demandRetryAt.IsZero() {
+			return false, nil
+		}
+		// Supply count includes this expired offer, so subtract 1 to check whether
+		// remaining active runners already cover current demand.
+		if count <= a.supplyCount()-1 {
+			if err := a.beginCleanup(""); err != nil {
+				return false, err
+			}
+			return a.finishCleanup(ctx, true)
+		}
 	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
 	if err := a.saveLocal(nil); err != nil {

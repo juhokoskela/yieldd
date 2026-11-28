@@ -70,9 +70,24 @@ status() {
     printf '{"phase":"listening","jobStarted":%s}\n' "$started"
 }
 
+stop() {
+    if [[ -f "$state_directory/exit-status" ]]; then
+        return 0
+    fi
+    systemctl kill --signal=SIGINT yieldd-runner.service 2>/dev/null || true
+    for _ in {1..25}; do
+        if [[ -f "$state_directory/exit-status" ]] || ! systemctl is-active --quiet yieldd-runner.service; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 0
+}
+
 usage() {
     echo "usage: yieldd-runner-control memory constrained|full" >&2
-    echo "       yieldd-runner-control start|status|output" >&2
+    echo "       yieldd-runner-control cpu 1|2|3|4|full" >&2
+    echo "       yieldd-runner-control start|stop|status|output" >&2
     exit 2
 }
 
@@ -81,6 +96,9 @@ if [[ "$#" -eq 1 ]]; then
         start)
             install -d -o runner -g runner -m 0700 "$state_directory"
             flock "$state_directory/state.lock" "$0" _start_locked
+            ;;
+        stop)
+            stop
             ;;
         status)
             status
@@ -112,6 +130,18 @@ case "$1:$2" in
         ;;
     memory:full)
         exec systemctl set-property --runtime yieldd.slice MemoryHigh=infinity
+        ;;
+    cpu:full|cpu:4)
+        exec systemctl set-property --runtime yieldd.slice AllowedCPUs=0-3 CPUQuota=400%
+        ;;
+    cpu:3)
+        exec systemctl set-property --runtime yieldd.slice AllowedCPUs=0-2 CPUQuota=300%
+        ;;
+    cpu:2)
+        exec systemctl set-property --runtime yieldd.slice AllowedCPUs=0-1 CPUQuota=200%
+        ;;
+    cpu:1)
+        exec systemctl set-property --runtime yieldd.slice AllowedCPUs=0 CPUQuota=100%
         ;;
     *)
         usage

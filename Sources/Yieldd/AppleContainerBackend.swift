@@ -1,6 +1,6 @@
 import Foundation
 
-final class AppleContainerBackend: RunnerBackend {
+final class AppleContainerBackend: RunnerBackend, @unchecked Sendable {
     let platform = RunnerPlatform.linux
     static let creationTimeout: TimeInterval = 5 * 60
     static let memoryConfigurationTimeout: TimeInterval = 30
@@ -23,11 +23,16 @@ final class AppleContainerBackend: RunnerBackend {
     private let checkCancellation: () throws -> Void
     private let maximumExecutionDeadline: () -> DispatchTime?
     private let lock = NSLock()
+    private let relayLock = NSLock()
+    private let bootedLock = NSLock()
+    private let quotaLock = NSLock()
     private struct Guest {
         let relay: any RunnerNetworkRelaying
         var booted = false
     }
     private var guests: [RunnerID: Guest] = [:]
+    private var activeRelays: [RunnerID: any RunnerNetworkRelaying] = [:]
+    private var bootedGuests: Set<RunnerID> = []
 
     init(
         containerURL: URL,
@@ -71,6 +76,7 @@ final class AppleContainerBackend: RunnerBackend {
             try recordIntent()
             let relay = try network.start(for: id, checkCancellation: checkCancellation)
             guests[id] = Guest(relay: relay)
+            relayLock.withLock { activeRelays[id] = relay }
             _ = try run([
                 "machine", "create",
                 "--name", id.value,
@@ -86,6 +92,7 @@ final class AppleContainerBackend: RunnerBackend {
             try Self.requireRelayConfiguration(result.stdout, id: id, socket: relay.socketURL)
             _ = try run(["machine", "boot", id.value], timeout: Self.creationTimeout, checking: relay.check)
             guests[id]?.booted = true
+            bootedLock.withLock { _ = bootedGuests.insert(id) }
         }
         try dockerReadiness.wait {
             _ = try exec(
@@ -138,7 +145,54 @@ final class AppleContainerBackend: RunnerBackend {
         )
     }
 
+    func severNetwork(_ id: RunnerID, deadline: DispatchTime) {
+        let relay = relayLock.withLock { activeRelays[id] }
+        try? relay?.stop(deadline: deadline)
+    }
+
+    func gracefulStopRunner(_ id: RunnerID) {
+        let booted = bootedLock.withLock { bootedGuests.contains(id) }
+        guard booted else { return }
+        let request = ProcessRequest(
+            executableURL: containerURL,
+            arguments: [
+                "machine", "run",
+                "--name", id.value,
+                "--user", RunnerGuestUser.root.rawValue,
+                "--",
+                "yieldd-runner-control", "stop",
+            ],
+            timeout: 4,
+            outputCapture: .tail(maxBytes: 4096),
+            cancellable: false
+        )
+        _ = try? executor.execute(request)
+    }
+
+    func applyCPUQuota(_ cpus: Int, on id: RunnerID) throws {
+        let clamped = max(1, min(Self.virtualCPUs, cpus))
+        try quotaLock.withLock {
+            let booted = bootedLock.withLock { bootedGuests.contains(id) }
+            guard booted else { throw AppleContainerBackendError.notReady(id) }
+            let request = ProcessRequest(
+                executableURL: containerURL,
+                arguments: [
+                    "machine", "run",
+                    "--name", id.value,
+                    "--user", RunnerGuestUser.root.rawValue,
+                    "--",
+                    "yieldd-runner-control", "cpu", String(clamped),
+                ],
+                timeout: 10,
+                outputCapture: .tail(maxBytes: 4096),
+                cancellable: false
+            )
+            _ = try executor.execute(request).requireSuccess(for: request)
+        }
+    }
+
     func destroy(_ id: RunnerID) throws {
+        bootedLock.withLock { _ = bootedGuests.remove(id) }
         try lock.withLock {
             var failures: [RunnerSessionCleanupFailure] = []
             if let guest = guests[id] {
@@ -152,6 +206,7 @@ final class AppleContainerBackend: RunnerBackend {
             // After an owner crash there is no relay object, only its socket directory.
             try RunnerNetworkDirectories(stateDirectory: stateDirectory).remove(id)
             guests.removeValue(forKey: id)
+            relayLock.withLock { _ = activeRelays.removeValue(forKey: id) }
         }
     }
 
