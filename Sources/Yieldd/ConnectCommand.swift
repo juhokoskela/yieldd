@@ -167,7 +167,9 @@ func runConnectedService(
                 }
             }
         )
-        _ = powerMonitor.start()
+        guard powerMonitor.start() else {
+            throw SystemPowerMonitorError.registrationFailed
+        }
         defer { powerMonitor.stop() }
         control?.configure(workers: slots, memory: memory)
         control?.markReady()
@@ -272,7 +274,7 @@ func runConnectedService(
                         output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
                     }, paused: {
                         if let control { return !control.canPoll(platform: platform) }
-                        return sleepCoordinator.isPausedForWake()
+                        return sleepCoordinator.isPausedForWake() || SystemPowerMonitor.isDarkWake()
                     }, beginOfferAssignment: { offer in
                         // Register the runner UUID and authorization target BEFORE exposing the slot
                         // as active so a concurrent sleep or reclaim can never be dropped.
@@ -283,7 +285,7 @@ func runConnectedService(
                         if let control {
                             admitted = control.beginAssignment(worker: workerID, platform: platform, offer: offer)
                         } else {
-                            admitted = sleepCoordinator.beginAssignment()
+                            admitted = !SystemPowerMonitor.isDarkWake() && sleepCoordinator.beginAssignment()
                         }
                         if !admitted {
                             authorization.stop()

@@ -875,8 +875,75 @@ func foregroundSleepCoordinatorAbortsSeversAndEnforcesWakeHoldDown() throws {
     #expect(coordinator.isPausedForWake())
     #expect(!coordinator.beginAssignment())
 
-    // Hold-down expires after 30s.
-    now.withLock { $0 = $0.addingTimeInterval(31) }
+    // Even after a 1-hour sleep, admission stays closed until didWake arrives.
+    now.withLock { $0 = $0.addingTimeInterval(3600) }
+    #expect(coordinator.isPausedForWake())
+    #expect(!coordinator.beginAssignment())
+
+    // didWake starts the 30s hold-down countdown.
+    coordinator.handleSystemDidWake()
+    now.withLock { $0 = $0.addingTimeInterval(15) }
+    #expect(coordinator.isPausedForWake())
+    #expect(!coordinator.beginAssignment())
+
+    // Hold-down expires 30s after didWake.
+    now.withLock { $0 = $0.addingTimeInterval(16) }
     #expect(!coordinator.isPausedForWake())
     #expect(coordinator.beginAssignment())
+}
+
+@Test
+func staleThermalCapDoesNotPinFreshMeetingModeAndSettingsAtExpiryRestoresQuota() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("round3-policy-\(UUID().uuidString)")
+    _ = try RunnerLeaseStore(directory: dir)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let thermal = Mutex(HostThermalState.nominal)
+    let now = Mutex(Date(timeIntervalSince1970: 6_000_000))
+    let control = ConnectedAgentControl(
+        directory: dir,
+        powerStatus: { HostPowerStatus(source: .ac, batteryPercent: 100, lowPowerMode: false, drainingOnAC: false) },
+        thermalState: { thermal.withLock { $0 } },
+        isDarkWake: { false },
+        currentDate: { now.withLock { $0 } },
+        hardwareProfile: HostHardwareProfile(modelIdentifier: "Mac16,7", logicalCPUs: 16),
+        notificationName: nil
+    )
+    control.markReady()
+    let memory = RunnerMemoryAdmission(physicalMemoryBytes: 48 * 1_024 * 1_024 * 1_024)
+    control.configure(workers: [ConnectedWorker(backend: .linux(containerURL: URL(fileURLWithPath: "/usr/bin/true")), slot: 0)], memory: memory)
+
+    // 1. Serious thermal while Meeting Mode is OFF -> cools to .fair -> hold-down expires -> cools to .nominal.
+    thermal.withLock { $0 = .serious }
+    _ = control.snapshot
+    thermal.withLock { $0 = .fair }
+    now.withLock { $0 = $0.addingTimeInterval(601) }
+    _ = control.snapshot
+    thermal.withLock { $0 = .nominal }
+    let enabled = try control.request(try AgentControlRequest(action: "meeting-mode", durationSeconds: 600, enabled: true, cpus: 4).encodedCommand())
+    #expect(enabled.meetingMode == true)
+    #expect(enabled.meetingModeCPUs == 4)
+    #expect(control.effectiveLinuxCPUs == 4)
+
+    // 2. Active Linux guest capped at 2 vCPUs; clock advances past meetingModeUntil and a Settings CPU change arrives first.
+    #expect(control.beginAssignment(worker: "linux-0", platform: .linux, offer: testOfferLinux))
+    let applied = Mutex<[Int]>([])
+    let quotaEvent = DispatchSemaphore(value: 0)
+    control.registerSlotHandler(worker: "linux-0", handler: AgentSlotControlHandler(
+        abort: { _, _ in true },
+        severNetwork: { _ in },
+        applyCPUQuota: { cpus, _ in
+            applied.withLock { $0.append(cpus) }
+            quotaEvent.signal()
+        }
+    ))
+    _ = try control.request(try AgentControlRequest(action: "meeting-mode", cpus: 2).encodedCommand())
+    #expect(quotaEvent.wait(timeout: .now() + 2) == .success)
+    #expect(applied.withLock { $0.last } == 2)
+
+    now.withLock { $0 = $0.addingTimeInterval(601) }
+    let afterExpiryPrefChange = try control.request(try AgentControlRequest(action: "meeting-mode", cpus: 2).encodedCommand())
+    #expect(afterExpiryPrefChange.meetingMode == false)
+    #expect(quotaEvent.wait(timeout: .now() + 2) == .success)
+    #expect(applied.withLock { $0.last } == 4)
 }

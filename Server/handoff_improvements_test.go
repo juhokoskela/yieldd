@@ -273,6 +273,104 @@ func (f failingRemoveRunnerAPI) RemoveRunner(context.Context, int64) error {
 	return f.err
 }
 
+func TestLostFenceResponseCannotReauthorizeRemovedRunner(t *testing.T) {
+	c, w, store, request := localFixture(t)
+	if _, err := c.acceptDevice(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	c.device.slots[0].availableUntil = time.Time{}
+	singleLease(c.state).Local.Expires = time.Now().Add(-time.Minute)
+	w.assignedJobs = 1
+
+	// RemoveRunner actually deletes on GitHub, then its response times out.
+	origRunners := c.runners
+	c.runners = failingRemoveRunnerAPI{origRunners, context.DeadlineExceeded}
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatalf("lost fence response errored queue: %v", err)
+	}
+	if !c.state.Leases[request.Runner].Local.FenceIntent {
+		t.Fatal("expected FenceIntent persisted before RemoveRunner")
+	}
+	// Reloading journal preserves FenceIntent.
+	if reloaded, err := store.load(c.state.Config); err != nil || !reloaded.Leases[request.Runner].Local.FenceIntent {
+		t.Fatalf("FenceIntent did not survive reload: err=%v", err)
+	}
+	// Delayed JobStarted event must NOT reauthorize the runner while FenceIntent is pending.
+	if err := c.HandleJobStarted(t.Context(), &scaleset.JobStarted{
+		RunnerName:    request.Runner,
+		RunnerID:      c.state.Leases[request.Runner].RunnerID,
+		WorkflowRunID: 77777,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w.busy = false
+	auth, err := c.renewDevice(t.Context(), request)
+	if err != nil || auth.Continue {
+		t.Fatalf("pending-fence runner renewed after delayed JobStarted: %+v err=%v", auth, err)
+	}
+	// Next reconciliation completes the fence and dispatches the hosted replacement.
+	c.runners = origRunners
+	c.demandRetryAt = time.Now().Add(-time.Second)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if !c.state.Leases[request.Runner].Local.Fenced || c.state.Leases[request.Runner].Local.FenceIntent || w.dispatched != 1 {
+		t.Fatalf("expected completed fence + hosted dispatch: fenced=%v intent=%v dispatched=%d",
+			c.state.Leases[request.Runner].Local.Fenced, c.state.Leases[request.Runner].Local.FenceIntent, w.dispatched)
+	}
+}
+
+func TestAsyncCleanupRetryHandlesBusyAndJobStillRunningWithoutPausingOrSpawningHosted(t *testing.T) {
+	t.Run("busy_on_async_retry_persists_job_started", func(t *testing.T) {
+		c, w, _, request := localFixture(t)
+		if _, err := c.acceptDevice(t.Context(), request); err != nil {
+			t.Fatal(err)
+		}
+		// Persist CleanupIntent while initial /complete hits a transient error.
+		origBootstrap := c.bootstrap
+		c.bootstrap = failingBusyAPI{w, &apiError{status: 503}}
+		_ = c.completeDevice(t.Context(), request)
+		if !c.state.Leases[request.Runner].CleanupIntent {
+			t.Fatal("expected CleanupIntent persisted")
+		}
+		// On coordinator retry, GitHub reports runner busy and assignedJobs=1.
+		c.bootstrap = origBootstrap
+		w.busy = true
+		w.assignedJobs = 1
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatalf("async busy cleanup retry errored: %v", err)
+		}
+		if !c.state.Leases[request.Runner].Local.JobStarted {
+			t.Fatal("expected async busy cleanup retry to persist JobStarted")
+		}
+		if w.dispatched != 0 || c.paused != nil {
+			t.Fatalf("unexpected dispatch or pause on async busy cleanup: dispatched=%d paused=%v", w.dispatched, c.paused)
+		}
+	})
+
+	t.Run("remove_runner_job_still_running_treated_as_busy_retry", func(t *testing.T) {
+		c, w, _, request := localFixture(t)
+		if _, err := c.acceptDevice(t.Context(), request); err != nil {
+			t.Fatal(err)
+		}
+		w.busy = false
+		w.assignedJobs = 1
+		c.runners = failingRemoveRunnerAPI{c.runners, scaleset.JobStillRunningError}
+		if err := c.completeDevice(t.Context(), request); err != nil {
+			t.Fatalf("JobStillRunningError on /complete should return 200 OK async retry, got %v", err)
+		}
+		if !c.state.Leases[request.Runner].Local.JobStarted {
+			t.Fatal("expected JobStillRunningError during cleanup to persist JobStarted")
+		}
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatalf("retry with JobStillRunningError errored: %v", err)
+		}
+		if c.paused != nil || w.dispatched != 0 {
+			t.Fatalf("expected no pause and no phantom dispatch: paused=%v dispatched=%d", c.paused, w.dispatched)
+		}
+	})
+}
+
 func TestBusyCompletionDoesNotTriggerPhantomHostedOverflow(t *testing.T) {
 	c, w, _, request := localFixture(t)
 	if _, err := c.acceptDevice(t.Context(), request); err != nil {

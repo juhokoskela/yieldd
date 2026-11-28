@@ -617,16 +617,30 @@ func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) (ready b
 		if busy {
 			next := *l.Local
 			next.JobStarted = true
+			next.FenceIntent = false
 			if err := c.assigned(name).saveLocal(&next); err != nil {
 				return false, busyPromoted, err
 			}
 			busyPromoted = true
 			continue
 		}
+		if !l.Local.FenceIntent {
+			// Persist pending fence intent before RemoveRunner so a lost response cannot
+			// allow a delayed JobStarted event to reauthorize a deleted runner.
+			intent := *l.Local
+			intent.FenceIntent = true
+			if err := c.assigned(name).saveLocal(&intent); err != nil {
+				return false, busyPromoted, err
+			}
+			delete(c.lastBusyCheck, name)
+			delete(c.jobStartedByEvent, name)
+			l = c.state.Leases[name]
+		}
 		if err := c.runners.RemoveRunner(ctx, int64(l.RunnerID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
 			if errors.Is(err, scaleset.JobStillRunningError) {
 				next := *l.Local
 				next.JobStarted = true
+				next.FenceIntent = false
 				if saveErr := c.assigned(name).saveLocal(&next); saveErr != nil {
 					return false, busyPromoted, saveErr
 				}
@@ -644,6 +658,7 @@ func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) (ready b
 		}
 		next := *l.Local
 		next.Fenced = true
+		next.FenceIntent = false
 		if err := c.assigned(name).saveLocal(&next); err != nil {
 			return false, busyPromoted, err
 		}
@@ -943,9 +958,18 @@ func (a *assignment) cleanup(ctx context.Context) error {
 			return err
 		}
 		if busy {
+			if saveErr := a.markLocalCleanupBusy(); saveErr != nil {
+				return saveErr
+			}
 			return runnerStillBusy
 		}
 		if err := a.runners.RemoveRunner(ctx, int64(runner.ID)); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
+			if errors.Is(err, scaleset.JobStillRunningError) {
+				if saveErr := a.markLocalCleanupBusy(); saveErr != nil {
+					return saveErr
+				}
+				return runnerStillBusy
+			}
 			return &sdkError{"remove runner", err}
 		}
 	}
@@ -960,6 +984,16 @@ func (a *assignment) cleanup(ctx context.Context) error {
 	delete(a.reportedLocalHold, l.Name)
 	if l.Local == nil || runner != nil || l.Local.Phase == localIssued {
 		a.refreshDemand = true
+	}
+	return nil
+}
+
+func (a *assignment) markLocalCleanupBusy() error {
+	if a.lease != nil && a.lease.Local != nil && a.lease.Local.Phase == localIssued && !a.lease.Local.JobStarted && !a.lease.Local.Fenced {
+		next := *a.lease.Local
+		next.JobStarted = true
+		next.FenceIntent = false
+		return a.saveLocal(&next)
 	}
 	return nil
 }

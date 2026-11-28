@@ -32,6 +32,7 @@ type localLease struct {
 	JobStarted    bool       `json:"job_started,omitempty"`
 	JobCompleted  bool       `json:"job_completed,omitempty"`
 	JobSucceeded  bool       `json:"job_succeeded,omitempty"`
+	FenceIntent   bool       `json:"fence_intent,omitempty"`
 	Fenced        bool       `json:"fenced,omitempty"`
 	WorkflowRunID int64      `json:"workflow_run_id,omitempty"`
 }
@@ -215,7 +216,7 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	if l.Local.Fenced {
 		return &deviceAuthorization{Continue: false, WorkflowRunID: runID}, nil
 	}
-	if l.Local.JobStarted && !a.demandUnavailable && a.jobStartedByEvent[l.Name] && time.Since(a.lastBusyCheck[l.Name]) < busyCheckInterval {
+	if !l.Local.FenceIntent && l.Local.JobStarted && !a.demandUnavailable && a.jobStartedByEvent[l.Name] && time.Since(a.lastBusyCheck[l.Name]) < busyCheckInterval {
 		return &deviceAuthorization{Continue: true, WorkflowRunID: runID}, nil
 	}
 	busy, err := a.bootstrap.runnerBusy(ctx, a.state.Config.Repository, l.RunnerID)
@@ -227,9 +228,10 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 			a.lastBusyCheck = make(map[string]time.Time)
 		}
 		a.lastBusyCheck[l.Name] = time.Now()
-		if !l.Local.JobStarted {
+		if !l.Local.JobStarted || l.Local.FenceIntent {
 			next := *l.Local
 			next.JobStarted = true
+			next.FenceIntent = false
 			if err := a.saveLocal(&next); err != nil {
 				return nil, err
 			}
@@ -238,6 +240,9 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	}
 	delete(a.lastBusyCheck, l.Name)
 	delete(a.jobStartedByEvent, l.Name)
+	if l.Local.FenceIntent {
+		return &deviceAuthorization{Continue: false, WorkflowRunID: runID}, nil
+	}
 	if l.Local.JobStarted {
 		// An idle response can lag a start event. Do not grant more execution
 		// time, but let the Mac's offline grace absorb temporary inconsistency.
@@ -259,11 +264,10 @@ func (a *assignment) recordLocalJob(id int, workflowRunID int64, event localJobE
 	if l == nil || l.Local == nil || l.Local.Phase != localIssued || l.RunnerID != id {
 		return nil
 	}
-	if l.Local.Fenced {
-		// A fenced runner is permanently revoked; a delayed start event must never reauthorize it.
-		if event == jobStarted {
-			return nil
-		}
+	if (l.Local.Fenced || l.Local.FenceIntent) && event == jobStarted {
+		// A fenced or pending-fence runner cannot be reauthorized by a delayed start event;
+		// only an authoritative GitHub REST busy check or JobStillRunningError can clear FenceIntent.
+		return nil
 	}
 	next := *l.Local
 	next.JobStarted = true
@@ -274,7 +278,7 @@ func (a *assignment) recordLocalJob(id int, workflowRunID int64, event localJobE
 		next.JobCompleted = true
 		next.JobSucceeded = event == jobSucceeded
 	}
-	if event == jobStarted && !l.CleanupIntent && !l.Local.Fenced {
+	if event == jobStarted && !l.CleanupIntent {
 		if a.jobStartedByEvent == nil {
 			a.jobStartedByEvent = make(map[string]bool)
 		}
@@ -310,15 +314,6 @@ func (a *assignment) complete(ctx context.Context, request deviceRequest) error 
 	}
 	_, err := a.finishCleanup(ctx, true)
 	if errors.Is(err, runnerStillBusy) {
-		if a.lease != nil && a.lease.Local != nil && a.lease.Local.Phase == localIssued && !a.lease.Local.JobStarted && !a.lease.Local.Fenced {
-			// GitHub confirmed the runner is busy; record JobStarted so countsAsSupply
-			// and surplusAssignments account for it until JobCompleted / idle.
-			next := *a.lease.Local
-			next.JobStarted = true
-			if saveErr := a.saveLocal(&next); saveErr != nil {
-				return saveErr
-			}
-		}
 		a.logger.Info("Local cleanup recorded; waiting asynchronously for GitHub runner to become idle before removal", "runner", l.Name)
 		a.device.redrive(a.state.Owner)
 		return nil

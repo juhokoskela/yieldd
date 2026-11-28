@@ -148,3 +148,14 @@ final class SystemPowerMonitor: @unchecked Sendable {
 private let kIOMessageCanSystemSleep: natural_t = 0xE000_0270
 private let kIOMessageSystemWillSleep: natural_t = 0xE000_0280
 private let kIOMessageSystemHasPoweredOn: natural_t = 0xE000_0300
+
+enum SystemPowerMonitorError: Error, LocalizedError {
+    case registrationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .registrationFailed:
+            "Failed to register for macOS system sleep notifications; refusing to admit connected runners without sleep protection."
+        }
+    }
+}

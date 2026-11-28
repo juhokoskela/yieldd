@@ -86,10 +86,17 @@ final class ConnectedRunner {
             try authorization.check()
             try RunnerGuestProtocol.validate(backend: backend, id: id, localCache: localCache)
             if backend.platform == .linux {
-                let targetCPUs = initialLinuxCPUs()
+                var targetCPUs = initialLinuxCPUs()
                 if targetCPUs < AppleContainerBackend.virtualCPUs {
                     do {
                         try backend.applyCPUQuota(targetCPUs, on: id)
+                        // Re-check policy after applying startup quota so a concurrent Meeting Mode
+                        // disable/change cannot be overwritten by an earlier startup cap.
+                        let latestCPUs = initialLinuxCPUs()
+                        if latestCPUs != targetCPUs {
+                            targetCPUs = latestCPUs
+                            try backend.applyCPUQuota(targetCPUs, on: id)
+                        }
                     } catch let ProcessExecutionError.nonZeroExit(_, result) where result.terminationStatus == 2 {
                         onWarning("Guest image for \(id.value) does not support runtime CPU quotas (yieldd-runner-control cpu exited 2); rebuild the Linux guest image to enable Meeting Mode CPU caps.")
                     }
