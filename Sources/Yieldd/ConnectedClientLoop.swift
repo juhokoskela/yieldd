@@ -25,6 +25,7 @@ func runConnectedClient(
     blocked: () -> Void = {},
     paused: () -> Bool = { false },
     beginAssignment: () -> Bool = { true },
+    beginOfferAssignment: ((ConnectedOffer) -> Bool)? = nil,
     finishAssignment: () -> Void = {},
     slotReservation: ConnectedSlotReservation = ConnectedSlotReservation()
 ) throws {
@@ -73,7 +74,7 @@ func runConnectedClient(
                 continue
             }
             slotReservation.reservation = reservation
-            guard beginAssignment() else {
+            guard beginOfferAssignment?(offer) ?? beginAssignment() else {
                 releaseCapacity()
                 try decline(offer)
                 try wait(1)

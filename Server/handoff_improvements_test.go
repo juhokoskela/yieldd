@@ -28,17 +28,29 @@ func TestExpiredUnstartedLocalLeaseFencesAndAllowsHostedOverflowOnConfirmedDeman
 	if c.state.Leases[request.Runner] == nil || c.device.slots[0].owner != c.state.Owner {
 		t.Fatal("local slot quarantine was lost during hosted overflow")
 	}
-	if !c.fencedLocal[request.Runner] {
+	if !c.state.Leases[request.Runner].Local.Fenced {
 		t.Fatal("expired unstarted local runner was not fenced before hosted overflow")
 	}
-	// Reloading journal with quarantined + hosted leases succeeds.
-	if _, err := store.load(c.state.Config); err != nil {
+	// Reloading journal with quarantined + hosted leases succeeds and preserves fenced state.
+	reloaded, err := store.load(c.state.Config)
+	if err != nil {
 		t.Fatalf("journal reload failed: %v", err)
+	}
+	if !reloaded.Leases[request.Runner].Local.Fenced {
+		t.Fatal("fenced flag did not survive journal reload")
+	}
+	// A delayed JobStarted event must NOT reauthorize the fenced runner.
+	if err := c.HandleJobStarted(t.Context(), &scaleset.JobStarted{
+		RunnerName:    request.Runner,
+		RunnerID:      c.state.Leases[request.Runner].RunnerID,
+		WorkflowRunID: 55555,
+	}); err != nil {
+		t.Fatalf("delayed JobStarted errored: %v", err)
 	}
 	// A late renewal from the waking Mac is revoked immediately.
 	auth, err := c.renewDevice(t.Context(), request)
 	if err != nil || auth.Continue {
-		t.Fatalf("fenced local runner renewed: %+v %v", auth, err)
+		t.Fatalf("fenced local runner renewed after delayed JobStarted: %+v %v", auth, err)
 	}
 }
 
@@ -97,7 +109,7 @@ func TestOfferConversionToHostedFencesExpiredUnstartedLocal(t *testing.T) {
 					t.Fatal("busy local runner was not marked started during fence")
 				}
 			} else {
-				if !c.fencedLocal[slot0.Runner] {
+				if !c.state.Leases[slot0.Runner].Local.Fenced {
 					t.Fatal("expired unstarted local runner was not fenced before offer-to-hosted conversion")
 				}
 				if w.dispatched != 1 {
@@ -125,15 +137,140 @@ func TestTransientFenceErrorRetriesWithoutPausingQueue(t *testing.T) {
 		t.Fatalf("expected retryable backoff without queue pause: paused=%v retryAt=%v dispatched=%d", c.paused, c.demandRetryAt, w.dispatched)
 	}
 
-	// Recover API and advance past retry window: fencing completes and hosted dispatches without restart.
+	// Recover API and advance past retry window using an elapsed timestamp (matching production timer expiry).
 	c.bootstrap = w
-	c.demandRetryAt = time.Time{}
+	c.demandRetryAt = time.Now().Add(-time.Second)
 	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if c.paused != nil || w.dispatched != 1 || !c.fencedLocal[request.Runner] {
-		t.Fatalf("expected fence + dispatch after transient recovery: paused=%v dispatched=%d fenced=%v", c.paused, w.dispatched, c.fencedLocal[request.Runner])
+	if c.paused != nil || w.dispatched != 1 || !c.state.Leases[request.Runner].Local.Fenced || !c.demandRetryAt.IsZero() {
+		t.Fatalf("expected fence + dispatch after transient recovery: paused=%v dispatched=%d fenced=%v retryAt=%v",
+			c.paused, w.dispatched, c.state.Leases[request.Runner].Local.Fenced, c.demandRetryAt)
 	}
+}
+
+func TestExpiredOfferConversionDoesNotDispatchHostedWithZeroLiveDemand(t *testing.T) {
+	c, w, _ := concurrentFixture(t, 2)
+	slot0 := issueLocal(t, c, 0, 1)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+		t.Fatal(err)
+	}
+	offer1 := c.device.pollNow(1)
+	if offer1 == nil {
+		t.Fatal("expected offer on slot 1")
+	}
+	c.state.Leases[slot0.Runner].Local.Expires = time.Now().Add(-time.Minute)
+	c.state.Leases[offer1.Runner].Local.Expires = time.Now().Add(-time.Second)
+	w.busy = false
+	w.assignedJobs = 0
+
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if !c.state.Leases[slot0.Runner].Local.Fenced {
+		t.Fatal("expected expired idle sibling fenced")
+	}
+	if w.dispatched != 0 {
+		t.Fatalf("expected 0 hosted dispatches when live scale-set demand is 0, got %d", w.dispatched)
+	}
+	if c.state.Leases[offer1.Runner] != nil {
+		t.Fatal("expected expired offer retired when live demand is 0")
+	}
+}
+
+func TestBusyCleanupEventOrderingsDoNotSpawnHosted(t *testing.T) {
+	t.Run("complete_before_job_started", func(t *testing.T) {
+		c, w, _, request := localFixture(t)
+		if _, err := c.acceptDevice(t.Context(), request); err != nil {
+			t.Fatal(err)
+		}
+		w.busy = true
+		w.assignedJobs = 1
+		if err := c.completeDevice(t.Context(), request); err != nil {
+			t.Fatal(err)
+		}
+		if !c.state.Leases[request.Runner].Local.JobStarted {
+			t.Fatal("expected busy completion to persist JobStarted")
+		}
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		if w.dispatched != 0 {
+			t.Fatalf("complete before JobStarted spawned hosted runner: %d", w.dispatched)
+		}
+	})
+
+	t.Run("job_started_then_busy_complete_retires_outstanding_offer", func(t *testing.T) {
+		c, w, _ := concurrentFixture(t, 2)
+		slot0 := issueLocal(t, c, 0, 1)
+		if err := c.HandleJobStarted(t.Context(), &scaleset.JobStarted{
+			RunnerName: slot0.Runner,
+			RunnerID:   c.state.Leases[slot0.Runner].RunnerID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 2); err != nil {
+			t.Fatal(err)
+		}
+		offer1 := c.device.pollNow(1)
+		if offer1 == nil {
+			t.Fatal("expected offer on slot 1")
+		}
+		w.busy = true
+		w.assignedJobs = 1
+		if err := c.completeDevice(t.Context(), slot0); err != nil {
+			t.Fatal(err)
+		}
+		// Expire the outstanding offer while only 1 job (the still-busy slot0) exists.
+		c.state.Leases[offer1.Runner].Local.Expires = time.Now().Add(-time.Second)
+		if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		if w.dispatched != 0 {
+			t.Fatalf("outstanding offer converted to hosted despite busy cleanup supply: %d", w.dispatched)
+		}
+		if c.state.Leases[offer1.Runner] != nil {
+			t.Fatal("expected surplus offer retired")
+		}
+	})
+}
+
+func TestRemoveRunnerUntypedErrorRetriesWithoutPausingQueue(t *testing.T) {
+	c, w, _, request := localFixture(t)
+	if _, err := c.acceptDevice(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	c.device.slots[0].availableUntil = time.Time{}
+	singleLease(c.state).Local.Expires = time.Now().Add(-time.Minute)
+	w.assignedJobs = 1
+
+	origRunners := c.runners
+	c.runners = failingRemoveRunnerAPI{origRunners, errors.New("unexpected status code: 500")}
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatalf("untyped RemoveRunner 5xx errored queue: %v", err)
+	}
+	if c.paused != nil || c.demandRetryAt.IsZero() || w.dispatched != 0 {
+		t.Fatalf("expected retryable backoff without queue pause: paused=%v retryAt=%v dispatched=%d", c.paused, c.demandRetryAt, w.dispatched)
+	}
+	// Restore runners API and let retry timer elapse: fencing succeeds and dispatches hosted.
+	c.runners = origRunners
+	c.demandRetryAt = time.Now().Add(-time.Second)
+	if _, err := c.HandleDesiredRunnerCount(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if c.paused != nil || !c.state.Leases[request.Runner].Local.Fenced || w.dispatched != 1 {
+		t.Fatalf("expected clean recovery after RemoveRunner 5xx: paused=%v fenced=%v dispatched=%d",
+			c.paused, c.state.Leases[request.Runner].Local.Fenced, w.dispatched)
+	}
+}
+
+type failingRemoveRunnerAPI struct {
+	runnerAPI
+	err error
+}
+
+func (f failingRemoveRunnerAPI) RemoveRunner(context.Context, int64) error {
+	return f.err
 }
 
 func TestBusyCompletionDoesNotTriggerPhantomHostedOverflow(t *testing.T) {

@@ -163,7 +163,7 @@ func reclaimPausesAndAbortsAllWhileAbortJobTargetsExactRunnerWithoutPausing() th
             return true
         },
         severNetwork: { _ in severed.withLock { $0 = true } },
-        applyCPUQuota: { _ in }
+        applyCPUQuota: { _, _ in }
     ))
 
     // Stale runner UUID is rejected cleanly.
@@ -448,7 +448,7 @@ func meetingModeBatteryGateTimerPreservationAndLiveThermalReconciliation() throw
     control.registerSlotHandler(worker: "linux-0", handler: AgentSlotControlHandler(
         abort: { _, _ in true },
         severNetwork: { _ in },
-        applyCPUQuota: { cpus in
+        applyCPUQuota: { cpus, _ in
             appliedQuotas.withLock { $0.append(cpus) }
             quotaEvent.signal()
         }
@@ -505,7 +505,7 @@ func sleepHandlerLatchesAbortFirstAndBoundsParallelRelaySevers() {
                 events.withLock { $0.append("sever-\(slot)") }
                 Thread.sleep(forTimeInterval: 1.5)
             },
-            applyCPUQuota: { _ in }
+            applyCPUQuota: { _, _ in }
         ))
     }
 
@@ -742,4 +742,141 @@ func idleWorkerUpdatesDoNotSpamStateChangeNotifications() throws {
     }
     Thread.sleep(forTimeInterval: 0.1)
     #expect(count.withLock { $0 } == baseline)
+}
+
+@Test
+func meetingModeQuotaWritesAreSerializedBoundToRunnerAndRestoredOnThermalAndTimerExpiry() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("quota-serial-\(UUID().uuidString)")
+    _ = try RunnerLeaseStore(directory: dir)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let thermal = Mutex(HostThermalState.nominal)
+    let now = Mutex(Date(timeIntervalSince1970: 4_000_000))
+    let control = ConnectedAgentControl(
+        directory: dir,
+        powerStatus: { HostPowerStatus(source: .ac, batteryPercent: 100, lowPowerMode: false, drainingOnAC: false) },
+        thermalState: { thermal.withLock { $0 } },
+        isDarkWake: { false },
+        currentDate: { now.withLock { $0 } },
+        notificationName: nil
+    )
+    control.markReady()
+    let memory = RunnerMemoryAdmission(physicalMemoryBytes: 48 * 1_024 * 1_024 * 1_024)
+    control.configure(workers: [ConnectedWorker(backend: .linux(containerURL: URL(fileURLWithPath: "/usr/bin/true")), slot: 0)], memory: memory)
+    #expect(control.beginAssignment(worker: "linux-0", platform: .linux, offer: testOfferLinux))
+
+    let firstStarted = DispatchSemaphore(value: 0)
+    let allowFirstFinish = DispatchSemaphore(value: 0)
+    let applied = Mutex<[(Int, String?)]>([])
+    let done = DispatchSemaphore(value: 0)
+    let blockFirst = Mutex(true)
+
+    control.registerSlotHandler(worker: "linux-0", handler: AgentSlotControlHandler(
+        abort: { _, _ in true },
+        severNetwork: { _ in },
+        applyCPUQuota: { cpus, runner in
+            if cpus == 2 && blockFirst.withLock({ $0 }) {
+                blockFirst.withLock { $0 = false }
+                firstStarted.signal()
+                _ = allowFirstFinish.wait(timeout: .now() + 5)
+            }
+            applied.withLock { $0.append((cpus, runner)) }
+            done.signal()
+        }
+    ))
+
+    // CPU-only change while Meeting Mode is OFF must not invoke applyCPUQuota.
+    _ = try control.request(try AgentControlRequest(action: "meeting-mode", cpus: 2).encodedCommand())
+    Thread.sleep(forTimeInterval: 0.05)
+    #expect(applied.withLock { $0 }.isEmpty)
+
+    // Enable Meeting Mode (2 vCPUs) and hold that write in flight while disabling Meeting Mode (4 vCPUs).
+    _ = try control.request(try AgentControlRequest(action: "meeting-mode", enabled: true, cpus: 2).encodedCommand())
+    #expect(firstStarted.wait(timeout: .now() + 2) == .success)
+    _ = try control.request(try AgentControlRequest(action: "meeting-mode", enabled: false).encodedCommand())
+    allowFirstFinish.signal()
+
+    #expect(done.wait(timeout: .now() + 2) == .success)
+    #expect(done.wait(timeout: .now() + 2) == .success)
+    let history = applied.withLock { $0 }
+    #expect(history.count == 2)
+    #expect(history[0].0 == 2 && history[0].1 == testOfferLinux.runner)
+    #expect(history[1].0 == 4 && history[1].1 == testOfferLinux.runner)
+
+    // Thermal hold-down expiry restores running Linux guest from 2 back to 4 vCPUs.
+    _ = try control.request(try AgentControlRequest(action: "meeting-mode", enabled: true, cpus: 4).encodedCommand())
+    #expect(done.wait(timeout: .now() + 2) == .success)
+    thermal.withLock { $0 = .fair }
+    control.reconcilePolicies()
+    #expect(done.wait(timeout: .now() + 2) == .success)
+    #expect(applied.withLock { $0.last?.0 } == 2)
+
+    thermal.withLock { $0 = .nominal }
+    now.withLock { $0 = $0.addingTimeInterval(601) }
+    control.reconcilePolicies()
+    #expect(done.wait(timeout: .now() + 2) == .success)
+    #expect(applied.withLock { $0.last?.0 } == 4)
+}
+
+@Test
+func timedMeetingModeExpiresAutomaticallyViaScheduledTimer() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("meeting-timer-\(UUID().uuidString)")
+    _ = try RunnerLeaseStore(directory: dir)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let control = ConnectedAgentControl(
+        directory: dir,
+        powerStatus: { HostPowerStatus(source: .ac, batteryPercent: 100, lowPowerMode: false, drainingOnAC: false) },
+        thermalState: { .nominal },
+        isDarkWake: { false },
+        notificationName: nil
+    )
+    control.markReady()
+    let memory = RunnerMemoryAdmission(physicalMemoryBytes: 48 * 1_024 * 1_024 * 1_024)
+    control.configure(workers: [ConnectedWorker(backend: .linux(containerURL: URL(fileURLWithPath: "/usr/bin/true")), slot: 0)], memory: memory)
+    #expect(control.beginAssignment(worker: "linux-0", platform: .linux, offer: testOfferLinux))
+
+    let restored = DispatchSemaphore(value: 0)
+    let applied = Mutex<[Int]>([])
+    control.registerSlotHandler(worker: "linux-0", handler: AgentSlotControlHandler(
+        abort: { _, _ in true },
+        severNetwork: { _ in },
+        applyCPUQuota: { cpus, _ in
+            applied.withLock { $0.append(cpus) }
+            if cpus == 4 { restored.signal() }
+        }
+    ))
+
+    _ = try control.request(try AgentControlRequest(action: "meeting-mode", durationSeconds: 0.1, enabled: true, cpus: 2).encodedCommand())
+    // Do NOT poll snapshot or canPoll — the scheduled timer must automatically expire and restore 4 vCPUs.
+    #expect(restored.wait(timeout: .now() + 3) == .success)
+    #expect(control.snapshot.meetingMode == false)
+    #expect(applied.withLock { $0.last } == 4)
+}
+
+@Test
+func foregroundSleepCoordinatorAbortsSeversAndEnforcesWakeHoldDown() throws {
+    let now = Mutex(Date(timeIntervalSince1970: 5_000_000))
+    let coordinator = ConnectedSleepCoordinator(currentDate: { now.withLock { $0 } })
+    let auth = ConnectedExecutionAuthorization(renew: { _, _ in true }, checkCancellation: {})
+    let severed = Mutex(false)
+    coordinator.register(worker: "linux-0", handler: AgentSlotControlHandler(
+        abort: { reason, expected in auth.abort(reason: reason, expectedRunner: expected) },
+        severNetwork: { _ in severed.withLock { $0 = true } },
+        applyCPUQuota: { _, _ in }
+    ))
+
+    // Prepare runner atomically before admission; sleep immediately after admission must abort it.
+    auth.prepare(runner: testOfferLinux.runner)
+    #expect(coordinator.beginAssignment())
+    coordinator.handleSystemWillSleep()
+    #expect(severed.withLock { $0 })
+    #expect(throws: ConnectedExecutionError.sleepInterrupted) { try auth.check() }
+    #expect(coordinator.isPausedForWake())
+    #expect(!coordinator.beginAssignment())
+
+    // Hold-down expires after 30s.
+    now.withLock { $0 = $0.addingTimeInterval(31) }
+    #expect(!coordinator.isPausedForWake())
+    #expect(coordinator.beginAssignment())
 }

@@ -63,7 +63,6 @@ type coordinator struct {
 	hostedBackoffDelay     time.Duration
 	lastBusyCheck          map[string]time.Time
 	jobStartedByEvent      map[string]bool
-	fencedLocal            map[string]bool
 }
 
 type assignment struct {
@@ -125,10 +124,10 @@ func (l *lease) countsAsSupply() bool {
 	if l.CleanupIntent {
 		// An uncompleted started local job waiting for GitHub to clear runnerBusy
 		// still accounts for 1 unit of TotalAssignedJobs and must not spawn extra runners.
-		return l.Local != nil && l.Local.JobStarted && !l.Local.JobCompleted
+		return l.Local != nil && l.Local.JobStarted && !l.Local.JobCompleted && !l.Local.Fenced
 	}
 	if local := l.Local; local != nil && local.Phase == localIssued {
-		if local.JobCompleted || (!local.JobStarted && local.expired()) {
+		if local.Fenced || local.JobCompleted || (!local.JobStarted && local.expired()) {
 			return false
 		}
 	}
@@ -184,11 +183,14 @@ func (c *coordinator) surplusAssignments(count int) map[string]bool {
 	for _, name := range c.names() {
 		l := c.state.Leases[name]
 		if l.CleanupIntent {
+			if l.countsAsSupply() {
+				count--
+			}
 			continue
 		}
 		if local := l.Local; local != nil && local.Phase == localIssued {
-			// Retired workers still hold their slots, but no longer satisfy demand.
-			if local.JobCompleted || (!local.JobStarted && local.expired()) {
+			// Retired or fenced workers still hold their slots, but no longer satisfy demand.
+			if local.Fenced || local.JobCompleted || (!local.JobStarted && local.expired()) {
 				continue
 			}
 			if !local.JobStarted {
@@ -238,7 +240,6 @@ func (a *assignment) replace(nextLease *lease) error {
 	if nextLease == nil && a.lease != nil {
 		delete(a.lastBusyCheck, a.lease.Name)
 		delete(a.jobStartedByEvent, a.lease.Name)
-		delete(a.fencedLocal, a.lease.Name)
 	}
 	*a.state = next
 	a.lease = nextLease
@@ -344,7 +345,8 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 	// A full hosted-only queue can observe and clean up its existing runs
 	// without a separate demand read. Cleanup wakes it when capacity returns.
 	fullHosted := c.state.Config.DeviceID == "" && c.fallbackFull()
-	if count > 0 && !fullHosted && !c.demandUnavailable && c.paused == nil && c.needsDemandRefresh() {
+	demandRefreshed := false
+	if count > 0 && !fullHosted && !c.demandUnavailable && c.paused == nil && (c.needsDemandRefresh() || !c.demandRetryAt.IsZero()) {
 		var err error
 		count, err = c.readPlacementDemand(ctx)
 		if err != nil {
@@ -352,6 +354,9 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		}
 		if ctx.Err() == context.DeadlineExceeded && !c.demandRetryAt.IsZero() {
 			return nil
+		}
+		if c.demandRetryAt.IsZero() {
+			demandRefreshed = true
 		}
 	}
 	var surplus map[string]bool
@@ -508,14 +513,14 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		c.device.forget(c.state.Owner)
 		return nil
 	}
-	if !c.needsDemandRefresh() && c.hasNonSupplyLease() {
+	if !demandRefreshed && c.hasNonSupplyLease() {
 		// Confirm real GitHub demand before provisioning replacement capacity
 		// alongside an unacknowledged completed or expired local lease.
 		refreshed, err := c.readPlacementDemand(ctx)
 		if err != nil {
 			return err
 		}
-		if ctx.Err() == context.DeadlineExceeded && !c.demandRetryAt.IsZero() {
+		if !c.demandRetryAt.IsZero() {
 			return nil
 		}
 		count = min(refreshed, maximumAssignments)
@@ -537,9 +542,12 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		if err != nil {
 			return err
 		}
-		if !ready || count <= c.supplyCount() || len(c.state.Leases) >= maximumAssignments*2 {
+		if !ready || count <= c.supplyCount() {
 			return nil
 		}
+	}
+	if len(c.state.Leases) >= maximumAssignments*2 {
+		return nil
 	}
 	if c.state.Config.LocalOnly {
 		c.device.wait(c.state.Owner)
@@ -562,9 +570,6 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 		}
 		return nil
 	}
-	if len(c.state.Leases) >= maximumAssignments*2 {
-		return nil
-	}
 	a := &assignment{coordinator: c}
 	if err := a.replace(l); err != nil {
 		return err
@@ -584,7 +589,7 @@ func (c *coordinator) reconcileAndProvision(ctx context.Context, count int) erro
 func (c *coordinator) hasUnfencedExpiredLocal() bool {
 	for _, name := range c.names() {
 		l := c.state.Leases[name]
-		if l != nil && !l.CleanupIntent && l.Local != nil && l.Local.Phase == localIssued && !l.Local.JobStarted && l.Local.expired() && !c.fencedLocal[name] {
+		if l != nil && !l.CleanupIntent && l.Local != nil && l.Local.Phase == localIssued && !l.Local.JobStarted && l.Local.expired() && !l.Local.Fenced {
 			return true
 		}
 	}
@@ -594,7 +599,7 @@ func (c *coordinator) hasUnfencedExpiredLocal() bool {
 func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) (ready bool, busyPromoted bool, err error) {
 	for _, name := range c.names() {
 		l := c.state.Leases[name]
-		if l == nil || l.CleanupIntent || l.Local == nil || l.Local.Phase != localIssued || l.Local.JobStarted || !l.Local.expired() || c.fencedLocal[name] {
+		if l == nil || l.CleanupIntent || l.Local == nil || l.Local.Phase != localIssued || l.Local.JobStarted || !l.Local.expired() || l.Local.Fenced {
 			continue
 		}
 		busy, err := c.bootstrap.runnerBusy(ctx, c.state.Config.Repository, l.RunnerID)
@@ -631,17 +636,19 @@ func (c *coordinator) fenceExpiredLocalForOverflow(ctx context.Context) (ready b
 			if ctx.Err() == context.Canceled {
 				return false, busyPromoted, ctx.Err()
 			}
-			if transientFailure(err) {
-				c.demandRetryAt = time.Now().Add(cleanupRetryDelay)
-				c.logger.Warn("Transient error fencing expired local runner before overflow; retrying", "runner", name, "retry_delay", cleanupRetryDelay, "error", err)
-				return false, busyPromoted, nil
-			}
-			return false, busyPromoted, &sdkError{"fence expired local runner", err}
+			// Scale Set SDK HTTP errors (including 5xx) are untyped errors; retry on demandRetryAt
+			// instead of permanently pausing the queue while local siblings are active.
+			c.demandRetryAt = time.Now().Add(cleanupRetryDelay)
+			c.logger.Warn("Failed to fence expired local runner before overflow; retrying", "runner", name, "retry_delay", cleanupRetryDelay, "error", &sdkError{"fence expired local runner", err})
+			return false, busyPromoted, nil
 		}
-		if c.fencedLocal == nil {
-			c.fencedLocal = make(map[string]bool)
+		next := *l.Local
+		next.Fenced = true
+		if err := c.assigned(name).saveLocal(&next); err != nil {
+			return false, busyPromoted, err
 		}
-		c.fencedLocal[name] = true
+		delete(c.lastBusyCheck, name)
+		delete(c.jobStartedByEvent, name)
 		c.logger.Warn("Expired unstarted local runner fenced before overflow", "runner", name, "device", l.Local.DeviceID)
 	}
 	return true, busyPromoted, nil

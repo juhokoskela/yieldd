@@ -150,9 +150,22 @@ func runConnectedService(
         }
         defer { archiveService?.stop() }
         let cacheSocket = archiveService?.socketURL
+        let sleepCoordinator = ConnectedSleepCoordinator()
         let powerMonitor = SystemPowerMonitor(
-            onWillSleep: { control?.handleSystemWillSleep() },
-            onDidWake: { control?.handleSystemDidWake() }
+            onWillSleep: {
+                if let control {
+                    control.handleSystemWillSleep()
+                } else {
+                    sleepCoordinator.handleSystemWillSleep()
+                }
+            },
+            onDidWake: {
+                if let control {
+                    control.handleSystemDidWake()
+                } else {
+                    sleepCoordinator.handleSystemDidWake()
+                }
+            }
         )
         _ = powerMonitor.start()
         defer { powerMonitor.stop() }
@@ -205,20 +218,31 @@ func runConnectedService(
                 initialLinuxCPUs: { control?.effectiveLinuxCPUs ?? AppleContainerBackend.virtualCPUs },
                 onWarning: { output.warning($0) })
             let activeRunnerID = OSAllocatedUnfairLock<RunnerID?>(initialState: nil)
-            control?.registerSlotHandler(worker: workerID, handler: AgentSlotControlHandler(
+            let slotHandler = AgentSlotControlHandler(
                 abort: { reason, expected in authorization.abort(reason: reason, expectedRunner: expected) },
                 severNetwork: { deadline in
                     if let id = activeRunnerID.withLock({ $0 }) {
                         severNetworkHandler(id, deadline)
                     }
                 },
-                applyCPUQuota: { cpus in
-                    if let id = activeRunnerID.withLock({ $0 }) {
-                        applyCPUQuotaHandler(cpus, id)
-                    }
+                applyCPUQuota: { cpus, expectedRunner in
+                    guard let id = activeRunnerID.withLock({ $0 }) else { return }
+                    if let expectedRunner, id.value != expectedRunner { return }
+                    applyCPUQuotaHandler(cpus, id)
                 }
-            ))
-            defer { control?.unregisterSlotHandler(worker: workerID) }
+            )
+            if let control {
+                control.registerSlotHandler(worker: workerID, handler: slotHandler)
+            } else {
+                sleepCoordinator.register(worker: workerID, handler: slotHandler)
+            }
+            defer {
+                if let control {
+                    control.unregisterSlotHandler(worker: workerID)
+                } else {
+                    sleepCoordinator.unregister(worker: workerID)
+                }
+            }
             let slotReservation = ConnectedSlotReservation()
             var platformBackoff: TimeInterval = 5
             while true {
@@ -236,14 +260,6 @@ func runConnectedService(
                         control?.update(worker: workerID, phase: .idle)
                         return try client.poll()
                     }, decline: client.decline, run: { offer, allocation, release in
-                        let id = RunnerID(value: offer.runner)
-                        activeRunnerID.withLock { $0 = id }
-                        authorization.prepare(runner: offer.runner)
-                        defer {
-                            authorization.stop()
-                            activeRunnerID.withLock { $0 = nil }
-                        }
-                        control?.assign(worker: workerID, offer: offer)
                         output.info("Accepting local \(platform.rawValue) runner \(offer.runner) for \(offer.repository).")
                         try runner.run(offer, memory: allocation, releaseCapacity: release)
                         platformBackoff = 5
@@ -254,9 +270,29 @@ func runConnectedService(
                     }, blocked: {
                         control?.update(worker: workerID, phase: .waitingForMemory)
                         output.info("Waiting for host memory for \(platform.rawValue). Local capacity is not being advertised; hosted fallback remains available.")
-                    }, paused: { !(control?.canPoll(platform: platform) ?? true) }, beginAssignment: {
-                        control?.beginAssignment(worker: workerID, platform: platform) ?? true
+                    }, paused: {
+                        if let control { return !control.canPoll(platform: platform) }
+                        return sleepCoordinator.isPausedForWake()
+                    }, beginOfferAssignment: { offer in
+                        // Register the runner UUID and authorization target BEFORE exposing the slot
+                        // as active so a concurrent sleep or reclaim can never be dropped.
+                        let id = RunnerID(value: offer.runner)
+                        activeRunnerID.withLock { $0 = id }
+                        authorization.prepare(runner: offer.runner)
+                        let admitted: Bool
+                        if let control {
+                            admitted = control.beginAssignment(worker: workerID, platform: platform, offer: offer)
+                        } else {
+                            admitted = sleepCoordinator.beginAssignment()
+                        }
+                        if !admitted {
+                            authorization.stop()
+                            activeRunnerID.withLock { $0 = nil }
+                        }
+                        return admitted
                     }, finishAssignment: {
+                        authorization.stop()
+                        activeRunnerID.withLock { $0 = nil }
                         control?.finishAssignment(worker: workerID)
                     }, slotReservation: slotReservation)
                     return
@@ -267,11 +303,15 @@ func runConnectedService(
                 } catch {
                     // Contain platform/pre-start errors (e.g., macOS 2-VM limit) to this slot
                     // instead of tearing down healthy sibling slots across the pool.
-                    // If no persisted lease remains, release assignment/memory immediately before backing off.
-                    if (try? store.load()) == nil {
-                        slotReservation.release(using: memory.release)
-                        control?.finishAssignment(worker: workerID)
-                    }
+                    // Release capacity only when store.load() succeeds and confirms no persisted lease.
+                    do {
+                        if try store.load() == nil {
+                            slotReservation.release(using: memory.release)
+                            authorization.stop()
+                            activeRunnerID.withLock { $0 = nil }
+                            control?.finishAssignment(worker: workerID)
+                        }
+                    } catch {}
                     let message = "Paused \(platform.rawValue) slot \(worker.slot) for \(Int(platformBackoff))s after error: \(describeError(error))"
                     output.warning(message)
                     control?.connection(worker: workerID, state: .retrying, error: message)

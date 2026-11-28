@@ -32,6 +32,7 @@ type localLease struct {
 	JobStarted    bool       `json:"job_started,omitempty"`
 	JobCompleted  bool       `json:"job_completed,omitempty"`
 	JobSucceeded  bool       `json:"job_succeeded,omitempty"`
+	Fenced        bool       `json:"fenced,omitempty"`
 	WorkflowRunID int64      `json:"workflow_run_id,omitempty"`
 }
 
@@ -211,6 +212,9 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 	if result := l.jobResult(request.Slot); result != resultPending {
 		return &deviceAuthorization{JobSucceeded: result == resultSucceeded, WorkflowRunID: runID}, nil
 	}
+	if l.Local.Fenced {
+		return &deviceAuthorization{Continue: false, WorkflowRunID: runID}, nil
+	}
 	if l.Local.JobStarted && !a.demandUnavailable && a.jobStartedByEvent[l.Name] && time.Since(a.lastBusyCheck[l.Name]) < busyCheckInterval {
 		return &deviceAuthorization{Continue: true, WorkflowRunID: runID}, nil
 	}
@@ -239,7 +243,7 @@ func (a *assignment) renew(ctx context.Context, request deviceRequest) (*deviceA
 		// time, but let the Mac's offline grace absorb temporary inconsistency.
 		return nil, &deviceError{status: http.StatusServiceUnavailable, message: "GitHub has not confirmed an active runner; execution authorization was not renewed"}
 	}
-	return &deviceAuthorization{Continue: !l.Local.expired() && !a.fencedLocal[l.Name], WorkflowRunID: runID}, nil
+	return &deviceAuthorization{Continue: !l.Local.expired(), WorkflowRunID: runID}, nil
 }
 
 type localJobEvent uint8
@@ -255,8 +259,11 @@ func (a *assignment) recordLocalJob(id int, workflowRunID int64, event localJobE
 	if l == nil || l.Local == nil || l.Local.Phase != localIssued || l.RunnerID != id {
 		return nil
 	}
-	if l.CleanupIntent && event == jobStarted {
-		return nil
+	if l.Local.Fenced {
+		// A fenced runner is permanently revoked; a delayed start event must never reauthorize it.
+		if event == jobStarted {
+			return nil
+		}
 	}
 	next := *l.Local
 	next.JobStarted = true
@@ -267,7 +274,7 @@ func (a *assignment) recordLocalJob(id int, workflowRunID int64, event localJobE
 		next.JobCompleted = true
 		next.JobSucceeded = event == jobSucceeded
 	}
-	if event == jobStarted {
+	if event == jobStarted && !l.CleanupIntent && !l.Local.Fenced {
 		if a.jobStartedByEvent == nil {
 			a.jobStartedByEvent = make(map[string]bool)
 		}
@@ -303,6 +310,15 @@ func (a *assignment) complete(ctx context.Context, request deviceRequest) error 
 	}
 	_, err := a.finishCleanup(ctx, true)
 	if errors.Is(err, runnerStillBusy) {
+		if a.lease != nil && a.lease.Local != nil && a.lease.Local.Phase == localIssued && !a.lease.Local.JobStarted && !a.lease.Local.Fenced {
+			// GitHub confirmed the runner is busy; record JobStarted so countsAsSupply
+			// and surplusAssignments account for it until JobCompleted / idle.
+			next := *a.lease.Local
+			next.JobStarted = true
+			if saveErr := a.saveLocal(&next); saveErr != nil {
+				return saveErr
+			}
+		}
 		a.logger.Info("Local cleanup recorded; waiting asynchronously for GitHub runner to become idle before removal", "runner", l.Name)
 		a.device.redrive(a.state.Owner)
 		return nil
@@ -340,30 +356,33 @@ func (a *assignment) reconcileLocal(ctx context.Context, recoverOnly bool) (bool
 	if !expired {
 		return false, nil
 	}
+	busyPromoted := false
 	if a.hasUnfencedExpiredLocal() {
-		ready, busyPromoted, err := a.fenceExpiredLocalForOverflow(ctx)
+		var ready bool
+		var err error
+		ready, busyPromoted, err = a.fenceExpiredLocalForOverflow(ctx)
 		if err != nil {
 			return false, err
 		}
 		if !ready {
 			return false, nil
 		}
-		if busyPromoted {
-			count, err := a.readPlacementDemand(ctx)
-			if err != nil {
+	}
+	if busyPromoted || a.hasNonSupplyLease() {
+		count, err := a.readPlacementDemand(ctx)
+		if err != nil {
+			return false, err
+		}
+		if !a.demandRetryAt.IsZero() {
+			return false, nil
+		}
+		// Supply count includes this expired offer, so subtract 1 to check whether
+		// remaining active runners already cover current demand.
+		if count <= a.supplyCount()-1 {
+			if err := a.beginCleanup(""); err != nil {
 				return false, err
 			}
-			if !a.demandRetryAt.IsZero() {
-				return false, nil
-			}
-			// Supply count includes this expired offer, so subtract 1 to check whether
-			// remaining active runners already cover current demand.
-			if count <= a.supplyCount()-1 {
-				if err := a.beginCleanup(""); err != nil {
-					return false, err
-				}
-				return a.finishCleanup(ctx, true)
-			}
+			return a.finishCleanup(ctx, true)
 		}
 	}
 	// An expired, unaccepted offer never carried credentials. Convert it to hosted provisioning.
